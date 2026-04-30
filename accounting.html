@@ -2207,17 +2207,11 @@
             </div>
           </div>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-          <div class="field">
-            <label>Bank Account</label>
-            <select id="paySchedBank"><option value="">— Any Bank —</option></select>
-          </div>
-          <div class="field" id="paySchedStatusRow" style="display:none;">
+        <div class="field" id="paySchedStatusRow" style="display:none;">
             <label>Status</label>
             <span id="paySchedStatusBadge" style="display:inline-block;padding:4px 12px;border-radius:999px;font-size:12px;font-weight:700;"></span>
             <input type="hidden" id="paySchedStatus">
           </div>
-        </div>
         <div class="field">
           <label>Notes (optional)</label>
           <input type="text" id="paySchedNotes" placeholder="Optional notes…">
@@ -2243,7 +2237,10 @@
       </div>
       <div style="overflow-y:auto;padding:20px 24px;flex:1;display:flex;flex-direction:column;gap:14px;">
         <div class="field">
-          <label>Payment Method</label>
+          <label>Bank Account</label>
+          <select id="paySchedBank"><option value="">— Any Bank —</option></select>
+        </div>
+        <div class="field">
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button type="button" class="ps-pm-btn" id="psPmBtn-Check"        onclick="togglePsPaymentMethod_('Check')"        style="padding:6px 14px;border-radius:999px;border:1.5px solid var(--line);font-size:12px;font-weight:700;cursor:pointer;background:#fff;color:var(--ink);">✏ Check</button>
             <button type="button" class="ps-pm-btn" id="psPmBtn-Bank Transfer" onclick="togglePsPaymentMethod_('Bank Transfer')" style="padding:6px 14px;border-radius:999px;border:1.5px solid var(--line);font-size:12px;font-weight:700;cursor:pointer;background:#fff;color:var(--ink);">🏦 Bank Transfer</button>
@@ -9199,13 +9196,6 @@
       const deleteBtn = document.getElementById('paySchedDeleteBtn');
       if (titleEl)   titleEl.textContent = id ? 'Edit Payment Schedule' : 'Add Payment Schedule';
       if (deleteBtn) deleteBtn.style.display = id ? 'inline-flex' : 'none';
-      // Populate bank options
-      const bankSel = document.getElementById('paySchedBank');
-      if (bankSel && typeof ACCOUNTS !== 'undefined') {
-        const banks = ACCOUNTS.filter(a => isBankAccountType_(a.accountType) && !isCreditLine_(a));
-        bankSel.innerHTML = '<option value="">— Any Bank —</option>'
-          + banks.map(b => `<option value="${escapeH(b.accountCode)}">${escapeH(b.accountCode + ' – ' + (b.accountName||''))}</option>`).join('');
-      }
       // Populate contact datalist
       const dl = document.getElementById('paySchedContactDatalist');
       if (dl && typeof ALL_CONTACTS !== 'undefined') {
@@ -9230,7 +9220,6 @@
           document.getElementById('paySchedStartDate').value = toLocalDateStr_(s.startDate || s.dueDate || '');
           document.getElementById('paySchedEndDate').value   = toLocalDateStr_(s.endDate   || '');
           document.getElementById('paySchedDueDate').value   = toLocalDateStr_(s.dueDate   || '');
-          document.getElementById('paySchedBank').value      = s.bankCode  || '';
           document.getElementById('paySchedNotes').value     = s.notes     || '';
           // Status: read-only display (derived from linked voucher, not user-editable)
           const _st = s.status || 'Pending';
@@ -9291,7 +9280,6 @@
         startDate:  startDate || '',
         endDate:    !isOneTime ? (document.getElementById('paySchedEndDate').value.trim() || '') : '',
         dueDate:    isOneTime ? dueDate : startDate,
-        bankCode:   document.getElementById('paySchedBank').value,
         status:     _editingPaySchedId
                       ? (ALL_PAYMENT_SCHEDULES.find(x => String(x.id) === String(_editingPaySchedId))?.status || 'Pending')
                       : 'Pending',
@@ -9303,6 +9291,7 @@
         ? (ALL_PAYMENT_SCHEDULES.find(function(x) { return String(x.id) === String(_editingPaySchedId); }) || {})
         : {};
       payload.paymentMethod   = _existPm.paymentMethod   || '';
+      payload.bankCode        = _existPm.bankCode        || '';
       payload.pmCheckNo       = _existPm.pmCheckNo       || '';
       payload.pmCheckDate     = _existPm.pmCheckDate     || '';
       payload.pmCheckBank     = _existPm.pmCheckBank     || '';
@@ -9341,6 +9330,14 @@
       if (!s) return;
       _psPmEditId = id;
       document.getElementById('pspm-modal-name').textContent = s.title || '';
+      // Populate bank account dropdown
+      var bankSel = document.getElementById('paySchedBank');
+      if (bankSel && typeof ACCOUNTS !== 'undefined') {
+        var banks = ACCOUNTS.filter(function(a) { return isBankAccountType_(a.accountType) && !isCreditLine_(a); });
+        bankSel.innerHTML = '<option value="">\u2014 Any Bank \u2014</option>'
+          + banks.map(function(b) { return '<option value="' + escapeH(b.accountCode) + '">' + escapeH(b.accountCode + ' \u2013 ' + (b.accountName||'')) + '</option>'; }).join('');
+      }
+      if (bankSel) bankSel.value = s.bankCode || '';
       // Set non-check fields immediately (they're always in the DOM)
       document.getElementById('paySchedPmBtBank').value     = s.pmBtBank    || '';
       document.getElementById('paySchedPmBtRefNo').value    = s.pmBtRefNo   || '';
@@ -9407,6 +9404,7 @@
       existing.pmBtBank        = document.getElementById('paySchedPmBtBank').value.trim();
       existing.pmBtRefNo       = document.getElementById('paySchedPmBtRefNo').value.trim();
       existing.pmAdaDay        = parseInt(document.getElementById('paySchedPmAdaDay').value) || '';
+      existing.bankCode        = (document.getElementById('paySchedBank') || {}).value || '';
       function doSavePm() {
         callServer_('savePaymentSchedule', [existing], {
           onSuccess: function() { closePsPayMethodModal(); renderPayScheduleView_(); toast('Payment method saved!'); },
