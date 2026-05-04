@@ -3601,8 +3601,12 @@
             `</div>`;
         } else {
           panel.innerHTML =
+            `<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">` +
             `<div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Bank Account</label>` +
-            `<input class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-300" placeholder="Account name or number" value="${escapeH(asset.pmBtBank||'')}" onchange="fapmField_('pmBtBank',this.value)" /></div>`;
+            `<input class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-300" placeholder="Account name or number" value="${escapeH(asset.pmBtBank||'')}" onchange="fapmField_('pmBtBank',this.value)" /></div>` +
+            `<div class="flex items-end pb-1"><label class="flex items-start gap-2.5 cursor-pointer select-none">` +
+            `<input type="checkbox" class="w-4 h-4 mt-0.5 accent-amber-600 flex-shrink-0" ${asset.pmAutoVoucher ? 'checked' : ''} onchange="fapmField_('pmAutoVoucher',this.checked)" />` +
+            `<div><span class="block text-sm font-semibold text-gray-700">Auto-create voucher</span><span class="text-[11px] text-gray-400">Draft Asset Voucher on payment date.</span></div></label></div></div>`;
         }
       }
 

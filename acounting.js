@@ -3979,7 +3979,7 @@ const FA_ASSET_COLS_ = [
   'IsInstallment','InstallmentPrincipal','InstallmentStartDate',
   'InstallmentTermMonths','InstallmentAnnualRate','InstallmentMethod',
   'InstallmentPayableAccount','InstallmentAmortizationAccount',
-  'PaymentMethod','PMChecks','PMAdaDay','PMAdaBank',
+  'PaymentMethod','PMChecks','PMAdaDay','PMAdaBank','PMBtBank','PMAutoVoucher',
   'UpdatedAt','UpdatedBy'
 ];
 
@@ -4142,8 +4142,10 @@ function saveFixedAssets(jsonData) {
           a.installmentAmortizationAccount || '',
           a.paymentMethod || 'Check',
           JSON.stringify(a.pmChecks || []),
-          a.pmAdaDay  || '',
-          (a.pmAdaBank || a.pmBtBank || ''),
+          a.pmAdaDay   || '',
+          a.pmAdaBank  || '',
+          a.pmBtBank   || '',
+          a.pmAutoVoucher ? 'TRUE' : 'FALSE',
           now,
           email
         ];
@@ -4200,8 +4202,9 @@ function loadFixedAssets() {
         paymentMethod: String(g(row, 'PaymentMethod') || 'Check'),
         pmChecks:      (function() { try { return JSON.parse(g(row, 'PMChecks') || '[]'); } catch(e) { return []; } })(),
         pmAdaDay:      Number(g(row, 'PMAdaDay'))  || '',
-        pmAdaBank:     String(g(row, 'PMAdaBank') || ''),
-        pmBtBank:      String(g(row, 'PMAdaBank') || '')  // aliased — same column
+        pmAdaBank:     String(g(row, 'PMAdaBank')  || ''),
+        pmBtBank:      String(g(row, 'PMBtBank')   || ''),
+        pmAutoVoucher: g(row, 'PMAutoVoucher') === 'TRUE' || g(row, 'PMAutoVoucher') === true
       });
     });
     return JSON.stringify({ assets: assets });
