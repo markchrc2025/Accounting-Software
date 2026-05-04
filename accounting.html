@@ -1620,6 +1620,7 @@
       </div>
       <div class="modal-f" style="display:flex;">
          <button class="btn danger" id="btnViewVoid">Void Voucher</button>
+         <button class="btn ghost" id="btnViewRestore" style="color:#f97316;border:1px solid #fed7aa;display:none;">↩ Restore Voucher</button>
          <button class="btn dark" id="btnViewEdit">Edit</button>
          <div style="flex-grow:1;"></div>
          <button class="btn ghost" onclick="closeViewVoucherModal()">Close</button>
@@ -2731,13 +2732,11 @@
         const isEdit   = Boolean(assetId);
         const existing = isEdit ? faState.assets.find(a => a.id === assetId) : null;
         const newId    = isEdit ? (existing ? existing.id : assetId) : nextFaAssetId_();
-        // Populate Asset Type from RAW_SETTINGS.ASSET_TYPE
-        const assetTypesCsv = (RAW_SETTINGS && RAW_SETTINGS['ASSET_TYPE']) ? String(RAW_SETTINGS['ASSET_TYPE']) : '';
-        const assetTypeList = assetTypesCsv.split(',').map(s => s.trim()).filter(Boolean);
+        // Populate Asset Type from the Asset Types tab (faState.types)
         let typeOpts = '<option value="">— None —</option>';
-        assetTypeList.forEach(t => {
-          const sel = existing && existing.assetType === t ? ' selected' : '';
-          typeOpts += `<option value="${escapeH(t)}"${sel}>${escapeH(t)}</option>`;
+        (faState.types || []).forEach(t => {
+          const sel = existing && (existing.assetTypeId === t.id || existing.assetType === t.name) ? ' selected' : '';
+          typeOpts += `<option value="${escapeH(t.name)}"${sel}>${escapeH(t.name)}</option>`;
         });
         const e = existing || {};
         document.getElementById('fa-asset-modal-title').textContent     = isEdit ? 'Edit Asset' : 'New Fixed Asset';
@@ -3898,7 +3897,8 @@
         const contactCell = contacts.length > 1
           ? `<span class="multi-badge" title="${escapeH(rawContact)}">Multi (${contacts.length})</span>`
           : escapeH(contacts[0] || '');
-        return `<tr><td style="text-align:center;"><input type="checkbox" class="voucher-chk" value="${r.VoucherId}" onchange="updateBulkToolbar()"></td><td><a href="javascript:void(0)" onclick="openViewVoucherModal('${r.VoucherId}')" style="font-weight:900; color:var(--accent); text-decoration:underline; cursor:pointer;">${r.VoucherId}</a></td><td>${escapeH(r.VoucherType || '')}</td><td>${dStr}</td><td>${contactCell}</td><td style="text-align:right;">${fmtPHP(r.TotalAmount)}</td><td><span class="${pillClass(r.Status)}">${escapeH(r.Status)}</span></td><td class="row-actions relative" style="text-align:center;"><button class="btn ghost" style="padding: 4px 10px; font-weight: 800;" onclick="toggleMenu(event, '${r.VoucherId}')">⋮</button><div class="dropdown-menu" id="menu-${r.VoucherId}"><a href="javascript:void(0)" onclick="onEditVoucher('${r.VoucherId}')">Edit</a><a href="javascript:void(0)" onclick="onDuplicateVoucher('${r.VoucherId}')">📋 Duplicate</a><a href="javascript:void(0)" onclick="onDownloadPdf('${r.VoucherId}')">📄 Download PDF</a>${['PAYROLL','FINAL_PAY'].includes(r.VoucherType) ? '' : `<a href="javascript:void(0)" onclick="onSubmitApproval('${r.VoucherId}')">Submit for Approval</a>`}<a href="javascript:void(0)" class="danger-text" onclick="onVoid('${r.VoucherId}')">Void</a></div></td></tr>`;
+        const isVoided = String(r.Status).toLowerCase() === 'voided';
+        return `<tr><td style="text-align:center;"><input type="checkbox" class="voucher-chk" value="${r.VoucherId}" onchange="updateBulkToolbar()"></td><td><a href="javascript:void(0)" onclick="openViewVoucherModal('${r.VoucherId}')" style="font-weight:900; color:var(--accent); text-decoration:underline; cursor:pointer;">${r.VoucherId}</a></td><td>${escapeH(r.VoucherType || '')}</td><td>${dStr}</td><td>${contactCell}</td><td style="text-align:right;">${fmtPHP(r.TotalAmount)}</td><td><span class="${pillClass(r.Status)}">${escapeH(r.Status)}</span></td><td class="row-actions relative" style="text-align:center;"><button class="btn ghost" style="padding: 4px 10px; font-weight: 800;" onclick="toggleMenu(event, '${r.VoucherId}')">⋮</button><div class="dropdown-menu" id="menu-${r.VoucherId}"><a href="javascript:void(0)" onclick="onEditVoucher('${r.VoucherId}')">Edit</a><a href="javascript:void(0)" onclick="onDuplicateVoucher('${r.VoucherId}')">📋 Duplicate</a><a href="javascript:void(0)" onclick="onDownloadPdf('${r.VoucherId}')">📄 Download PDF</a>${['PAYROLL','FINAL_PAY'].includes(r.VoucherType) ? '' : `<a href="javascript:void(0)" onclick="onSubmitApproval('${r.VoucherId}')">Submit for Approval</a>`}${isVoided ? `<a href="javascript:void(0)" style="color:#f97316;font-weight:700;" onclick="onRestore('${r.VoucherId}')">↩ Restore</a>` : `<a href="javascript:void(0)" class="danger-text" onclick="onVoid('${r.VoucherId}')">Void</a>`}</div></td></tr>`;
       }).join('');
       updateBulkToolbar();
       renderVoucherPagination();
@@ -4005,14 +4005,16 @@
         document.getElementById('vvJeCr').textContent = fmtPHP(jeCr);
 
         const status = String(h.Status).toLowerCase();
-        const btnEdit = document.getElementById('btnViewEdit'); const btnSubmit = document.getElementById('btnViewSubmit'); const btnVoid = document.getElementById('btnViewVoid');
+        const btnEdit = document.getElementById('btnViewEdit'); const btnSubmit = document.getElementById('btnViewSubmit'); const btnVoid = document.getElementById('btnViewVoid'); const btnRestore = document.getElementById('btnViewRestore');
         btnEdit.style.display = ['paid', 'voided', 'in disbursement'].includes(status) ? 'none' : 'inline-block';
         btnSubmit.style.display = ['pending', 'rejected'].includes(status) ? 'inline-block' : 'none';
         btnVoid.style.display = ['paid', 'voided', 'in disbursement'].includes(status) ? 'none' : 'inline-block';
+        btnRestore.style.display = status === 'voided' ? 'inline-block' : 'none';
 
         btnEdit.onclick = () => { closeViewVoucherModal(); onEditVoucher(h.VoucherId); };
         btnSubmit.onclick = () => { closeViewVoucherModal(); onSubmitApproval(h.VoucherId); };
         btnVoid.onclick = () => { if(confirm(`Are you sure you want to void Voucher ${h.VoucherId}?`)) { closeViewVoucherModal(); onVoid(h.VoucherId); } };
+        btnRestore.onclick = () => { if(confirm(`Restore Voucher ${h.VoucherId}? It will be sent for approval before becoming editable.`)) { closeViewVoucherModal(); onRestore(h.VoucherId); } };
     }
 
     function renderApprovalsTable() {
@@ -6658,6 +6660,7 @@
 
     function onMarkPaid(id){ const menu = document.getElementById('menu-'+id); if(menu) menu.classList.remove('show'); callServer_('updateVoucherStatus', [id, 'Paid'], { onSuccess: () => { toast('Marked as Paid'); refreshAllData(); }, onFailure: (err) => toast(String(err)) }); }
     function onVoid(id){ const menu = document.getElementById('menu-'+id); if(menu) menu.classList.remove('show'); callServer_('updateVoucherStatus', [id, 'Voided'], { onSuccess: () => { toast('Voucher voided'); refreshAllData(); }, onFailure: (err) => toast(String(err)) }); }
+    function onRestore(id){ const menu = document.getElementById('menu-'+id); if(menu) menu.classList.remove('show'); toast('Restoring voucher and notifying approver...'); callServer_('restoreVoucher', [id], { onSuccess: () => { toast('Voucher restored — sent for approval'); refreshAllData(); }, onFailure: (err) => toast('Error: ' + String(err)) }); }
     function onBulkMarkPosted() { toast('Mark as Posted for ' + document.querySelectorAll('.voucher-chk:checked').length + ' vouchers (Coming soon)'); }
     function onBulkVoid() { toast('Bulk Voiding ' + document.querySelectorAll('.voucher-chk:checked').length + ' vouchers (Coming soon)'); }
 
@@ -7279,7 +7282,9 @@
         if (field === 'loanType') {
             if (value === 'Balloon Loan' && loan.interestMethod !== 'Balloon') {
                 loan.interestMethod = 'Balloon';
-            } else if (value !== 'Balloon Loan' && loan.interestMethod === 'Balloon') {
+            } else if (value === 'Revolving Credit' && loan.interestMethod === 'Balloon') {
+                loan.interestMethod = 'Fixed';
+            } else if (value !== 'Balloon Loan' && value !== 'Revolving Credit' && loan.interestMethod === 'Balloon') {
                 loan.interestMethod = 'Fixed';
             }
         }
@@ -7322,6 +7327,10 @@
         const P = loan.principal || 0;
         const r = (loan.annualRate || 0) / 100 / 12;
         if (P <= 0) return { principal: 0, interest: 0, balance: 0 };
+        // Revolving Credit: interest-only, principal balance never amortizes
+        if (loan.loanType === 'Revolving Credit') {
+            return { principal: 0, interest: P * r, balance: P };
+        }
         if (loan.interestMethod === 'Balloon') {
             const interest   = P * r;
             const isLastMonth = elapsed === term - 1;

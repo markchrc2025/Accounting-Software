@@ -233,6 +233,15 @@ function getRoleEmails_(roleSubstring) {
 
 function getActionUser_() { const email = Session.getActiveUser().getEmail(); const access = getUserAccess_(email); return access ? access.fullName : email; }
 
+function getEmailByDisplayName_(displayName) {
+  if (!displayName) return null;
+  const users = getCentralSheetData_('Users');
+  const name = String(displayName).trim().toLowerCase();
+  const match = users.find(u => String(u['Full Name'] || '').trim().toLowerCase() === name);
+  if (!match) return null;
+  return String(match['Work Email'] || match['Email'] || '').trim() || null;
+}
+
 // --- FIXED: ADDED JOURNALLINES FETCH ---
 function getDashboardData() {
     var _errors = [];
@@ -1864,7 +1873,7 @@ function processWeeklyProjectionApprovals(payload) {
       pSheet.getRange(i + 1, pHeaders.indexOf('RejectReason') + 1).setValue(reason || 'No reason provided');
       if (createdBy) {
         const body = `<div style="font-family:Arial,sans-serif;padding:30px;background-color:#f4f4f4;"><div style="max-width:500px;margin:0 auto;background:#fff;border-top:4px solid #d93025;padding:30px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><h2 style="color:#d93025;margin-top:0;">Weekly Projection Returned</h2><p style="color:#555;">Projection <b>${pId}</b> has been returned for correction.</p><div style="background:#fff3cd;padding:15px;border-left:4px solid #856404;margin:20px 0;"><p style="margin:0;color:#856404;"><b>Reason:</b> ${escapeHtml_(reason || '')}</p></div><div style="text-align:center;"><a href="${webAppUrl}" style="display:inline-block;background:#0b1220;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;font-size:14px;">Open Dashboard</a></div></div></div>`;
-        MailApp.sendEmail({ to: createdBy, subject: `REJECTED: Weekly Projection ${pId} returned for correction`, htmlBody: body });
+        MailApp.sendEmail({ to: getEmailByDisplayName_(createdBy) || createdBy, subject: `REJECTED: Weekly Projection ${pId} returned for correction`, htmlBody: body });
       }
     }
   }
@@ -2220,6 +2229,64 @@ function updateVoucherStatus(id, status) {
   return true;
 }
 
+/**
+ * Restore a Voided voucher back to the approval queue.
+ * Clears prior approval stamps and routes to Pending Review (if reviewer exists)
+ * or Pending Approval (if only an approver is configured), then emails the next approver.
+ */
+function restoreVoucher(id) {
+  const vSheet = getTargetSheet_('Vouchers');
+  const headers = ensureVouchersHeaders_(vSheet);
+  const vData = vSheet.getDataRange().getValues();
+
+  const reviewerEmails = getRoleEmails_('REVIEWER');
+  const approverEmails = getRoleEmails_('APPROVER');
+  let targetEmails = [];
+  let nextStatus = '';
+  if (reviewerEmails.length > 0) {
+    targetEmails = reviewerEmails;
+    nextStatus = 'Pending Review';
+  } else if (approverEmails.length > 0) {
+    targetEmails = approverEmails;
+    nextStatus = 'Pending Approval';
+  } else {
+    throw new Error('No Reviewer or Approver configured in Users sheet.');
+  }
+
+  const idIdx         = headers.indexOf('VoucherId');
+  const statusIdx     = headers.indexOf('Status');
+  const reviewedByIdx = headers.indexOf('ReviewedBy');
+  const approvedByIdx = headers.indexOf('ApprovedBy');
+  const updatedAtIdx  = headers.indexOf('UpdatedAt');
+  const updatedByIdx  = headers.indexOf('UpdatedBy');
+
+  let found = false;
+  for (let i = 1; i < vData.length; i++) {
+    if (vData[i][idIdx] !== id) continue;
+    const currentStatus = String(vData[i][statusIdx] || '').trim();
+    if (currentStatus !== 'Voided') throw new Error(`Voucher ${id} is not Voided (current: ${currentStatus}).`);
+
+    const row = i + 1;
+    const email = Session.getActiveUser().getEmail();
+    const now = new Date();
+    vSheet.getRange(row, statusIdx + 1).setValue(nextStatus);
+    if (reviewedByIdx >= 0) vSheet.getRange(row, reviewedByIdx + 1).setValue('');
+    if (approvedByIdx >= 0) vSheet.getRange(row, approvedByIdx + 1).setValue('');
+    vSheet.getRange(row, updatedAtIdx + 1).setValue(now);
+    vSheet.getRange(row, updatedByIdx + 1).setValue(email);
+    found = true;
+    break;
+  }
+  if (!found) throw new Error('Voucher ID not found.');
+
+  if (targetEmails.length > 0) {
+    const url = ScriptApp.getService().getUrl() + '?view=approvals';
+    const body = `<div style="font-family:Arial,sans-serif; padding:30px; background-color:#f4f4f4;"><div style="max-width:500px; margin:0 auto; background:#fff; padding:30px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.1); text-align:center;"><h2 style="color:#f97316; margin-top:0;">Voucher Restore — Approval Required</h2><p style="color:#555; font-size:16px;">Voucher <b>${id}</b> has been restored from Voided status and requires your ${nextStatus === 'Pending Review' ? 'review' : 'approval'}.</p><br><a href="${url}" style="display:inline-block; background:#188038; color:#fff; padding:12px 24px; text-decoration:none; border-radius:6px; font-weight:bold; font-size:14px;">Open Approval Dashboard</a></div></div>`;
+    MailApp.sendEmail({ to: targetEmails.join(','), subject: `ACTION REQUIRED: Restored Voucher ${id} needs your ${nextStatus === 'Pending Review' ? 'review' : 'approval'}`, htmlBody: body });
+  }
+  return true;
+}
+
 // Update incentive status to 'Released' when voucher is paid or released
 function updateIncentiveStatusWhenVoucherPaid_(voucherId) {
   try {
@@ -2362,7 +2429,7 @@ function processApprovals(payload) {
   for (let i = 1; i < vData.length; i++) {
     const vId = vData[i][headers.indexOf('VoucherId')];
     if (voucherIds.includes(vId)) {
-      const currentStatus = vData[i][headers.indexOf('Status')]; const preparerEmail = vData[i][headers.indexOf('CreatedBy')];
+      const currentStatus = vData[i][headers.indexOf('Status')]; const preparerName = vData[i][headers.indexOf('CreatedBy')]; const preparerEmail = getEmailByDisplayName_(preparerName) || preparerName;
       if (action === 'approve') {
          if (currentStatus === 'Pending Review') { vSheet.getRange(i + 1, headers.indexOf('Status') + 1).setValue('Pending Approval'); vSheet.getRange(i + 1, headers.indexOf('ReviewedBy') + 1).setValue(email); toApproverCount++; } else if (currentStatus === 'Pending Approval') { vSheet.getRange(i + 1, headers.indexOf('Status') + 1).setValue('Approved'); vSheet.getRange(i + 1, headers.indexOf('ApprovedBy') + 1).setValue(email); }
       } else if (action === 'reject') {
@@ -2761,7 +2828,7 @@ function processDisbursementApprovals(payload) {
       }
       if (createdBy) {
         const body = `<div style="font-family:Arial,sans-serif;padding:30px;background-color:#f4f4f4;"><div style="max-width:500px;margin:0 auto;background:#fff;border-top:4px solid #d93025;padding:30px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1);"><h2 style="color:#d93025;margin-top:0;">Disbursement Report Returned</h2><p style="color:#555;">Report <b>${rId}</b> has been returned for correction.</p><div style="background:#fff3cd;padding:15px;border-left:4px solid #856404;margin:20px 0;"><p style="margin:0;color:#856404;"><b>Reason:</b> ${escapeHtml_(reason || '')}</p></div><div style="text-align:center;"><a href="${webAppUrl}" style="display:inline-block;background:#0b1220;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;font-size:14px;">Open Dashboard</a></div></div></div>`;
-        MailApp.sendEmail({ to: createdBy, subject: `REJECTED: Disbursement Report ${rId} returned for correction`, htmlBody: body });
+        MailApp.sendEmail({ to: getEmailByDisplayName_(createdBy) || createdBy, subject: `REJECTED: Disbursement Report ${rId} returned for correction`, htmlBody: body });
       }
     }
   }
