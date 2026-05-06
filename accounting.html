@@ -1434,7 +1434,7 @@
           <div style="flex:1; min-height:0; overflow:auto; padding:0 24px 24px;">
             <table class="data-table" id="crCheckbookTable">
               <thead><tr>
-                <th>Checkbook ID</th><th>Bank</th><th>Range</th><th>Next #</th><th>Status</th><th>Notes</th><th>Actions</th>
+                <th>Checkbook ID</th><th>Bank</th><th>Type</th><th>Range</th><th>Next #</th><th>Status</th><th>Notes</th><th>Actions</th>
               </tr></thead>
               <tbody id="crCheckbookBody"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr></tbody>
             </table>
@@ -2226,64 +2226,27 @@
     </div>
   </div>
 
-  <!-- ── Payment Method Mini-Modal ──────────────────────────────────────────── -->
-  <div id="backdropPsPm" style="display:none;position:fixed;inset:0;z-index:120;background:rgba(0,0,0,.45);align-items:center;justify-content:center;">
-    <div style="background:#fff;border-radius:20px;width:92%;max-width:520px;box-shadow:0 24px 48px rgba(0,0,0,.18);display:flex;flex-direction:column;max-height:90vh;">
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--line);flex-shrink:0;">
+  <!-- ── Payment Method Modal (Payment Schedule) ──────────────────────────── -->
+  <div id="backdropPsPm" class="hidden fixed inset-0 z-[120] flex items-center justify-center bg-black/40 backdrop-blur-sm" onclick="if(event.target===this)closePsPayMethodModal()">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col overflow-hidden max-h-[90vh]">
+      <div class="bg-gradient-to-r from-orange-600 to-orange-500 px-6 py-4 flex justify-between items-start">
         <div>
-          <div style="font-size:16px;font-weight:900;color:#0f172a;">💳 Payment Method</div>
-          <div id="pspm-modal-name" style="font-size:12px;color:var(--muted);margin-top:2px;font-weight:600;"></div>
+          <h3 class="text-white font-bold text-base"><i class="fas fa-credit-card mr-2"></i>Payment Method</h3>
+          <p id="pspm-modal-name" class="text-orange-200 text-sm mt-0.5"></p>
         </div>
-        <button onclick="closePsPayMethodModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted);line-height:1;">&times;</button>
+        <button onclick="closePsPayMethodModal()" class="text-orange-200 hover:text-white text-xl leading-none ml-4">&times;</button>
       </div>
-      <div style="overflow-y:auto;padding:20px 24px;flex:1;display:flex;flex-direction:column;gap:14px;">
-        <div class="field">
-          <label>Bank Account</label>
-          <select id="paySchedBank"><option value="">— Any Bank —</option></select>
-        </div>
-        <div class="field">
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button type="button" class="ps-pm-btn" id="psPmBtn-Check"        onclick="togglePsPaymentMethod_('Check')"        style="padding:6px 14px;border-radius:999px;border:1.5px solid var(--line);font-size:12px;font-weight:700;cursor:pointer;background:#fff;color:var(--ink);">✏ Check</button>
-            <button type="button" class="ps-pm-btn" id="psPmBtn-Bank Transfer" onclick="togglePsPaymentMethod_('Bank Transfer')" style="padding:6px 14px;border-radius:999px;border:1.5px solid var(--line);font-size:12px;font-weight:700;cursor:pointer;background:#fff;color:var(--ink);">🏦 Bank Transfer</button>
-            <button type="button" class="ps-pm-btn" id="psPmBtn-Auto-Debit"   onclick="togglePsPaymentMethod_('Auto-Debit')"   style="padding:6px 14px;border-radius:999px;border:1.5px solid var(--line);font-size:12px;font-weight:700;cursor:pointer;background:#fff;color:var(--ink);">🔁 Auto-Debit</button>
-          </div>
-          <input type="hidden" id="paySchedPaymentMethod">
-        </div>
-        <!-- Check sub-fields -->
-        <div id="pspmCheck" style="display:none;background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:14px;flex-direction:column;gap:12px;">
-          <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">✏ Check Details</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-            <div class="field" style="grid-column:1/-1"><label>Checkbook / Issuing Bank</label>
-              <select id="paySchedPmCheckbookCode" onchange="psPmOnCheckbookChange_(this.value)" style="width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13px;background:#fff;">
-                <option value="">— Select checkbook —</option>
-              </select>
-            </div>
-            <div class="field"><label>Check No.</label><input type="text" id="paySchedPmCheckNo" readonly placeholder="Auto-assigned" style="background:#f3f4f6;cursor:default;"></div>
-            <div class="field"><label>Check Date</label><input type="date" id="paySchedPmCheckDate"></div>
-          </div>
-          <input type="hidden" id="paySchedPmCheckBank">
-          <input type="hidden" id="paySchedPmCheckId">
-          <div id="pspmCheckRegistered" style="display:none;margin-top:8px;"></div>
-        </div>
-        <!-- Bank Transfer sub-fields -->
-        <div id="pspmBankTransfer" style="display:none;background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:14px;flex-direction:column;gap:12px;">
-          <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">🏦 Bank Transfer Details</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-            <div class="field"><label>Bank Name</label><input type="text" id="paySchedPmBtBank" placeholder="Destination bank"></div>
-            <div class="field"><label>Reference No.</label><input type="text" id="paySchedPmBtRefNo" placeholder="Transfer ref no."></div>
-          </div>
-        </div>
-        <!-- Auto-Debit sub-fields -->
-        <div id="pspmAutoDebit" style="display:none;background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:14px;flex-direction:column;gap:12px;">
-          <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">🔁 Auto-Debit Details</div>
-          <div style="display:grid;grid-template-columns:1fr;gap:10px;">
-            <div class="field"><label>ADA Debit Day of Month</label><input type="number" id="paySchedPmAdaDay" placeholder="e.g. 5" min="1" max="31"></div>
-          </div>
-        </div>
+      <div class="px-6 py-3 border-b border-gray-100 flex items-center gap-3 bg-gray-50 flex-wrap">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Method:</span>
+        <button id="psPmBtn-Check"         onclick="psPmSwitchMethod('Check')"         class="px-4 py-1.5 text-sm font-semibold rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors"><i class="fas fa-money-check-alt mr-1 text-xs"></i>Check</button>
+        <button id="psPmBtn-Auto-Debit"    onclick="psPmSwitchMethod('Auto-Debit')"    class="px-4 py-1.5 text-sm font-semibold rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors"><i class="fas fa-bolt mr-1 text-xs"></i>Auto-Debit</button>
+        <button id="psPmBtn-Bank Transfer" onclick="psPmSwitchMethod('Bank Transfer')" class="px-4 py-1.5 text-sm font-semibold rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors"><i class="fas fa-building-columns mr-1 text-xs"></i>Bank Transfer</button>
+        <input type="hidden" id="paySchedPaymentMethod">
       </div>
-      <div style="padding:16px 24px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end;flex-shrink:0;">
-        <button class="btn ghost" onclick="closePsPayMethodModal()">Cancel</button>
-        <button class="btn primary" onclick="savePsPayMethod()">Save Payment Method</button>
+      <div id="ps-pm-detail-panel" class="px-6 py-5 overflow-y-auto flex-1"></div>
+      <div class="px-6 py-3 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
+        <button onclick="closePsPayMethodModal()" class="px-5 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors">Cancel</button>
+        <button id="psPmSaveBtn" onclick="savePsPayMethod()" class="px-5 py-2 text-sm font-semibold text-white bg-orange-500 hover:bg-orange-600 rounded-lg transition-colors">Save Payment Method</button>
       </div>
     </div>
   </div>
@@ -9257,7 +9220,6 @@
         document.getElementById('paySchedStartDate').value = _today;
         document.getElementById('paySchedEndDate').value   = '';
         document.getElementById('paySchedDueDate').value   = _today;
-        document.getElementById('paySchedBank').value      = '';
         document.getElementById('paySchedStatus').value    = 'Pending';
         const _stRowNew = document.getElementById('paySchedStatusRow');
         if (_stRowNew) _stRowNew.style.display = 'none';
@@ -9304,15 +9266,15 @@
         ? (ALL_PAYMENT_SCHEDULES.find(function(x) { return String(x.id) === String(_editingPaySchedId); }) || {})
         : {};
       payload.paymentMethod   = _existPm.paymentMethod   || '';
-      payload.bankCode        = _existPm.bankCode        || '';
       payload.pmCheckNo       = _existPm.pmCheckNo       || '';
       payload.pmCheckDate     = _existPm.pmCheckDate     || '';
       payload.pmCheckBank     = _existPm.pmCheckBank     || '';
       payload.pmCheckbookCode = _existPm.pmCheckbookCode || '';
       payload.pmCheckId       = _existPm.pmCheckId       || '';
       payload.pmBtBank        = _existPm.pmBtBank        || '';
-      payload.pmBtRefNo       = _existPm.pmBtRefNo       || '';
       payload.pmAdaDay        = _existPm.pmAdaDay        || '';
+      payload.pmAutoVoucher   = _existPm.pmAutoVoucher   || false;
+      payload.pmChecks        = _existPm.pmChecks        || [];
       const applyLocally = () => {
         if (_editingPaySchedId) {
           const idx = ALL_PAYMENT_SCHEDULES.findIndex(x => String(x.id) === String(_editingPaySchedId));
@@ -9343,65 +9305,20 @@
       if (!s) return;
       _psPmEditId = id;
       document.getElementById('pspm-modal-name').textContent = s.title || '';
-      // Populate bank account dropdown
-      var bankSel = document.getElementById('paySchedBank');
-      if (bankSel && typeof ACCOUNTS !== 'undefined') {
-        var banks = ACCOUNTS.filter(function(a) { return isBankAccountType_(a.accountType) && !isCreditLine_(a); });
-        bankSel.innerHTML = '<option value="">\u2014 Any Bank \u2014</option>'
-          + banks.map(function(b) { return '<option value="' + escapeH(b.accountCode) + '">' + escapeH(b.accountCode + ' \u2013 ' + (b.accountName||'')) + '</option>'; }).join('');
-      }
-      if (bankSel) bankSel.value = s.bankCode || '';
-      // Set non-check fields immediately (they're always in the DOM)
-      document.getElementById('paySchedPmBtBank').value     = s.pmBtBank    || '';
-      document.getElementById('paySchedPmBtRefNo').value    = s.pmBtRefNo   || '';
-      document.getElementById('paySchedPmAdaDay').value     = s.pmAdaDay    || '';
-      document.getElementById('paySchedPmCheckBank').value  = s.pmCheckBank || '';
-      document.getElementById('paySchedPmCheckId').value    = s.pmCheckId   || '';
-      document.getElementById('paySchedPmCheckDate').value  = toLocalDateStr_(s.pmCheckDate || '');
-      // Load CR data then finish initialization
-      ensureCrData_(function() {
-        var sel = document.getElementById('paySchedPmCheckbookCode');
-        if (sel) {
-          var activeCbs = (CR_DATA.checkbooks || []).filter(function(c) { return c.isActive; });
-          var curCode   = s.pmCheckbookCode || '';
-          sel.innerHTML = '<option value="">\u2014 Select checkbook \u2014</option>'
-            + activeCbs.map(function(c) {
-                var acc   = (PAYMENT_FROM_ACCOUNTS || []).find(function(a) { return a.accountCode === c.bankCode; });
-                var label = (acc ? (acc.displayName || acc.accountName || c.bankCode) : c.bankCode) + ' \u00b7 Next: #' + c.nextCheckNumber;
-                return '<option value="' + escapeH(c.bankCode) + '"' + (c.bankCode === curCode ? ' selected' : '') + '>' + escapeH(label) + '</option>';
-            }).join('');
-          var cb = curCode ? activeCbs.find(function(c) { return c.bankCode === curCode; }) : null;
-          document.getElementById('paySchedPmCheckNo').value = s.pmCheckNo || (cb ? cb.nextCheckNumber : '') || '';
+      // Migrate old single-check fields to pmChecks array if needed
+      if (!s.pmChecks) {
+        s.pmChecks = [];
+        if (s.pmCheckId || s.pmCheckNo) {
+          s.pmChecks.push({ bank: s.pmCheckbookCode || '', number: s.pmCheckNo || '', date: s.pmCheckDate || '', amount: s.amount || 0, checkId: s.pmCheckId || '' });
         }
-        // Registered check badge
-        var _regDiv = document.getElementById('pspmCheckRegistered');
-        if (_regDiv && s.pmCheckId) {
-          var _regEntry = (CR_DATA.register || []).find(function(r) { return r.checkId === s.pmCheckId; });
-          var _pillCls  = { Issued:'color:#1d4ed8;background:#eff6ff;', Cleared:'color:#15803d;background:#f0fdf4;', Voided:'color:#b91c1c;background:#fef2f2;', Stopped:'color:#b45309;background:#fffbeb;', Stale:'color:#6b7280;background:#f3f4f6;' };
-          var _st = _regEntry ? (_regEntry.status || 'Issued') : 'Issued';
-          var _no = _regEntry ? (_regEntry.checkNumber || s.pmCheckNo || '') : (s.pmCheckNo || '');
-          _regDiv.style.display = 'block';
-          _regDiv.innerHTML = '<span style="font-size:11px;color:#6b7280;">Registered \u2014 Check #' + escapeH(String(_no)) + ' &nbsp;<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:800;' + (_pillCls[_st] || _pillCls['Issued']) + '">' + escapeH(_st) + '</span></span>';
-        } else if (_regDiv) { _regDiv.style.display = 'none'; }
-        // Init panel/button state directly (avoid toggle() deselect quirk on re-open)
-        var method = s.paymentMethod || '';
-        document.getElementById('paySchedPaymentMethod').value = method;
-        var PM_MAP = { 'Check': 'pspmCheck', 'Bank Transfer': 'pspmBankTransfer', 'Auto-Debit': 'pspmAutoDebit' };
-        ['Check', 'Bank Transfer', 'Auto-Debit'].forEach(function(m) {
-          var btn   = document.getElementById('psPmBtn-' + m);
-          var panel = document.getElementById(PM_MAP[m]);
-          if (btn) {
-            if (m === method) { btn.style.background = 'var(--accent)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--accent)'; }
-            else { btn.style.background = '#fff'; btn.style.color = 'var(--ink)'; btn.style.borderColor = 'var(--line)'; }
-          }
-          if (panel) panel.style.display = (m === method) ? 'flex' : 'none';
-        });
-      });
-      document.getElementById('backdropPsPm').style.display = 'flex';
+      }
+      document.getElementById('paySchedPaymentMethod').value = s.paymentMethod || '';
+      document.getElementById('backdropPsPm').classList.remove('hidden');
+      ensureCrData_(renderPsPmPanel_);
     };
 
     window.closePsPayMethodModal = function() {
-      document.getElementById('backdropPsPm').style.display = 'none';
+      document.getElementById('backdropPsPm').classList.add('hidden');
       _psPmEditId = null;
     };
 
@@ -9409,42 +9326,24 @@
       var id = _psPmEditId;
       var existing = id ? (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(id); }) : null;
       if (!existing) return;
-      var method = document.getElementById('paySchedPaymentMethod').value;
-      existing.pmCheckbookCode = document.getElementById('paySchedPmCheckbookCode').value.trim();
-      existing.pmCheckNo       = document.getElementById('paySchedPmCheckNo').value.trim();
-      existing.pmCheckDate     = document.getElementById('paySchedPmCheckDate').value.trim();
-      existing.pmCheckBank     = document.getElementById('paySchedPmCheckBank').value.trim();
-      existing.pmBtBank        = document.getElementById('paySchedPmBtBank').value.trim();
-      existing.pmBtRefNo       = document.getElementById('paySchedPmBtRefNo').value.trim();
-      existing.pmAdaDay        = parseInt(document.getElementById('paySchedPmAdaDay').value) || '';
-      existing.bankCode        = (document.getElementById('paySchedBank') || {}).value || '';
+      // All field data already in 'existing' via psPmField_ onchange handlers and psPmOnCheckbookChange_
+      var saveBtn = document.getElementById('psPmSaveBtn');
+      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '\u23f3 Saving\u2026'; }
       function doSavePm() {
         callServer_('savePaymentSchedule', [existing], {
-          onSuccess: function() { closePsPayMethodModal(); renderPayScheduleView_(); toast('Payment method saved!'); },
-          onFailure: function() { closePsPayMethodModal(); renderPayScheduleView_(); toast('Saved locally (server unavailable).'); }
+          onSuccess: function() {
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Payment Method'; }
+            closePsPayMethodModal(); renderPayScheduleView_(); toast('Payment method saved!');
+          },
+          onFailure: function() {
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Payment Method'; }
+            closePsPayMethodModal(); renderPayScheduleView_(); toast('Saved locally (server unavailable).');
+          }
         });
       }
-      if (method === 'Check' && !existing.pmCheckId && existing.pmCheckbookCode) {
-        callServer_('registerCheckFromModule', [{
-          bankCode:      existing.pmCheckbookCode,
-          checkNumber:   existing.pmCheckNo || 0,
-          checkDate:     existing.pmCheckDate || '',
-          amount:        existing.amount || 0,
-          referenceId:   'PS-' + existing.id,
-          referenceType: 'Payment Schedule',
-          payeeName:     existing.contactId || existing.title || ''
-        }], {
-          onSuccess: function(res) {
-            existing.pmCheckId = res.checkId;
-            existing.pmCheckNo = res.checkNumber;
-            CR_DATA.register.push({ checkId: res.checkId, checkbookId: '', bankCode: existing.pmCheckbookCode, checkNumber: res.checkNumber, issueDate: (existing.pmCheckDate ? existing.pmCheckDate + 'T00:00:00.000Z' : new Date().toISOString()), payeeName: existing.contactId || existing.title || '', amount: existing.amount, status: 'Issued', referenceType: 'Payment Schedule', referenceId: 'PS-' + existing.id });
-            existing.paymentMethod = method;
-            doSavePm();
-          },
-          onFailure: function(err) { toast('\u26a0 Check registration failed: ' + String(err)); existing.paymentMethod = method; doSavePm(); }
-        });
+      if (existing.paymentMethod === 'Check') {
+        psRegisterPendingChecks_(existing, doSavePm);
       } else {
-        existing.paymentMethod = method;
         doSavePm();
       }
     };
@@ -9826,7 +9725,7 @@
         if (s.paymentMethod) {
           let pmDetail = s.paymentMethod;
           if (s.paymentMethod === 'Check'         && s.pmCheckNo)  pmDetail += ' — #' + s.pmCheckNo + (s.pmCheckBank ? ' (' + s.pmCheckBank + ')' : '');
-          if (s.paymentMethod === 'Bank Transfer'  && s.pmBtRefNo)  pmDetail += ' — Ref: ' + s.pmBtRefNo + (s.pmBtBank ? ' (' + s.pmBtBank + ')' : '');
+          if (s.paymentMethod === 'Bank Transfer'  && s.pmBtBank)   pmDetail += ' — ' + s.pmBtBank;
           if (s.paymentMethod === 'Auto-Debit'     && s.pmAdaDay)   pmDetail += ' — debit day ' + s.pmAdaDay;
           if (pmEl) pmEl.textContent = pmDetail;
           pmRow.style.display = 'block';
@@ -9894,52 +9793,226 @@
       }
     };
 
-    window.togglePsPaymentMethod_ = function(method) {
-      // Toggle: clicking the active method deselects it
-      const current = document.getElementById('paySchedPaymentMethod').value;
-      const selected = (current === method) ? '' : method;
-      document.getElementById('paySchedPaymentMethod').value = selected;
-      const methods = ['Check', 'Bank Transfer', 'Auto-Debit'];
-      const panelMap = { 'Check': 'pspmCheck', 'Bank Transfer': 'pspmBankTransfer', 'Auto-Debit': 'pspmAutoDebit' };
-      methods.forEach(function(m) {
-        const btn = document.getElementById('psPmBtn-' + m);
-        const panel = document.getElementById(panelMap[m]);
-        if (btn) {
-          if (m === selected) {
-            btn.style.background = 'var(--accent)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--accent)';
-          } else {
-            btn.style.background = '#fff'; btn.style.color = 'var(--ink)'; btn.style.borderColor = 'var(--line)';
-          }
-        }
-        if (panel) panel.style.display = (m === selected) ? 'flex' : 'none';
-      });
-      // Populate checkbook dropdown when Check is shown
-      if (selected === 'Check') {
-        ensureCrData_(function() {
-          const sel = document.getElementById('paySchedPmCheckbookCode');
-          if (!sel) return;
-          const activeCbs = (CR_DATA.checkbooks || []).filter(function(c) { return c.isActive; });
-          const curCode   = sel.value;
-          sel.innerHTML = '<option value="">\u2014 Select checkbook \u2014</option>'
-            + activeCbs.map(function(c) {
-                const acc   = (PAYMENT_FROM_ACCOUNTS || []).find(function(a) { return a.accountCode === c.bankCode; });
-                const label = (acc ? (acc.displayName || acc.accountName || c.bankCode) : c.bankCode) + ' \u00b7 Next: #' + c.nextCheckNumber;
-                return `<option value="${escapeH(c.bankCode)}"${c.bankCode === curCode ? ' selected' : ''}>${escapeH(label)}</option>`;
-            }).join('');
-          if (curCode) psPmOnCheckbookChange_(curCode, true);
-        });
+    window.psPmSwitchMethod = function(method) {
+      var s = (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(_psPmEditId); });
+      if (!s) return;
+      s.paymentMethod = method;
+      document.getElementById('paySchedPaymentMethod').value = method;
+      if (method === 'Check') {
+        ensureCrData_(renderPsPmPanel_);
+      } else {
+        renderPsPmPanel_();
       }
     };
 
-    window.psPmOnCheckbookChange_ = function(code, infoOnly) {
-      if (!infoOnly) {
-        const sel = document.getElementById('paySchedPmCheckbookCode');
-        if (sel) sel.value = code;
-      }
-      const cb   = (CR_DATA.checkbooks || []).find(function(c) { return c.isActive && c.bankCode === code; });
-      const noEl = document.getElementById('paySchedPmCheckNo');
-      if (noEl) noEl.value = cb ? (cb.nextCheckNumber || '') : '';
+    window.psPmField_ = function(field, value) {
+      var s = (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(_psPmEditId); });
+      if (s) s[field] = value;
     };
+
+    window.psPmOnCheckbookChange_ = function(code, infoOnly) {
+      var s = (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(_psPmEditId); });
+      if (!s) return;
+      if (!infoOnly) {
+        s.pmCheckbookCode = code;
+        var cb = (CR_DATA.checkbooks || []).find(function(c) { return c.isActive && c.bankCode === code; });
+        if (cb && s.pmChecks) {
+          var seq = Number(cb.nextCheckNumber);
+          s.pmChecks.forEach(function(c) { if (!c.checkId) { c.bank = code; c.number = seq++; } });
+        }
+        renderPsPmPanel_();
+      } else {
+        // info only — just update checkbook info row in panel if already rendered
+        var infoEl = document.getElementById('ps-pm-checkbook-info');
+        var cb = (CR_DATA.checkbooks || []).find(function(c) { return c.isActive && c.bankCode === code; });
+        if (cb && infoEl) {
+          infoEl.textContent = 'Checkbook ' + cb.checkbookId + ' \u00b7 Range: #' + cb.startingNumber + '\u2013' + cb.endingNumber + ' \u00b7 Next check: #' + cb.nextCheckNumber;
+          infoEl.style.display = 'block';
+        } else if (infoEl) { infoEl.style.display = 'none'; }
+      }
+    };
+
+    function renderPsPmPanel_() {
+      var s = (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(_psPmEditId); });
+      var panel = document.getElementById('ps-pm-detail-panel');
+      if (!s || !panel) return;
+      var method = s.paymentMethod || '';
+      // Update method button styles
+      ['Check', 'Auto-Debit', 'Bank Transfer'].forEach(function(m) {
+        var btn = document.getElementById('psPmBtn-' + m);
+        if (!btn) return;
+        btn.className = (m === method)
+          ? 'px-4 py-1.5 text-sm font-semibold rounded-lg bg-orange-500 text-white shadow-sm transition-colors'
+          : 'px-4 py-1.5 text-sm font-semibold rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors';
+      });
+      if (method === 'Auto-Debit') {
+        panel.innerHTML =
+          '<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">' +
+          '<div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Deduction Day <span class="normal-case font-normal text-gray-400">(1\u201328)</span></label>' +
+          '<input type="number" min="1" max="28" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-300" placeholder="e.g. 15" value="' + (s.pmAdaDay||'') + '" onchange="psPmField_(\'pmAdaDay\',+this.value||\'\')"/>' +
+          '<p class="mt-1.5 text-[11px] text-blue-500"><i class="fas fa-info-circle mr-1"></i>Voucher queued the day before.</p></div>' +
+          '<div class="flex items-end pb-1"><label class="flex items-start gap-2.5 cursor-pointer select-none">' +
+          '<input type="checkbox" class="w-4 h-4 mt-0.5 accent-orange-600 flex-shrink-0" ' + (s.pmAutoVoucher ? 'checked' : '') + ' onchange="psPmField_(\'pmAutoVoucher\',this.checked)"/>' +
+          '<div><span class="block text-sm font-semibold text-gray-700">Auto-create voucher</span><span class="text-[11px] text-gray-400">Draft Payment Voucher on deduction day.</span></div></label></div>' +
+          '</div>';
+        return;
+      }
+      if (method === 'Bank Transfer') {
+        panel.innerHTML =
+          '<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">' +
+          '<div><label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Destination Bank</label>' +
+          '<input class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-300" placeholder="Bank name or number" value="' + escapeH(s.pmBtBank||'') + '" onchange="psPmField_(\'pmBtBank\',this.value)"/></div>' +
+          '<div class="flex items-end pb-1"><label class="flex items-start gap-2.5 cursor-pointer select-none">' +
+          '<input type="checkbox" class="w-4 h-4 mt-0.5 accent-orange-600 flex-shrink-0" ' + (s.pmAutoVoucher ? 'checked' : '') + ' onchange="psPmField_(\'pmAutoVoucher\',this.checked)"/>' +
+          '<div><span class="block text-sm font-semibold text-gray-700">Auto-create voucher</span><span class="text-[11px] text-gray-400">Draft Payment Voucher on payment date.</span></div></label></div>' +
+          '</div>';
+        return;
+      }
+      if (method !== 'Check') {
+        panel.innerHTML = '<p class="text-sm text-gray-400 italic py-10 text-center">Select a payment method above.</p>';
+        return;
+      }
+      // ── Check method ─────────────────────────────────────────────────────
+      var activeCbs = (CR_DATA.checkbooks || []).filter(function(c) { return c.isActive; });
+      var cbCode    = s.pmCheckbookCode || '';
+      var cbOptions = '<option value="">\u2014 Select checkbook \u2014</option>'
+        + activeCbs.map(function(c) {
+            var acc   = (PAYMENT_FROM_ACCOUNTS || []).find(function(a) { return a.accountCode === c.bankCode; });
+            var label = (acc ? (acc.displayName || acc.accountName || c.bankCode) : c.bankCode) + ' \u00b7 Next: #' + c.nextCheckNumber;
+            return '<option value="' + escapeH(c.bankCode) + '"' + (c.bankCode === cbCode ? ' selected' : '') + '>' + escapeH(label) + '</option>';
+          }).join('');
+
+      var allChecks  = s.pmChecks || [];
+      var pending    = allChecks.map(function(c, ri) { return { c: c, ri: ri }; }).filter(function(x) { return !x.c.checkId; });
+      var refId      = 'PS-' + s.id;
+      var registered = (CR_DATA.register || []).filter(function(r) { return r.referenceId === refId; });
+
+      var pendingRows = pending.map(function(item) {
+        var c = item.c, ri = item.ri;
+        return '<tr style="background:' + (ri % 2 === 0 ? '#fff' : '#f9fafb') + ';">'
+          + '<td style="padding:6px 8px;font-family:monospace;font-size:13px;background:#f3f4f6;border-radius:4px;">' + escapeH(String(c.number || '\u2014')) + '</td>'
+          + '<td style="padding:6px 8px;"><input type="date" style="width:100%;border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px;" value="' + escapeH(c.date||'') + '" onchange="psPmCheckUpdate(' + ri + ',\'date\',this.value)" /></td>'
+          + '<td style="padding:6px 8px;"><input type="number" step="0.01" min="0" style="width:100%;border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px;text-align:right;font-family:monospace;" value="' + (c.amount||'') + '" placeholder="0.00" onchange="psPmCheckUpdate(' + ri + ',\'amount\',+this.value||0)" /></td>'
+          + '<td style="padding:6px 8px;text-align:center;"><button onclick="psPmCheckRemove(' + ri + ')" style="background:none;border:none;cursor:pointer;color:#d1d5db;font-size:12px;" onmouseover="this.style.color=\'#ef4444\';" onmouseout="this.style.color=\'#d1d5db\';" title="Remove"><i class="fas fa-trash"></i></button></td>'
+          + '</tr>';
+      }).join('');
+      if (!pendingRows) pendingRows = '<tr><td colspan="4" style="padding:16px;text-align:center;font-size:12px;color:var(--muted);font-style:italic;">No pending checks. Click \u201c+ Add Check\u201d to queue one.</td></tr>';
+
+      var pendingTotal = pending.reduce(function(sum, x) { return sum + (x.c.amount || 0); }, 0);
+
+      var pillCls = function(st) {
+        return { Issued:'color:#1d4ed8;background:#eff6ff;border-color:#bfdbfe;', Cleared:'color:#15803d;background:#f0fdf4;border-color:#bbf7d0;', Voided:'color:#b91c1c;background:#fef2f2;border-color:#fecaca;', Stopped:'color:#b45309;background:#fffbeb;border-color:#fde68a;', Stale:'color:#6b7280;background:#f3f4f6;border-color:#e5e7eb;' }[st] || 'color:#1d4ed8;background:#eff6ff;border-color:#bfdbfe;';
+      };
+
+      var regSection = '';
+      if (registered.length) {
+        regSection = '<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px;">'
+          + '<p style="font-size:11px;font-weight:800;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;"><i class="fas fa-check-circle" style="color:#22c55e;margin-right:4px;"></i>Registered in Check Registry (' + registered.length + ')</p>'
+          + '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+          + '<thead><tr style="background:#f3f4f6;"><th style="padding:6px 8px;text-align:left;font-weight:700;color:#6b7280;">Check #</th><th style="padding:6px 8px;text-align:left;font-weight:700;color:#6b7280;">Date</th><th style="padding:6px 8px;text-align:right;font-weight:700;color:#6b7280;">Amount</th><th style="padding:6px 8px;text-align:left;font-weight:700;color:#6b7280;">Status</th><th style="padding:6px 8px;"></th></tr></thead>'
+          + '<tbody>' + registered.map(function(r, ri) {
+              var dt = r.issueDate ? r.issueDate.split('T')[0] : '';
+              var st = r.status || 'Issued';
+              return '<tr style="background:' + (ri % 2 === 0 ? '#fff' : '#f9fafb') + ';">'
+                + '<td style="padding:6px 8px;font-family:monospace;font-weight:700;">' + escapeH(String(r.checkNumber||'')) + '</td>'
+                + '<td style="padding:6px 8px;">' + escapeH(dt) + '</td>'
+                + '<td style="padding:6px 8px;text-align:right;font-family:monospace;">\u20b1' + fmtMoney(r.amount) + '</td>'
+                + '<td style="padding:6px 8px;"><span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:800;border:1px solid;' + pillCls(st) + '">' + escapeH(st) + '</span></td>'
+                + '<td style="padding:6px 8px;">' + (['Issued','Stopped'].includes(st) ? '<button style="font-size:11px;color:#e11d48;background:none;border:none;cursor:pointer;" onclick="openCheckStatusModal(\'' + escapeH(r.checkId) + '\')">Update</button>' : '') + '</td>'
+                + '</tr>';
+            }).join('') + '</tbody>'
+          + '</table></div>';
+      }
+
+      var cbInfo = '';
+      if (cbCode) {
+        var _cb = activeCbs.find(function(c) { return c.bankCode === cbCode; });
+        if (_cb) cbInfo = 'Checkbook ' + _cb.checkbookId + ' \u00b7 Range: #' + _cb.startingNumber + '\u2013' + _cb.endingNumber + ' \u00b7 Next check: #' + _cb.nextCheckNumber;
+      }
+
+      panel.innerHTML =
+        '<div style="margin-bottom:10px;">'
+        + '<label style="display:block;font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">Checkbook / Issuing Bank</label>'
+        + '<select id="ps-pm-checkbook-sel" style="width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13px;background:#fff;" onchange="psPmOnCheckbookChange_(this.value)">' + cbOptions + '</select>'
+        + '<div id="ps-pm-checkbook-info" style="margin-top:3px;font-size:11px;color:#3b82f6;display:' + (cbInfo ? 'block' : 'none') + ';">' + escapeH(cbInfo) + '</div>'
+        + '</div>'
+        + '<table style="width:100%;border-collapse:collapse;">'
+        + '<thead style="background:#f3f4f6;border-bottom:1px solid var(--line);"><tr>'
+        + '<th style="padding:7px 8px;font-size:11px;font-weight:700;color:#6b7280;text-align:left;width:22%;">Check No.</th>'
+        + '<th style="padding:7px 8px;font-size:11px;font-weight:700;color:#6b7280;text-align:left;width:30%;">Check Date</th>'
+        + '<th style="padding:7px 8px;font-size:11px;font-weight:700;color:#6b7280;text-align:right;width:32%;">Amount (\u20b1)</th>'
+        + '<th style="padding:7px 8px;width:36px;"></th>'
+        + '</tr></thead>'
+        + '<tbody>' + pendingRows + '</tbody>'
+        + '<tfoot style="border-top:2px solid var(--line);"><tr style="background:#f9fafb;">'
+        + '<td colspan="2" style="padding:7px 8px;font-size:11px;font-weight:800;color:#6b7280;text-transform:uppercase;">Pending &middot; ' + pending.length + ' check' + (pending.length !== 1 ? 's' : '') + '</td>'
+        + '<td style="padding:7px 8px;font-size:13px;font-weight:800;text-align:right;font-family:monospace;color:#e11d48;">\u20b1' + fmtMoney(pendingTotal) + '</td>'
+        + '<td></td></tr></tfoot>'
+        + '</table>'
+        + '<button onclick="psPmCheckAdd()" style="margin-top:10px;display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:11px;font-weight:700;color:#e11d48;background:#fff;border:1px solid #fecaca;border-radius:8px;cursor:pointer;" onmouseover="this.style.background=\'#fff1f2\';" onmouseout="this.style.background=\'#fff\';"><i class="fas fa-plus" style="font-size:9px;"></i> Add Check</button>'
+        + regSection;
+    }
+
+    window.psPmCheckAdd = function() {
+      var s = (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(_psPmEditId); });
+      if (!s) return;
+      if (!s.pmChecks) s.pmChecks = [];
+      var sel  = document.getElementById('ps-pm-checkbook-sel');
+      var cbCode = sel ? sel.value : (s.pmCheckbookCode || '');
+      var cb   = cbCode ? (CR_DATA.checkbooks || []).find(function(c) { return c.isActive && c.bankCode === cbCode; }) : null;
+      var usedPending = (s.pmChecks || []).filter(function(c) { return !c.checkId; }).length;
+      var nextNo = cb ? (Number(cb.nextCheckNumber) + usedPending) : '';
+      s.pmChecks.push({ bank: cbCode, number: nextNo, date: '', amount: 0, checkId: '' });
+      renderPsPmPanel_();
+    };
+
+    window.psPmCheckRemove = function(idx) {
+      var s = (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(_psPmEditId); });
+      if (!s || !s.pmChecks) return;
+      if (s.pmChecks[idx] && s.pmChecks[idx].checkId) {
+        toast('This check is already registered in the Check Registry. Use \u201cUpdate\u201d to void or stop it.');
+        return;
+      }
+      s.pmChecks.splice(idx, 1);
+      renderPsPmPanel_();
+    };
+
+    window.psPmCheckUpdate = function(idx, field, value) {
+      var s = (ALL_PAYMENT_SCHEDULES || []).find(function(x) { return String(x.id) === String(_psPmEditId); });
+      if (!s || !s.pmChecks || !s.pmChecks[idx]) return;
+      s.pmChecks[idx][field] = value;
+      if (field === 'amount') renderPsPmPanel_();
+    };
+
+    function psRegisterPendingChecks_(schedule, onDone) {
+      if (!schedule) { onDone(); return; }
+      var pending = (schedule.pmChecks || []).filter(function(c) { return !c.checkId && c.amount > 0; });
+      if (!pending.length || schedule.paymentMethod !== 'Check') { onDone(); return; }
+      var refId = 'PS-' + schedule.id;
+      var i = 0;
+      function next() {
+        if (i >= pending.length) { onDone(); return; }
+        var c = pending[i];
+        callServer_('registerCheckFromModule', [{
+          bankCode:      schedule.pmCheckbookCode || c.bank || '',
+          checkNumber:   c.number || 0,
+          checkDate:     c.date   || '',
+          amount:        c.amount || 0,
+          referenceId:   refId,
+          referenceType: 'Payment Schedule',
+          payeeName:     schedule.contactId || schedule.title || ''
+        }], {
+          onSuccess: function(res) {
+            c.checkId = res.checkId;
+            c.number  = res.checkNumber;
+            CR_DATA.register.push({ checkId: res.checkId, checkbookId: '', bankCode: schedule.pmCheckbookCode || c.bank || '', checkNumber: res.checkNumber, issueDate: (c.date ? c.date + 'T00:00:00.000Z' : new Date().toISOString()), payeeName: schedule.contactId || schedule.title || '', amount: c.amount, status: 'Issued', referenceType: 'Payment Schedule', referenceId: refId });
+            i++; next();
+          },
+          onFailure: function(err) { toast('\u26a0 Check #' + (c.number || '?') + ' registration failed: ' + String(err)); i++; next(); }
+        });
+      }
+      next();
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // ■■ END PAYMENT SCHEDULE MODULE ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
@@ -10081,7 +10154,7 @@
       if (!tbody) return;
       const cbs = CR_DATA.checkbooks || [];
       if (!cbs.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">No checkbooks. Click "+ New Checkbook" to add one.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:32px;">No checkbooks. Click "+ New Checkbook" to add one.</td></tr>';
         return;
       }
       tbody.innerHTML = cbs.map(c => {
@@ -10096,6 +10169,7 @@
         return `<tr>
           <td style="font-size:11px;color:var(--muted);">${escapeH(c.checkbookId)}</td>
           <td style="font-weight:700;">${bankLabel}</td>
+          <td style="color:var(--muted);font-size:12px;">${escapeH(c.checkbookType || '')}</td>
           <td>${escapeH(range)}</td>
           <td style="font-weight:700;color:var(--accent);">${escapeH(String(c.nextCheckNumber))}</td>
           <td>${statusPill}</td>
@@ -10470,6 +10544,7 @@
         const cb = (CR_DATA.checkbooks || []).find(c => c.checkbookId === checkbookId);
         if (cb) {
           if (bSel) bSel.value = cb.bankCode;
+          document.getElementById('cbType').value     = cb.checkbookType || '';
           document.getElementById('cbStart').value    = cb.startingNumber;
           document.getElementById('cbEnd').value      = cb.endingNumber;
           document.getElementById('cbNext').value     = cb.nextCheckNumber;
@@ -10481,6 +10556,7 @@
         document.getElementById('cbEnd').value       = '';
         document.getElementById('cbNext').value      = '';
         document.getElementById('cbNotes').value     = '';
+        document.getElementById('cbType').value      = '';
         document.getElementById('cbIsActive').checked = false;
       }
       document.getElementById('backdropCheckbook').style.display = 'flex';
@@ -10488,6 +10564,7 @@
 
     function submitCheckbook() {
       const bankCode       = (document.getElementById('cbBank')     || {}).value || '';
+      const checkbookType  = (document.getElementById('cbType')     || {}).value || '';
       const startingNumber = Number((document.getElementById('cbStart') || {}).value || 0);
       const endingNumber   = Number((document.getElementById('cbEnd')   || {}).value || 0);
       const nextRaw        = (document.getElementById('cbNext') || {}).value;
@@ -10496,13 +10573,14 @@
       const isActive       = (document.getElementById('cbIsActive') || {}).checked;
       const checkbookId    = (document.getElementById('cbCheckbookId') || {}).value || '';
       if (!bankCode)       return toast('Select a bank account.');
+      if (!checkbookType)  return toast('Select a checkbook type.');
       if (!startingNumber) return toast('Enter starting check number.');
       if (!endingNumber || endingNumber < startingNumber) return toast('Ending number must be ≥ starting number.');
 
       const btn = document.getElementById('btnSubmitCheckbook');
       btn.disabled = true; btn.textContent = '⏳ Saving…';
 
-      const payload = { bankCode, startingNumber, endingNumber, notes, isActive };
+      const payload = { bankCode, checkbookType, startingNumber, endingNumber, notes, isActive };
       if (checkbookId) payload.checkbookId = checkbookId;
       if (nextCheckNumber !== undefined) payload.nextCheckNumber = nextCheckNumber;
 
@@ -11010,8 +11088,17 @@
       </div>
       <div class="modal-b" style="display:flex; flex-direction:column; gap:14px;">
         <input type="hidden" id="cbCheckbookId">
-        <div class="field"><label>BANK ACCOUNT *</label>
-          <select id="cbBank" style="border:1px solid var(--line);border-radius:12px;padding:9px 12px;font-size:13px;background:#fff;"><option value="">Select bank…</option></select>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="field"><label>BANK ACCOUNT *</label>
+            <select id="cbBank" style="border:1px solid var(--line);border-radius:12px;padding:9px 12px;font-size:13px;background:#fff;"><option value="">Select bank…</option></select>
+          </div>
+          <div class="field"><label>CHECKBOOK TYPE *</label>
+            <select id="cbType" style="border:1px solid var(--line);border-radius:12px;padding:9px 12px;font-size:13px;background:#fff;">
+              <option value="">Select type…</option>
+              <option value="Bound">Bound</option>
+              <option value="Loose">Loose</option>
+            </select>
+          </div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="field"><label>STARTING # *</label><input type="number" id="cbStart" class="input" min="0"></div>

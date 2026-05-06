@@ -1585,7 +1585,7 @@ function ensureBankReconSessionsHeaders_(sheet) {
 }
 
 function ensureCheckbookMasterHeaders_(sheet) {
-  const COLS = ['CheckbookId','BankCode','StartingNumber','EndingNumber','NextCheckNumber','IsActive','Notes','CreatedAt','CreatedBy'];
+  const COLS = ['CheckbookId','BankCode','CheckbookType','StartingNumber','EndingNumber','NextCheckNumber','IsActive','Notes','CreatedAt','CreatedBy'];
   if (sheet.getLastRow() === 0) { sheet.appendRow(COLS); sheet.setFrozenRows(1); return COLS; }
   const h = sheet.getRange(1, 1, 1, sheet.getLastColumn() || 1).getValues()[0].map(c => String(c).trim());
   COLS.forEach(col => { if (!h.includes(col)) { sheet.getRange(1, h.length + 1).setValue(col); h.push(col); } });
@@ -4472,6 +4472,7 @@ function getCheckRegistryData() {
   const checkbooks = getSheetData_('CheckbookMaster').map(r => ({
     checkbookId:     String(r.CheckbookId    || ''),
     bankCode:        String(r.BankCode        || ''),
+    checkbookType:   String(r.CheckbookType   || ''),
     startingNumber:  Number(r.StartingNumber  || 0),
     endingNumber:    Number(r.EndingNumber    || 0),
     nextCheckNumber: Number(r.NextCheckNumber || 0),
@@ -4536,6 +4537,7 @@ function saveCheckbookMaster(payload) {
     const set_ = (col, val) => { const i = headers.indexOf(col); if (i > -1) row[i] = val; };
     set_('CheckbookId',    checkbookId);
     set_('BankCode',       String(payload.bankCode        || ''));
+    set_('CheckbookType',  String(payload.checkbookType   || ''));
     set_('StartingNumber', Number(payload.startingNumber  || 0));
     set_('EndingNumber',   Number(payload.endingNumber    || 0));
     set_('NextCheckNumber',Number(payload.nextCheckNumber || payload.startingNumber || 0));
@@ -4549,6 +4551,7 @@ function saveCheckbookMaster(payload) {
       if (String(data[i][idIdx]).trim() === checkbookId) {
         const s = (col, val) => { const ci = headers.indexOf(col); if (ci > -1) sheet.getRange(i + 1, ci + 1).setValue(val); };
         s('BankCode',       String(payload.bankCode || ''));
+        s('CheckbookType',  String(payload.checkbookType || ''));
         s('StartingNumber', Number(payload.startingNumber || 0));
         s('EndingNumber',   Number(payload.endingNumber || 0));
         if (payload.nextCheckNumber !== undefined) s('NextCheckNumber', Number(payload.nextCheckNumber));
