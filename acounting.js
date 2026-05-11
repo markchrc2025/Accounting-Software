@@ -2131,8 +2131,6 @@ function createVoucher(payload, _internal) {
   const accountsData = getCentralAccountsData_();
   
   const jLines = buildJournalLines_(id, payload, totalAmount, contactSummary, now, accountsData, _taxRates_, _taxGroups_);
-  const jlSheet = getTargetSheet_('JournalLines'); 
-  if (jLines.length > 0) { const jlLastRow = jlSheet.getLastRow(); const jlMaxRows = jlSheet.getMaxRows(); if (jlLastRow + jLines.length > jlMaxRows) { jlSheet.insertRowsAfter(jlLastRow, (jlLastRow + jLines.length) - jlMaxRows + 50); } jlSheet.getRange(jlLastRow + 1, 1, jLines.length, jLines[0].length).setValues(jLines); }
   appendToCentralJournalLines_(jLines, user);
 
   return { voucherId: id };
@@ -2179,13 +2177,10 @@ function updateVoucher(payload) {
   for (let i = vlData.length - 1; i >= 1; i--) { if (vlData[i][vlData[0].indexOf('VoucherId')] === id) vlSheet.deleteRow(i + 1); }
   if (linesData.length > 0) { const lastRow = vlSheet.getLastRow(); const maxRows = vlSheet.getMaxRows(); if (lastRow + linesData.length > maxRows) { vlSheet.insertRowsAfter(lastRow, (lastRow + linesData.length) - maxRows + 50); } vlSheet.getRange(lastRow + 1, 1, linesData.length, vlHLen).setValues(linesData); }
   
-  const jlSheet = getTargetSheet_('JournalLines'); const jlData = jlSheet.getDataRange().getValues();
-  if (jlData.length > 0) { const targetIdx = Math.max(0, jlData[0].findIndex(h => String(h).trim() === 'voucher_id')); for (let i = jlData.length - 1; i >= 1; i--) { if (jlData[i][targetIdx] === id) jlSheet.deleteRow(i + 1); } }
   deleteFromCentralJournalLines_(id);
   const accountsData = getCentralAccountsData_();
   
   const jLines = buildJournalLines_(id, payload, totalAmount, contactSummary, now, accountsData, _taxRatesU_, _taxGroupsU_);
-  if (jLines.length > 0) jlSheet.getRange(jlSheet.getLastRow() + 1, 1, jLines.length, jLines[0].length).setValues(jLines);
   appendToCentralJournalLines_(jLines, user);
 
   return { voucherId: id };
