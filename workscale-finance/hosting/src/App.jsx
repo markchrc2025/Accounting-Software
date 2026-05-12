@@ -15,7 +15,7 @@ export default function App() {
           element={
             <AuthGuard>
               <Routes>
-                <Route path="/" element={<AppShell><HomePage /></AppShell>} />
+                <Route path="/" element={<Navigate to="/scalebooks" replace />} />
                 <Route path="/scalebooks/*" element={<ScaleBooksApp />} />
                 {/* Legacy redirects */}
                 <Route path="/accounting" element={<Navigate to="/scalebooks" replace />} />

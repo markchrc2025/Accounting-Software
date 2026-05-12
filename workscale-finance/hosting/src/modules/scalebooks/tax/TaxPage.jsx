@@ -119,6 +119,7 @@ export default function TaxPage() {
         <div className="tabs">
           <button className={`tab ${tab==='entries'?'active':''}`} onClick={()=>setTab('entries')}>Tax Entries</button>
           <button className={`tab ${tab==='rates'?'active':''}`} onClick={()=>setTab('rates')}>Tax Rates ({rates.length})</button>
+          <button className={`tab ${tab==='summary'?'active':''}`} onClick={()=>setTab('summary')}>Tax Summary</button>
         </div>
 
         {tab === 'entries' && <>
@@ -172,6 +173,47 @@ export default function TaxPage() {
             )}
           </div>
         )}
+
+        {tab === 'summary' && (() => {
+          // Group entries by taxType and period for a summary view
+          const byType = {};
+          entries.forEach(e => {
+            const k = e.taxType||'Other';
+            if (!byType[k]) byType[k] = { taxType:k, taxBase:0, taxAmount:0, amountPaid:0, count:0 };
+            byType[k].taxBase    += e.taxBase||0;
+            byType[k].taxAmount  += e.taxAmount||0;
+            byType[k].amountPaid += e.amountPaid||0;
+            byType[k].count++;
+          });
+          const rows = Object.values(byType);
+          return (
+            <div>
+              <div className="summary-bar" style={{gridTemplateColumns:'repeat(4,1fr)'}}>
+                <div className="scard"><div className="scard-label">Total Entries</div><div className="scard-value">{entries.length}</div></div>
+                <div className="scard"><div className="scard-label">Total Tax Base</div><div className="scard-value" style={{fontSize:15}}>{fmt(entries.reduce((s,e)=>s+(e.taxBase||0),0))}</div></div>
+                <div className="scard"><div className="scard-label">Total Tax Due</div><div className="scard-value" style={{color:'#dc2626',fontSize:15}}>{fmt(entries.reduce((s,e)=>s+(e.taxAmount||0),0))}</div></div>
+                <div className="scard"><div className="scard-label">Total Paid</div><div className="scard-value" style={{color:'#15803d',fontSize:15}}>{fmt(entries.reduce((s,e)=>s+(e.amountPaid||0),0))}</div></div>
+              </div>
+              <div className="card">
+                {rows.length===0?<div className="empty">No data.</div>:(
+                  <table>
+                    <thead><tr><th>Tax Type</th><th style={{textAlign:'right'}}># Entries</th><th style={{textAlign:'right'}}>Tax Base</th><th style={{textAlign:'right'}}>Tax Due</th><th style={{textAlign:'right'}}>Paid</th><th style={{textAlign:'right'}}>Balance</th></tr></thead>
+                    <tbody>{rows.map(r=>(
+                      <tr key={r.taxType}>
+                        <td style={{fontWeight:800,color:'#7c3aed'}}>{r.taxType}</td>
+                        <td style={{textAlign:'right'}}>{r.count}</td>
+                        <td style={{textAlign:'right',color:'#64748b'}}>{fmt(r.taxBase)}</td>
+                        <td style={{textAlign:'right',fontWeight:700,color:'#dc2626'}}>{fmt(r.taxAmount)}</td>
+                        <td style={{textAlign:'right',fontWeight:700,color:'#15803d'}}>{fmt(r.amountPaid)}</td>
+                        <td style={{textAlign:'right',fontWeight:900,color:(r.taxAmount-r.amountPaid)>0?'#dc2626':'#15803d'}}>{fmt(r.taxAmount-r.amountPaid)}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {showModal && (

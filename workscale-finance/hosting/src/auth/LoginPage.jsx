@@ -9,7 +9,7 @@ export default function LoginPage() {
   useEffect(() => {
     // If already signed in, skip login page immediately
     const unsub = onAuthStateChanged(auth, (user) => {
-      if (user) navigate('/', { replace: true });
+      if (user) navigate('/scalebooks', { replace: true });
     });
     return unsub;
   }, [navigate]);
@@ -17,7 +17,7 @@ export default function LoginPage() {
   async function handleGoogleLogin() {
     try {
       await signInWithPopup(auth, googleProvider);
-      navigate('/', { replace: true });
+      navigate('/scalebooks', { replace: true });
     } catch (err) {
       alert('Sign-in failed: ' + err.message);
     }

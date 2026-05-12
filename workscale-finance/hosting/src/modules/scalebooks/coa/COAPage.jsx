@@ -1,10 +1,82 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import * as XLSX from 'xlsx';
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, orderBy, query
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 
-const ACCOUNT_TYPES = ['Asset','Liability','Equity','Revenue','Expense','Cost of Sales','Other Income','Other Expense'];
+const ACCOUNT_TYPES = ['Asset','Cost of Services','Equity','Expense','Income','Liability'];
+
+const SUBTYPES_BY_TYPE = {
+  'Asset':            ['Accounts Receivable','Bank','Cash Equivalents','Fixed Asset','Other Current Asset','Tax Asset'],
+  'Cost of Services': ['Cost of Services'],
+  'Equity':           ['Equity'],
+  'Expense':          ['Finance Cost and Amortization','General and Administrative Expenses','Non Cash Expenses','Other Expense','Other General Expenses','Personnel Cost','Taxes and Licenses','Utilities'],
+  'Income':           ['Income','Other Income'],
+  'Liability':        ['Accounts Payable','Other Current Liability','Tax Liability'],
+};
+
+const NORMAL_BALANCE = {
+  'Asset':'Debit', 'Cost of Services':'Debit', 'Expense':'Debit',
+  'Liability':'Credit', 'Equity':'Credit', 'Income':'Credit',
+};
+
+/* ── Import wizard field definitions ─────────────────────────── */
+const IMPORT_FIELDS = [
+  { key:'code',         label:'Account Code',           required:true  },
+  { key:'name',         label:'Account Name',           required:true  },
+  { key:'type',         label:'Type (Type1)',            required:false },
+  { key:'subType',      label:'Sub-Type (Account Type)',required:false },
+  { key:'notes',        label:'Description / Notes',    required:false },
+  { key:'accountNo',    label:'Account #',              required:false },
+  { key:'parent',       label:'Parent Account',         required:false },
+  { key:'creditLimit',  label:'Credit Limit',           required:false },
+  { key:'interestRate', label:'Interest Rate',          required:false },
+];
+
+function autoMapHeaders(headers) {
+  const n = h => h.toLowerCase().replace(/[^a-z0-9]/g,'');
+  const hints = {
+    code:        ['accountcode','code'],
+    name:        ['accountname','name'],
+    type:        ['type1','type'],
+    subType:     ['accounttype','subtype'],
+    notes:       ['description','notes','desc'],
+    accountNo:   ['accountnumber','accountno','account'],
+    parent:      ['parentaccount','parent'],
+    creditLimit: ['creditlimit','credit'],
+    interestRate:['interestrate','interest','rate'],
+  };
+  const map = {};
+  for (const [field, patterns] of Object.entries(hints)) {
+    const match = headers.find(h => patterns.some(p => n(h).includes(p)));
+    map[field] = match || '';
+  }
+  return map;
+}
+
+function buildPreviewRow(raw, mapping, existingCodes) {
+  const get = f => (raw[mapping[f]] ?? '').toString().trim();
+  const code    = get('code');
+  const name    = get('name');
+  const rawType = get('type');
+  const rawSub  = get('subType');
+  const type    = ACCOUNT_TYPES.find(t => t.toLowerCase() === rawType.toLowerCase()) || rawType;
+  const allSubs = Object.values(SUBTYPES_BY_TYPE).flat();
+  const subType = allSubs.find(s => s.toLowerCase() === rawSub.toLowerCase()) || rawSub;
+  const normalBalance = NORMAL_BALANCE[type] || 'Debit';
+  const creditLimit   = parseFloat(get('creditLimit'))  || 0;
+  const interestRate  = parseFloat(get('interestRate')) || 0;
+  const isCreditLine  = subType === 'Bank' && creditLimit > 0;
+  const errors = [];
+  if (!code) errors.push('Missing code');
+  if (!name) errors.push('Missing name');
+  if (type && !ACCOUNT_TYPES.includes(type)) errors.push(`Unknown type: "${type}"`);
+  const status = errors.length > 0 ? 'error' : existingCodes[code] ? 'duplicate' : 'new';
+  return { code, name, type: type||'', subType: subType||'', normalBalance, creditLimit, interestRate, isCreditLine,
+    notes:get('notes'), accountNo:get('accountNo'), parent:get('parent'),
+    errors, status, existingId: existingCodes[code] || null };
+}
 
 const CSS = `
   .coa-wrap  { display:flex; flex-direction:column; height:100%; overflow:hidden; font-family:Inter,system-ui,sans-serif; background:#f8fafc; }
@@ -41,15 +113,46 @@ const CSS = `
   .toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; animation:fadeIn .2s; }
   .backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+  .imp-modal { width:min(860px,98vw); max-height:92vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
+  .imp-header { padding:16px 22px 14px; border-bottom:1px solid #e5e7eb; background:#f8fafc; flex-shrink:0; }
+  .imp-steps { display:flex; align-items:center; margin-top:12px; }
+  .imp-step { display:flex; align-items:center; gap:7px; }
+  .imp-step-num { width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:900; flex-shrink:0; }
+  .sn-done { background:#22c55e; color:#fff; } .sn-active { background:#f97316; color:#fff; } .sn-idle { background:#e5e7eb; color:#94a3b8; }
+  .imp-step-lbl { font-size:12px; font-weight:700; }
+  .sl-done { color:#22c55e; } .sl-active { color:#f97316; } .sl-idle { color:#94a3b8; }
+  .imp-conn { flex:1; height:2px; margin:0 8px; } .ic-done { background:#22c55e; } .ic-idle { background:#e5e7eb; }
+  .imp-body { flex:1; overflow-y:auto; padding:22px; }
+  .imp-footer { display:flex; justify-content:space-between; align-items:center; padding:14px 22px; border-top:1px solid #e5e7eb; flex-shrink:0; background:#fff; }
+  .drop-zone { border:2px dashed #e5e7eb; border-radius:14px; padding:44px 24px; text-align:center; cursor:pointer; transition:all .2s; }
+  .drop-zone:hover,.dz-over { border-color:#f97316!important; background:#fff7ed!important; }
+  .map-tbl { width:100%; border-collapse:collapse; }
+  .map-tbl th,.map-tbl td { padding:8px 12px; border-bottom:1px solid #f1f5f9; font-size:12px; text-align:left; }
+  .map-tbl th { color:#64748b; font-weight:800; font-size:10px; letter-spacing:.05em; text-transform:uppercase; background:#f8fafc; }
+  .imp-sel { border:1px solid #e5e7eb; border-radius:8px; padding:6px 8px; font-size:12px; background:#fff; font-family:inherit; width:100%; }
+  .prev-tbl { width:100%; border-collapse:collapse; font-size:11px; }
+  .prev-tbl th,.prev-tbl td { padding:7px 10px; border-bottom:1px solid #f1f5f9; text-align:left; white-space:nowrap; }
+  .prev-tbl th { color:#64748b; font-weight:800; font-size:10px; letter-spacing:.05em; text-transform:uppercase; background:#f8fafc; position:sticky; top:0; z-index:1; }
+  .pr-new td { background:#f0fdf4!important; } .pr-dup td { background:#fffbeb!important; } .pr-err td { background:#fef2f2!important; }
+  .ibadge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:10px; font-weight:700; border:1px solid; }
+  .ib-new { background:#f0fdf4; border-color:#86efac; color:#15803d; }
+  .ib-dup { background:#fffbeb; border-color:#fde68a; color:#92400e; }
+  .ib-err { background:#fef2f2; border-color:#fca5a5; color:#991b1b; }
+  .imp-kpi-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  .imp-kpi { background:#f8fafc; border:1px solid #e5e7eb; border-radius:10px; padding:10px 16px; min-width:100px; }
+  .imp-kpi-val { font-size:22px; font-weight:900; line-height:1; }
+  .imp-kpi-lbl { font-size:10px; color:#94a3b8; font-weight:800; text-transform:uppercase; letter-spacing:.06em; margin-top:3px; }
+  .imp-bar { height:6px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:8px; }
+  .imp-bar-fill { height:100%; background:#f97316; border-radius:999px; transition:width .25s; }
 `;
 
 const TYPE_COLORS = {
-  'Asset':         { background:'#ecfdf5', border:'#6ee7b7', color:'#065f46' },
-  'Liability':     { background:'#fef2f2', border:'#fecaca', color:'#991b1b' },
-  'Equity':        { background:'#eff6ff', border:'#bfdbfe', color:'#1d4ed8' },
-  'Revenue':       { background:'#f0fdf4', border:'#bbf7d0', color:'#15803d' },
-  'Expense':       { background:'#fff7ed', border:'#fed7aa', color:'#c2410c' },
-  'Cost of Sales': { background:'#fef9c3', border:'#fde68a', color:'#92400e' },
+  'Asset':            { background:'#ecfdf5', border:'#6ee7b7', color:'#065f46' },
+  'Liability':        { background:'#fef2f2', border:'#fecaca', color:'#991b1b' },
+  'Equity':           { background:'#eff6ff', border:'#bfdbfe', color:'#1d4ed8' },
+  'Income':           { background:'#f0fdf4', border:'#bbf7d0', color:'#15803d' },
+  'Expense':          { background:'#fff7ed', border:'#fed7aa', color:'#c2410c' },
+  'Cost of Services': { background:'#fef9c3', border:'#fde68a', color:'#92400e' },
 };
 
 export default function COAPage() {
@@ -60,8 +163,63 @@ export default function COAPage() {
   const [saving,   setSaving]   = useState(false);
   const [toast,    setToast]    = useState('');
   const [confirmModal, setConfirmModal] = useState(null);
+  const [impWiz, setImpWiz]             = useState(null);
+  // impWiz: null | { step:1|2|3, fileName, rawRows, headers, mapping, dupMode, previewRows, importing, progress }
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  /* ── Import: parse file via SheetJS ─────────────────────────── */
+  const parseFile = useCallback((file) => {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!['csv','xlsx','xls'].includes(ext)) { showToast('Only CSV, XLS, or XLSX supported.'); return; }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb   = XLSX.read(new Uint8Array(e.target.result), { type:'array' });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { defval:'' });
+        if (!rows.length) { showToast('File appears empty.'); return; }
+        const headers = Object.keys(rows[0]);
+        setImpWiz({ step:1, fileName:file.name, rawRows:rows, headers,
+          mapping:autoMapHeaders(headers), dupMode:'skip',
+          previewRows:[], importing:false, progress:0 });
+      } catch { showToast('Could not read file.'); }
+    };
+    reader.readAsArrayBuffer(file);
+  }, []);
+
+  /* ── Import: build preview rows ─────────────────────────────── */
+  const buildPreview = useCallback((wiz) => {
+    const existing = {};
+    accounts.forEach(a => { if (a.code) existing[a.code] = a.id; });
+    return wiz.rawRows.map(r => buildPreviewRow(r, wiz.mapping, existing));
+  }, [accounts]);
+
+  /* ── Import: write to Firestore ─────────────────────────────── */
+  const runImport = useCallback(async (wiz) => {
+    const toWrite = wiz.previewRows.filter(r =>
+      r.status === 'new' || (r.status === 'duplicate' && wiz.dupMode === 'overwrite')
+    );
+    if (!toWrite.length) { showToast('Nothing to import.'); return; }
+    setImpWiz(w => ({...w, importing:true, progress:0}));
+    let done = 0;
+    for (const r of toWrite) {
+      const payload = { code:r.code, name:r.name, type:r.type, subType:r.subType,
+        normalBalance:r.normalBalance, isCreditLine:r.isCreditLine,
+        creditLimit:r.creditLimit, interestRate:r.interestRate, notes:r.notes,
+        updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
+      try {
+        if (r.status === 'duplicate' && r.existingId)
+          await updateDoc(doc(db,'accounts',r.existingId), payload);
+        else
+          await addDoc(collection(db,'accounts'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
+      } catch { /* skip failed rows silently */ }
+      done++;
+      setImpWiz(w => w ? {...w, progress:Math.round((done/toWrite.length)*100)} : w);
+    }
+    setImpWiz(null);
+    showToast(`✅ Imported ${done} account${done!==1?'s':''}!`);
+  }, []);
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
   useEffect(() => {
@@ -82,11 +240,13 @@ export default function COAPage() {
 
   const save = async () => {
     if (!modal) return;
-    const { isNew, id, code, name, type, normalBalance, subType, creditLimit, interestRate, notes } = modal;
+    const { isNew, id, code, name, type, subType, isCreditLine, creditLimit, interestRate, notes } = modal;
     if (!code?.trim() || !name?.trim()) { showToast('Code and Name required.'); return; }
     setSaving(true);
     try {
-      const payload = { code:code.trim(), name:name.trim(), type:type||'Asset', normalBalance:normalBalance||'Debit', subType:subType||'', creditLimit:Number(creditLimit||0), interestRate:Number(interestRate||0), notes:notes||'' };
+      const isBank = subType === 'Bank';
+      const hasCL  = isBank && !!isCreditLine;
+      const payload = { code:code.trim(), name:name.trim(), type:type||'Asset', normalBalance:NORMAL_BALANCE[type]||'Debit', subType:subType||'', isCreditLine:hasCL, creditLimit:hasCL?Number(creditLimit||0):0, interestRate:hasCL?Number(interestRate||0):0, notes:notes||'' };
       if (isNew) await addDoc(collection(db,'accounts'), { ...payload, createdAt:serverTimestamp() });
       else       await updateDoc(doc(db,'accounts',id), { ...payload, updatedAt:serverTimestamp() });
       showToast('Account saved.'); setModal(null);
@@ -108,7 +268,10 @@ export default function COAPage() {
       <style>{CSS}</style>
       <div className="coa-top">
         <strong style={{fontSize:18,fontWeight:900,color:'#0b1220'}}>CHART OF ACCOUNTS</strong>
-        <button className="btn btn-primary" onClick={()=>setModal({isNew:true,code:'',name:'',type:'Expense',normalBalance:'Debit',subType:'',creditLimit:0,interestRate:0,notes:''})}>＋ Add Account</button>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setImpWiz({step:1,fileName:'',rawRows:[],headers:[],mapping:{},dupMode:'skip',previewRows:[],importing:false,progress:0})}>⬆ Import</button>
+          <button className="btn btn-primary" onClick={()=>setModal({isNew:true,code:'',name:'',type:'Expense',subType:SUBTYPES_BY_TYPE['Expense'][0],isCreditLine:false,creditLimit:0,interestRate:0,notes:''})}>＋ Add Account</button>
+        </div>
       </div>
       <div className="coa-body">
         <div className="toolbar">
@@ -123,10 +286,10 @@ export default function COAPage() {
         <div className="card">
           <table>
             <thead>
-              <tr><th>CODE</th><th>ACCOUNT NAME</th><th>TYPE</th><th>NORMAL BALANCE</th><th>SUB-TYPE</th><th>CREDIT LIMIT</th><th style={{textAlign:'center'}}>ACTIONS</th></tr>
+              <tr><th>CODE</th><th>ACCOUNT NAME</th><th>TYPE</th><th>SUB-TYPE</th><th>CREDIT LIMIT</th><th style={{textAlign:'center'}}>ACTIONS</th></tr>
             </thead>
             <tbody>
-              {filtered.length === 0 && <tr><td colSpan={7} className="empty">No accounts found.</td></tr>}
+              {filtered.length === 0 && <tr><td colSpan={6} className="empty">No accounts found.</td></tr>}
               {filtered.map(a => {
                 const ts = typeStyle(a.type);
                 return (
@@ -134,7 +297,6 @@ export default function COAPage() {
                     <td><strong style={{fontFamily:'monospace',color:'#f97316'}}>{a.code||'—'}</strong></td>
                     <td>{a.name}</td>
                     <td><span className="pill" style={{background:ts.background,borderColor:ts.border,color:ts.color}}>{a.type||'—'}</span></td>
-                    <td>{a.normalBalance||'—'}</td>
                     <td style={{color:'#64748b'}}>{a.subType||'—'}</td>
                     <td>{Number(a.creditLimit||0) > 0 ? new Intl.NumberFormat('en-PH',{style:'currency',currency:'PHP'}).format(a.creditLimit) : '—'}</td>
                     <td style={{textAlign:'center'}}>
@@ -170,28 +332,47 @@ export default function COAPage() {
                 </div>
                 <div className="field">
                   <label>Type</label>
-                  <select value={modal.type||'Asset'} onChange={e=>setModal(m=>({...m,type:e.target.value}))}>
+                  <select value={modal.type||'Asset'} onChange={e=>{
+                    const t = e.target.value;
+                    const firstSub = (SUBTYPES_BY_TYPE[t]||[''])[0];
+                    setModal(m=>({...m,type:t,subType:firstSub,isCreditLine:firstSub==='Bank'?m.isCreditLine:false}));
+                  }}>
                     {ACCOUNT_TYPES.map(t=><option key={t}>{t}</option>)}
                   </select>
                 </div>
                 <div className="field">
-                  <label>Normal Balance</label>
-                  <select value={modal.normalBalance||'Debit'} onChange={e=>setModal(m=>({...m,normalBalance:e.target.value}))}>
-                    <option>Debit</option><option>Credit</option>
+                  <label>Sub-Type</label>
+                  <select value={modal.subType||''} onChange={e=>{
+                    const s = e.target.value;
+                    setModal(m=>({...m,subType:s,isCreditLine:s==='Bank'?m.isCreditLine:false}));
+                  }}>
+                    {(SUBTYPES_BY_TYPE[modal.type]||[]).map(s=><option key={s}>{s}</option>)}
                   </select>
                 </div>
-                <div className="field">
-                  <label>Sub-Type</label>
-                  <input value={modal.subType||''} onChange={e=>setModal(m=>({...m,subType:e.target.value}))} placeholder="e.g. Current Asset, Bank" />
+                <div className="col2" style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',background:modal.subType==='Bank'?'#f0f9ff':'#f8fafc',border:'1px solid',borderColor:modal.subType==='Bank'?'#bae6fd':'#e5e7eb',borderRadius:10}}>
+                  <input type="checkbox" id="coa-is-cl"
+                    checked={!!modal.isCreditLine}
+                    disabled={modal.subType !== 'Bank'}
+                    onChange={e=>setModal(m=>({...m,isCreditLine:e.target.checked}))}
+                    style={{width:16,height:16,cursor:modal.subType==='Bank'?'pointer':'not-allowed',flexShrink:0}}
+                  />
+                  <label htmlFor="coa-is-cl" style={{fontSize:13,fontWeight:700,color:modal.subType==='Bank'?'#0369a1':'#94a3b8',cursor:modal.subType==='Bank'?'pointer':'not-allowed',userSelect:'none',margin:0}}>
+                    Credit Line
+                    {modal.subType !== 'Bank' && <span style={{fontSize:11,fontWeight:400,marginLeft:6}}>— only available for Bank accounts</span>}
+                  </label>
                 </div>
-                <div className="field">
-                  <label>Credit Limit (for bank credit lines)</label>
-                  <input type="number" value={modal.creditLimit||0} onChange={e=>setModal(m=>({...m,creditLimit:e.target.value}))} />
-                </div>
-                <div className="field">
-                  <label>Interest Rate (monthly, e.g. 0.015 = 1.5%)</label>
-                  <input type="number" step="0.001" value={modal.interestRate||0} onChange={e=>setModal(m=>({...m,interestRate:e.target.value}))} />
-                </div>
+                {modal.isCreditLine && (
+                  <>
+                    <div className="field">
+                      <label>Credit Limit</label>
+                      <input type="number" value={modal.creditLimit||0} onChange={e=>setModal(m=>({...m,creditLimit:e.target.value}))} />
+                    </div>
+                    <div className="field">
+                      <label>Interest Rate (monthly, e.g. 0.015 = 1.5%)</label>
+                      <input type="number" step="0.001" value={modal.interestRate||0} onChange={e=>setModal(m=>({...m,interestRate:e.target.value}))} />
+                    </div>
+                  </>
+                )}
                 <div className="field col2" style={{marginTop:4}}>
                   <label>Notes</label>
                   <input value={modal.notes||''} onChange={e=>setModal(m=>({...m,notes:e.target.value}))} placeholder="Optional notes" />
@@ -224,6 +405,208 @@ export default function COAPage() {
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}
+
+      {/* ════ Import Wizard ════════════════════════════════════════ */}
+      {impWiz && (() => {
+        const stepLabels = ['Configure','Map Fields','Preview & Import'];
+
+        /* Step bar */
+        const StepBar = () => (
+          <div className="imp-steps">
+            {stepLabels.map((lbl, i) => {
+              const n = i + 1;
+              const st = n < impWiz.step ? 'done' : n === impWiz.step ? 'active' : 'idle';
+              return (
+                <div key={n} style={{display:'flex',alignItems:'center',flex:i<stepLabels.length-1?1:'0 0 auto'}}>
+                  <div className="imp-step">
+                    <div className={`imp-step-num sn-${st}`}>{st==='done'?'✓':n}</div>
+                    <span className={`imp-step-lbl sl-${st}`}>{lbl}</span>
+                  </div>
+                  {i < stepLabels.length-1 && <div className={`imp-conn ${n<impWiz.step?'ic-done':'ic-idle'}`} style={{flex:1,height:2,margin:'0 8px'}} />}
+                </div>
+              );
+            })}
+          </div>
+        );
+
+        /* ── Phase 1 ── */
+        const Phase1 = () => {
+          const [drag, setDrag] = useState(false);
+          const fileRef = useRef(null);
+          return (
+            <div>
+              <div className={`drop-zone${drag?' dz-over':''}`}
+                onDragOver={e=>{e.preventDefault();setDrag(true);}}
+                onDragLeave={()=>setDrag(false)}
+                onDrop={e=>{e.preventDefault();setDrag(false);parseFile(e.dataTransfer.files[0]);}}
+                onClick={()=>fileRef.current.click()}>
+                <div style={{fontSize:36,marginBottom:10}}>📂</div>
+                <div style={{fontWeight:700,fontSize:14,color:'#0b1220',marginBottom:12}}>Drag and drop file to import</div>
+                <span style={{background:'#f97316',color:'#fff',padding:'9px 20px',borderRadius:10,fontWeight:700,fontSize:13}}>Choose File</span>
+                <div style={{marginTop:12,fontSize:11,color:'#94a3b8'}}>Maximum File Size: 25 MB &nbsp;·&nbsp; CSV · XLS · XLSX</div>
+                <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{display:'none'}}
+                  onChange={e=>parseFile(e.target.files[0])} />
+              </div>
+
+              {impWiz.fileName && (
+                <div style={{marginTop:14,padding:'12px 16px',background:'#f0fdf4',border:'1px solid #86efac',borderRadius:10,display:'flex',alignItems:'center',gap:10}}>
+                  <span style={{fontSize:20}}>📄</span>
+                  <div><div style={{fontWeight:700,fontSize:13}}>{impWiz.fileName}</div>
+                    <div style={{fontSize:11,color:'#64748b'}}>{impWiz.rawRows.length} data row{impWiz.rawRows.length!==1?'s':''} detected</div></div>
+                </div>
+              )}
+
+              <div style={{marginTop:20}}>
+                <div style={{fontSize:11,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase',marginBottom:10}}>Duplicate Handling</div>
+                {[
+                  {val:'skip',      label:'Skip Duplicates',    desc:'Keep existing accounts in Firestore; rows with a matching Account Code are ignored.'},
+                  {val:'overwrite', label:'Overwrite Accounts', desc:'Update existing accounts with the values from this import file.'},
+                ].map(opt => (
+                  <label key={opt.val} style={{display:'flex',alignItems:'flex-start',gap:10,padding:'11px 14px',border:'1px solid',borderColor:impWiz.dupMode===opt.val?'#f97316':'#e5e7eb',borderRadius:10,marginBottom:8,cursor:'pointer',background:impWiz.dupMode===opt.val?'#fff7ed':'#fff'}}>
+                    <input type="radio" name="dupMode" checked={impWiz.dupMode===opt.val}
+                      onChange={()=>setImpWiz(w=>({...w,dupMode:opt.val}))}
+                      style={{marginTop:2,accentColor:'#f97316'}} />
+                    <div><div style={{fontWeight:700,fontSize:13}}>{opt.label}</div>
+                      <div style={{fontSize:11,color:'#64748b',marginTop:2}}>{opt.desc}</div></div>
+                  </label>
+                ))}
+              </div>
+            </div>
+          );
+        };
+
+        /* ── Phase 2 ── */
+        const Phase2 = () => (
+          <div>
+            <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10,padding:'10px 14px',marginBottom:18,fontSize:12,color:'#1d4ed8',display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span>ℹ️</span><span>The best-match column for each ScaleBooks field has been auto-selected. Adjust any that look incorrect.</span>
+            </div>
+            <div style={{fontWeight:800,fontSize:13,color:'#0b1220',marginBottom:12}}>Chart of Account Details</div>
+            <table className="map-tbl">
+              <thead><tr><th>ScaleBooks Field</th><th>Your File Column</th><th>Sample Value (row 1)</th></tr></thead>
+              <tbody>
+                {IMPORT_FIELDS.map(f => {
+                  const mapped = impWiz.mapping[f.key] || '';
+                  const sample = mapped && impWiz.rawRows[0] ? String(impWiz.rawRows[0][mapped] ?? '').slice(0,50) : '—';
+                  return (
+                    <tr key={f.key}>
+                      <td style={{fontWeight:700}}>{f.label}{f.required&&<span style={{color:'#f97316',marginLeft:4}}>*</span>}</td>
+                      <td>
+                        <select className="imp-sel" value={mapped}
+                          onChange={e=>setImpWiz(w=>({...w,mapping:{...w.mapping,[f.key]:e.target.value==='__none'?'':e.target.value}}))}>
+
+                          <option value="__none">(ignore)</option>
+                          {impWiz.headers.map(h=><option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </td>
+                      <td style={{color:'#64748b'}}>{sample}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+
+        /* ── Phase 3 ── */
+        const Phase3 = () => {
+          const rows  = impWiz.previewRows;
+          const nNew  = rows.filter(r=>r.status==='new').length;
+          const nDup  = rows.filter(r=>r.status==='duplicate').length;
+          const nErr  = rows.filter(r=>r.status==='error').length;
+          const nWrit = rows.filter(r=>r.status==='new'||(r.status==='duplicate'&&impWiz.dupMode==='overwrite')).length;
+          return (
+            <div>
+              <div className="imp-kpi-row">
+                <div className="imp-kpi"><div className="imp-kpi-val" style={{color:'#15803d'}}>{nNew}</div><div className="imp-kpi-lbl">New</div></div>
+                <div className="imp-kpi"><div className="imp-kpi-val" style={{color:'#92400e'}}>{nDup}</div><div className="imp-kpi-lbl">Duplicates ({impWiz.dupMode==='skip'?'skip':'overwrite'})</div></div>
+                <div className="imp-kpi"><div className="imp-kpi-val" style={{color:'#991b1b'}}>{nErr}</div><div className="imp-kpi-lbl">Errors (skipped)</div></div>
+                <div className="imp-kpi"><div className="imp-kpi-val" style={{color:'#f97316'}}>{nWrit}</div><div className="imp-kpi-lbl">Will be written</div></div>
+              </div>
+              {impWiz.importing && (
+                <div style={{marginBottom:16}}>
+                  <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>Importing… {impWiz.progress}%</div>
+                  <div className="imp-bar"><div className="imp-bar-fill" style={{width:`${impWiz.progress}%`}} /></div>
+                </div>
+              )}
+              <div style={{overflowX:'auto'}}>
+                <table className="prev-tbl">
+                  <thead><tr><th>Status</th><th>Code</th><th>Account Name</th><th>Type</th><th>Sub-Type</th><th>Normal Bal.</th><th>Credit Limit</th><th>Notes / Error</th></tr></thead>
+                  <tbody>
+                    {rows.map((r,i) => (
+                      <tr key={i} className={r.status==='new'?'pr-new':r.status==='duplicate'?'pr-dup':'pr-err'}>
+                        <td><span className={`ibadge ib-${r.status==='new'?'new':r.status==='duplicate'?'dup':'err'}`}>
+                          {r.status==='new'?'New':r.status==='duplicate'?'Duplicate':'Error'}
+                        </span></td>
+                        <td style={{fontFamily:'monospace',fontWeight:700,color:'#f97316'}}>{r.code||'—'}</td>
+                        <td>{r.name||'—'}</td>
+                        <td>{r.type||'—'}</td>
+                        <td>{r.subType||'—'}</td>
+                        <td>{r.normalBalance}</td>
+                        <td>{r.creditLimit>0?new Intl.NumberFormat('en-PH',{style:'currency',currency:'PHP'}).format(r.creditLimit):'—'}</td>
+                        <td style={{color:r.errors.length?'#dc2626':'#64748b',maxWidth:180,whiteSpace:'normal'}}>
+                          {r.errors.length?r.errors.join(', '):r.notes||'—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        };
+
+        return (
+          <div className="backdrop" onClick={e=>e.target===e.currentTarget&&!impWiz.importing&&setImpWiz(null)}>
+            <div className="imp-modal" onClick={e=>e.stopPropagation()}>
+
+              <div className="imp-header">
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                  <strong style={{fontSize:15,fontWeight:900}}>Import Chart of Accounts</strong>
+                  {!impWiz.importing&&<button className="btn btn-ghost btn-sm" onClick={()=>setImpWiz(null)}>✕</button>}
+                </div>
+                <StepBar />
+              </div>
+
+              <div className="imp-body">
+                {impWiz.step===1 && <Phase1 />}
+                {impWiz.step===2 && <Phase2 />}
+                {impWiz.step===3 && <Phase3 />}
+              </div>
+
+              <div className="imp-footer">
+                <div>
+                  {impWiz.step>1&&!impWiz.importing&&(
+                    <button className="btn btn-ghost" onClick={()=>setImpWiz(w=>({...w,step:w.step-1}))}>← Previous</button>
+                  )}
+                </div>
+                <div style={{display:'flex',gap:10,alignItems:'center'}}>
+                  {!impWiz.importing&&<button className="btn btn-ghost" onClick={()=>setImpWiz(null)}>Cancel</button>}
+                  {impWiz.step===1&&(
+                    <button className="btn btn-primary" disabled={!impWiz.rawRows.length}
+                      onClick={()=>setImpWiz(w=>({...w,step:2}))}>Next →</button>
+                  )}
+                  {impWiz.step===2&&(
+                    <button className="btn btn-primary" onClick={()=>{
+                      const preview = buildPreview(impWiz);
+                      setImpWiz(w=>({...w,step:3,previewRows:preview}));
+                    }}>Next →</button>
+                  )}
+                  {impWiz.step===3&&!impWiz.importing&&(
+                    <button className="btn btn-primary"
+                      disabled={!impWiz.previewRows.filter(r=>r.status==='new'||(r.status==='duplicate'&&impWiz.dupMode==='overwrite')).length}
+                      onClick={()=>runImport(impWiz)}>
+                      ⬆ Import {impWiz.previewRows.filter(r=>r.status==='new'||(r.status==='duplicate'&&impWiz.dupMode==='overwrite')).length} Account{impWiz.previewRows.filter(r=>r.status==='new'||(r.status==='duplicate'&&impWiz.dupMode==='overwrite')).length!==1?'s':''}
+                    </button>
+                  )}
+                  {impWiz.importing&&<span style={{fontSize:12,color:'#64748b',fontWeight:600}}>Importing, please wait…</span>}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
