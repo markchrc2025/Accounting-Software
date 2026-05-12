@@ -126,6 +126,7 @@ export default function FixedAssetsPage() {
   const [activeTab, setActiveTab]   = useState('assets');
   const [saveStatus, setSaveStatus] = useState('');
   const [toast, setToast]           = useState('');
+  const [confirmModal, setConfirmModal] = useState(null);
   const [assetModal, setAssetModal] = useState(null);
   const [typeModal, setTypeModal]   = useState(null);
   const [pmModal, setPmModal]       = useState(null);
@@ -135,6 +136,7 @@ export default function FixedAssetsPage() {
   const [calYear, setCalYear]       = useState(new Date().getFullYear());
   const saveTimerRef = useRef(null);
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
+  const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db,'fixedAssets','profile'), snap => {
@@ -168,9 +170,10 @@ export default function FixedAssetsPage() {
   }, [types, debounceSave]);
 
   const deleteAsset = useCallback(id => {
-    if(!confirm('Delete this asset?')) return;
-    setAssets(prev=>{const next=prev.filter(a=>a.id!==id);debounceSave(next,types);return next;});
-  }, [types, debounceSave]);
+    askConfirm('Delete this asset?', () => {
+      setAssets(prev=>{const next=prev.filter(a=>a.id!==id);debounceSave(next,types);return next;});
+    });
+  }, [types, debounceSave, setConfirmModal]);
 
   const saveType = useCallback(t => {
     setTypes(prev => {
@@ -182,9 +185,10 @@ export default function FixedAssetsPage() {
   }, [assets, debounceSave]);
 
   const deleteType = useCallback(id => {
-    if(!confirm('Delete this asset type?')) return;
-    setTypes(prev=>{const next=prev.filter(t=>t.id!==id);debounceSave(assets,next);return next;});
-  }, [assets, debounceSave]);
+    askConfirm('Delete this asset type?', () => {
+      setTypes(prev=>{const next=prev.filter(t=>t.id!==id);debounceSave(assets,next);return next;});
+    });
+  }, [assets, debounceSave, setConfirmModal]);
 
   const updateAssetField = useCallback((id, field, value) => {
     setAssets(prev=>{const next=prev.map(a=>a.id===id?{...a,[field]:value}:a);debounceSave(next,types);return next;});
@@ -727,6 +731,23 @@ export default function FixedAssetsPage() {
       {assetModal!==null&&<AssetModal />}
       {typeModal!==null&&<TypeModal />}
       {pmModal!==null&&<PmModal />}
+      {confirmModal && (
+        <div className="backdrop" onClick={() => setConfirmModal(null)}>
+          <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
+            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:14,fontWeight:900,color:'#0b1220'}}>Confirm Action</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setConfirmModal(null)}>✕</button>
+            </div>
+            <div style={{padding:'18px'}}>
+              <p style={{margin:0,fontSize:14,color:'#0b1220',lineHeight:1.5}}>{confirmModal.message}</p>
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
+              <button className="btn btn-ghost" onClick={()=>setConfirmModal(null)}>Cancel</button>
+              <button className="btn btn-primary" style={{background:'#dc2626'}} onClick={()=>{confirmModal.onConfirm();setConfirmModal(null);}}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast&&<div className="toast">{toast}</div>}
     </div>
   );

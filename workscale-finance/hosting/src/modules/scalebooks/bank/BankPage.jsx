@@ -88,8 +88,10 @@ export default function BankPage() {
   const [txEnd, setTxEnd]           = useState('');
   const [saving, setSaving]         = useState(false);
   const [toast, setToast]           = useState('');
+  const [confirmModal, setConfirmModal] = useState(null);
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
+  const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
   useEffect(() => {
     const unsub1 = onSnapshot(query(collection(db,'dailyBankBalances'),orderBy('date','desc')), snap => {
@@ -132,10 +134,11 @@ export default function BankPage() {
     setSaving(false);
   }
 
-  async function deleteBalance(id) {
-    if (!confirm('Delete this balance entry?')) return;
-    await deleteDoc(doc(db,'dailyBankBalances',id));
-    showToast('Deleted.');
+  function deleteBalance(id) {
+    askConfirm('Delete this balance entry?', async () => {
+      await deleteDoc(doc(db,'dailyBankBalances',id));
+      showToast('Deleted.');
+    });
   }
 
   /* ── Save manual transaction ─────────────────────────────── */
@@ -158,9 +161,10 @@ export default function BankPage() {
     setSaving(false);
   }
 
-  async function deleteTx(id) {
-    if (!confirm('Delete this transaction?')) return;
-    await deleteDoc(doc(db,'bankTransactions',id));
+  function deleteTx(id) {
+    askConfirm('Delete this transaction?', async () => {
+      await deleteDoc(doc(db,'bankTransactions',id));
+    });
   }
 
   const filteredBalances = filterBank ? balances.filter(b=>b.bankCode===filterBank) : balances;
@@ -292,7 +296,7 @@ export default function BankPage() {
                         <td>
                           <div style={{display:'flex',gap:4}}>
                             <button className="btn btn-ghost btn-sm" onClick={()=>setClModal({...cl})}>Edit</button>
-                            <button onClick={async()=>{if(!confirm('Delete?'))return;await deleteDoc(doc(db,'creditLines',cl.id));}} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
+                            <button onClick={()=>askConfirm('Delete this credit line?', async()=>{await deleteDoc(doc(db,'creditLines',cl.id));})} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
                           </div>
                         </td>
                       </tr>
@@ -551,6 +555,23 @@ export default function BankPage() {
       </div>
       {modal!==null&&<BalanceModal />}
       {txModal!==null&&<TxFormModal />}
+      {confirmModal && (
+        <div className="backdrop" onClick={() => setConfirmModal(null)}>
+          <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
+            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:14,fontWeight:900,color:'#0b1220'}}>Confirm Action</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setConfirmModal(null)}>✕</button>
+            </div>
+            <div style={{padding:'18px'}}>
+              <p style={{margin:0,fontSize:14,color:'#0b1220',lineHeight:1.5}}>{confirmModal.message}</p>
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
+              <button className="btn btn-ghost" onClick={()=>setConfirmModal(null)}>Cancel</button>
+              <button className="btn btn-primary" style={{background:'#dc2626'}} onClick={()=>{confirmModal.onConfirm();setConfirmModal(null);}}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast&&<div className="toast">{toast}</div>}
     </div>
   );

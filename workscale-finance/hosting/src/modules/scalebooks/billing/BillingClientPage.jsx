@@ -1,316 +1,203 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
-  collection, query, where, orderBy, onSnapshot,
-  addDoc, updateDoc, doc, serverTimestamp, getDoc
+  collection, onSnapshot, query, orderBy, where, getDocs, updateDoc, doc, serverTimestamp
 } from 'firebase/firestore';
-import { useParams, useNavigate } from 'react-router-dom';
 import { db, auth } from '../../../firebase.js';
 
-const fmt = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
-const uid = () => Math.random().toString(36).slice(2, 10).toUpperCase();
+const STATUS_STYLES = {
+  'Draft':            { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
+  'Pending Review':   { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
+  'Pending Approval': { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
+  'Approved':         { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
+  'Sent':             { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
+  'Partial':          { background:'#f5f3ff', borderColor:'#ddd6fe', color:'#5b21b6' },
+  'Paid':             { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' },
+  'Voided':           { background:'#fef2f2', borderColor:'#fecaca', color:'#991b1b' },
+};
 
 const CSS = `
-  .bcp-wrap   { display:flex; flex-direction:column; height:100%; overflow:hidden; font-family:Inter,system-ui,sans-serif; }
-  .bcp-topbar { display:flex; align-items:center; justify-content:space-between; padding:14px 22px; flex-shrink:0; border-bottom:1px solid #e5e7eb; background:#fff; }
-  .bcp-body   { flex:1; overflow-y:auto; padding:16px 22px; }
-  .input      { border:1px solid #e5e7eb; border-radius:10px; padding:9px 12px; font-size:13px; background:#fff; }
-  .btn        { border:0; border-radius:10px; padding:9px 16px; font-weight:700; cursor:pointer; font-size:13px; font-family:inherit; }
+  .bc-wrap { display:flex; flex-direction:column; height:100%; overflow:hidden; font-family:Inter,system-ui,sans-serif; background:#f8fafc; }
+  .bc-top  { display:flex; align-items:center; justify-content:space-between; padding:16px 22px 12px; flex-shrink:0; border-bottom:1px solid #e5e7eb; background:#fff; }
+  .bc-body { flex:1; overflow-y:auto; padding:16px 22px; }
+  .kpi-row { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:12px; margin-bottom:16px; }
+  .kpi-card { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:14px 16px; }
+  .kpi-label { font-size:10px; color:#94a3b8; font-weight:800; letter-spacing:.06em; text-transform:uppercase; margin-bottom:4px; }
+  .kpi-value { font-size:20px; font-weight:900; color:#0b1220; }
+  .kpi-value.orange { color:#f97316; }
+  .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+  .input   { border:1px solid #e5e7eb; border-radius:10px; padding:9px 12px; font-size:13px; background:#fff; font-family:inherit; }
+  .btn     { border:0; border-radius:10px; padding:9px 16px; font-weight:700; cursor:pointer; font-size:13px; font-family:inherit; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
   .btn-primary { background:#f97316; color:#fff; }
-  .btn-success { background:#22c55e; color:#fff; }
   .btn-ghost   { background:#f1f5f9; color:#0b1220; }
   .btn-ghost:hover { background:#e2e8f0; }
-  .btn-sm     { padding:6px 12px; font-size:12px; }
-  .tabs       { display:flex; gap:4px; background:#f1f5f9; border-radius:10px; padding:4px; margin-bottom:16px; }
-  .tab        { border:0; background:none; padding:8px 18px; border-radius:8px; font-size:13px; font-weight:700; cursor:pointer; color:#64748b; font-family:inherit; }
-  .tab.active { background:#fff; color:#0b1220; box-shadow:0 1px 4px rgba(0,0,0,.1); }
-  .summary-bar { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
-  .scard      { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:14px 16px; }
-  .scard-label { font-size:9px; font-weight:800; color:#94a3b8; letter-spacing:.07em; text-transform:uppercase; margin-bottom:4px; }
-  .scard-value { font-size:20px; font-weight:900; }
-  .card       { background:#fff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; }
-  table       { width:100%; border-collapse:collapse; }
-  th,td       { padding:10px 12px; border-bottom:1px solid #f1f5f9; font-size:13px; text-align:left; }
-  th          { color:#64748b; font-weight:800; font-size:11px; letter-spacing:.05em; text-transform:uppercase; background:#f8fafc; }
+  .btn-sm { padding:6px 12px; font-size:12px; }
+  .btn-xs { padding:4px 8px; font-size:11px; border-radius:8px; }
+  .card   { background:#fff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; margin-bottom:16px; }
+  table   { width:100%; border-collapse:collapse; }
+  th,td   { padding:10px 12px; border-bottom:1px solid #f1f5f9; font-size:13px; text-align:left; }
+  th      { color:#64748b; font-weight:800; font-size:11px; letter-spacing:.05em; text-transform:uppercase; background:#f8fafc; }
   tr:hover td { background:#fafafa; }
   tr:last-child td { border-bottom:none; }
-  .pill       { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid; }
-  .pill-paid  { background:#f0fdf4; border-color:#bbf7d0; color:#15803d; }
-  .pill-partial { background:#fffbeb; border-color:#fde68a; color:#92400e; }
-  .pill-unpaid  { background:#fef2f2; border-color:#fecaca; color:#dc2626; }
-  .pill-draft   { background:#f8fafc; border-color:#e2e8f0; color:#64748b; }
-  .empty      { padding:48px; text-align:center; color:#94a3b8; }
-  .backdrop   { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
-  .modal      { width:min(640px,98vw); background:#fff; border-radius:16px; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
-  .modal-h    { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid #e5e7eb; background:#f8fafc; }
-  .modal-b    { padding:20px; display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .modal-f    { display:flex; justify-content:flex-end; gap:10px; padding:14px 20px; border-top:1px solid #e5e7eb; }
-  .field      { display:flex; flex-direction:column; gap:5px; }
-  .field.full { grid-column:span 2; }
-  .field label { font-size:10px; font-weight:800; color:#64748b; letter-spacing:.06em; text-transform:uppercase; }
-  .field input,.field select,.field textarea { width:100%; border:1px solid #e5e7eb; border-radius:10px; padding:9px 10px; font-size:13px; background:#fff; font-family:inherit; box-sizing:border-box; }
-  .computed-field { background:#f8fafc; border-radius:10px; padding:12px; font-size:14px; font-weight:700; color:#0f172a; }
-  .toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; }
+  .pill   { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid #e2e8f0; background:#f8fafc; color:#64748b; }
+  .expand-row td { background:#f8fafc !important; border-bottom:2px solid #e5e7eb; }
+  .exp-box { padding:10px 4px; }
+  .panel-hdr { font-size:12px; font-weight:900; color:#0b1220; margin-bottom:8px; }
+  .col-panel { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:12px; }
+  .empty  { padding:40px; text-align:center; color:#94a3b8; font-size:13px; }
+  .toast  { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; animation:fadeIn .2s; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
 `;
 
-function computeBilling(gross) {
-  const g = parseFloat(gross) || 0;
-  const vat = g * 0.12;
-  const ewt = g * 0.02;
-  const netVat = g + vat;
-  const netDue = netVat - ewt;
-  return { gross:g, vat, ewt, netVat, netDue };
-}
+const fmt = (n) => new Intl.NumberFormat('en-PH',{style:'currency',currency:'PHP'}).format(Number(n||0));
 
 export default function BillingClientPage() {
-  const { clientId } = useParams();
-  const navigate = useNavigate();
-  const [book, setBook]       = useState(null);
-  const [statements, setStatements] = useState([]);
+  const [contacts,    setContacts]    = useState([]);
+  const [statements,  setStatements]  = useState([]);
+  const [invoices,    setInvoices]    = useState([]);
   const [collections, setCollections] = useState([]);
-  const [tab, setTab]         = useState('statements');
-  const [showStmtModal, setShowStmtModal] = useState(false);
-  const [showColModal,  setShowColModal]  = useState(false);
-  const [stmtForm, setStmtForm] = useState({});
-  const [colForm, setColForm]   = useState({});
-  const [saving, setSaving]   = useState(false);
-  const [toast, setToast]     = useState('');
+  const [selectedClient, setSelectedClient] = useState('');
+  const [search,   setSearch]   = useState('');
+  const [expandId, setExpandId] = useState(null);
+  const [toast,    setToast]    = useState('');
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
   useEffect(() => {
-    getDoc(doc(db, 'billingBooks', clientId)).then(d => {
-      if (d.exists()) setBook({ id:d.id, ...d.data() });
-    });
-    const unsubS = onSnapshot(
-      query(collection(db, 'billingStatements'), where('bookId','==',clientId), orderBy('period','desc')),
-      snap => setStatements(snap.docs.map(d => ({ id:d.id, ...d.data() })))
-    );
-    const unsubC = onSnapshot(
-      query(collection(db, 'collections'), where('bookId','==',clientId), orderBy('date','desc')),
-      snap => setCollections(snap.docs.map(d => ({ id:d.id, ...d.data() })))
-    );
-    return () => { unsubS(); unsubC(); };
-  }, [clientId]);
+    const u1 = onSnapshot(query(collection(db,'contacts'), orderBy('name','asc')), s => setContacts(s.docs.map(d=>({id:d.id,...d.data()}))));
+    const u2 = onSnapshot(query(collection(db,'billingStatements'), orderBy('createdAt','desc')), s => setStatements(s.docs.map(d=>({id:d.id,...d.data()}))));
+    const u3 = onSnapshot(query(collection(db,'serviceInvoices'), orderBy('createdAt','desc')), s => setInvoices(s.docs.map(d=>({id:d.id,...d.data()}))));
+    const u4 = onSnapshot(query(collection(db,'collections'), orderBy('createdAt','desc')), s => setCollections(s.docs.map(d=>({id:d.id,...d.data()}))));
+    return () => { u1(); u2(); u3(); u4(); };
+  }, []);
 
-  const totalBilled    = statements.reduce((s,st) => s + (st.netDue||0), 0);
-  const totalCollected = collections.reduce((s,c)  => s + (c.amount||0), 0);
-  const balance        = totalBilled - totalCollected;
+  const clientList = useMemo(() => {
+    const names = new Set(statements.map(s => s.contactName||s.contact||'').filter(Boolean));
+    return [...names].sort();
+  }, [statements]);
 
-  function openNewStatement() {
-    setStmtForm({ period: new Date().toISOString().slice(0,7), gross: '' });
-    setShowStmtModal(true);
-  }
-  function openNewCollection() {
-    setColForm({ date: new Date().toISOString().slice(0,10), amount:'', orNumber:'', paymentMode:'Check' });
-    setShowColModal(true);
-  }
+  const clientStatements = useMemo(() => {
+    let a = [...statements];
+    if (selectedClient) a = a.filter(s => (s.contactName||s.contact||'') === selectedClient);
+    const q = search.toLowerCase();
+    if (q) a = a.filter(s => (s.bsId||'').toLowerCase().includes(q) || (s.contactName||s.contact||'').toLowerCase().includes(q));
+    return a;
+  }, [statements, selectedClient, search]);
 
-  const computed = computeBilling(stmtForm.gross);
+  const clientInvoices = useMemo(() => {
+    if (!selectedClient) return invoices;
+    return invoices.filter(i => (i.contactName||i.contact||'') === selectedClient);
+  }, [invoices, selectedClient]);
 
-  async function handleSaveStatement() {
-    if (!stmtForm.period) return alert('Period is required.');
-    const c = computeBilling(stmtForm.gross);
-    setSaving(true);
-    try {
-      await addDoc(collection(db, 'billingStatements'), {
-        bookId: clientId,
-        clientName: book?.contactName,
-        period: stmtForm.period,
-        description: stmtForm.description || '',
-        gross: c.gross,
-        vat:   c.vat,
-        ewt:   c.ewt,
-        netVat: c.netVat,
-        netDue: c.netDue,
-        status: 'Unpaid',
-        createdAt: serverTimestamp(),
-        createdBy: auth.currentUser?.email,
-      });
-      // Update book totals
-      await updateDoc(doc(db, 'billingBooks', clientId), {
-        totalBilled: (book?.totalBilled||0) + c.netDue,
-        updatedAt: serverTimestamp(),
-      });
-      showToast('Billing statement created.');
-      setShowStmtModal(false);
-    } catch (e) { alert(e.message); }
-    setSaving(false);
-  }
+  const clientCollections = useMemo(() => {
+    if (!selectedClient) return collections;
+    return collections.filter(c => (c.contactName||c.contact||'') === selectedClient);
+  }, [collections, selectedClient]);
 
-  async function handleSaveCollection() {
-    if (!colForm.amount) return alert('Amount is required.');
-    const amt = parseFloat(colForm.amount)||0;
-    setSaving(true);
-    try {
-      await addDoc(collection(db, 'collections'), {
-        bookId: clientId,
-        clientName: book?.contactName,
-        date: colForm.date,
-        amount: amt,
-        orNumber: colForm.orNumber||'',
-        paymentMode: colForm.paymentMode||'Check',
-        notes: colForm.notes||'',
-        createdAt: serverTimestamp(),
-        createdBy: auth.currentUser?.email,
-      });
-      await updateDoc(doc(db, 'billingBooks', clientId), {
-        totalCollected: (book?.totalCollected||0) + amt,
-        updatedAt: serverTimestamp(),
-      });
-      showToast('Collection recorded.');
-      setShowColModal(false);
-    } catch (e) { alert(e.message); }
-    setSaving(false);
-  }
-
-  async function markPaid(stmtId) {
-    await updateDoc(doc(db, 'billingStatements', stmtId), { status:'Paid', paidAt: serverTimestamp() });
-    showToast('Marked as paid.');
-  }
-
-  const stmtPill = (s) => {
-    if (s==='Paid') return 'pill pill-paid';
-    if (s==='Partial') return 'pill pill-partial';
-    if (s==='Draft') return 'pill pill-draft';
-    return 'pill pill-unpaid';
-  };
-
-  if (!book) return <div style={{ padding:40, textAlign:'center', color:'#94a3b8' }}>Loading…</div>;
+  const kpis = useMemo(() => {
+    const active = clientStatements.filter(s => s.status !== 'Voided');
+    return {
+      clients: clientList.length,
+      statements: clientStatements.length,
+      balance: active.reduce((a,s) => a + Number(s.balance||s.netDue||0), 0),
+      collected: clientCollections.reduce((a,c) => a + Number(c.amountReceived||0), 0),
+    };
+  }, [clientStatements, clientCollections, clientList]);
 
   return (
-    <div className="bcp-wrap">
+    <div className="bc-wrap">
       <style>{CSS}</style>
-      <div className="bcp-topbar">
-        <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => navigate('/scalebooks/billing')}>← Back</button>
-          <div>
-            <h1 style={{ margin:0, fontSize:17, fontWeight:900 }}>{book.contactName}</h1>
-            <p style={{ margin:0, fontSize:11, color:'#94a3b8' }}>{book.tin}{book.businessStyle ? ` · ${book.businessStyle}` : ''}</p>
-          </div>
+      <div className="bc-top">
+        <strong style={{fontSize:18,fontWeight:900,color:'#0b1220'}}>CLIENT BILLING VIEW</strong>
+      </div>
+      <div className="bc-body">
+        <div className="kpi-row">
+          <div className="kpi-card"><div className="kpi-label">Clients</div><div className="kpi-value">{kpis.clients}</div></div>
+          <div className="kpi-card"><div className="kpi-label">Statements</div><div className="kpi-value">{kpis.statements}</div></div>
+          <div className="kpi-card"><div className="kpi-label">Outstanding Balance</div><div className="kpi-value orange" style={{fontSize:15}}>{fmt(kpis.balance)}</div></div>
+          <div className="kpi-card"><div className="kpi-label">Total Collected</div><div className="kpi-value" style={{fontSize:15}}>{fmt(kpis.collected)}</div></div>
         </div>
-        <div style={{ display:'flex', gap:8 }}>
-          <button className="btn btn-ghost btn-sm" onClick={openNewCollection}>+ Record Collection</button>
-          <button className="btn btn-primary btn-sm" onClick={openNewStatement}>+ New Statement</button>
+
+        <div className="toolbar">
+          <select className="input" style={{flex:'0 0 220px'}} value={selectedClient} onChange={e=>{setSelectedClient(e.target.value);setExpandId(null);}}>
+            <option value="">All Clients</option>
+            {clientList.map(n=><option key={n}>{n}</option>)}
+          </select>
+          <input className="input" placeholder="🔍 Search BS ID…" value={search} onChange={e=>setSearch(e.target.value)} style={{flex:'1 1 180px',minWidth:140}} />
+          <button className="btn btn-ghost btn-sm" onClick={()=>{setSearch('');setSelectedClient('');setExpandId(null);}}>✕ Clear</button>
+        </div>
+
+        {/* Billing Statements */}
+        <div style={{marginBottom:8,fontWeight:800,fontSize:12,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Billing Statements ({clientStatements.length})</div>
+        <div className="card">
+          <table>
+            <thead>
+              <tr><th>BS ID</th><th>CLIENT</th><th>DATE</th><th>NET DUE</th><th>BALANCE</th><th>STATUS</th></tr>
+            </thead>
+            <tbody>
+              {clientStatements.length === 0 && <tr><td colSpan={6} className="empty">No billing statements.</td></tr>}
+              {clientStatements.map(bs => {
+                const ss = STATUS_STYLES[bs.status] || {};
+                const isExp = expandId === bs.id;
+                return [
+                  <tr key={bs.id}>
+                    <td><button className="btn btn-ghost btn-xs" style={{fontFamily:'monospace',color:'#f97316',fontWeight:800}} onClick={()=>setExpandId(isExp?null:bs.id)}>{bs.bsId||bs.id}</button></td>
+                    <td>{bs.contactName||bs.contact||'—'}</td>
+                    <td>{bs.billingDate||'—'}</td>
+                    <td style={{fontWeight:700}}>{fmt(bs.netDue||bs.totalAmount||0)}</td>
+                    <td style={{fontWeight:700,color:Number(bs.balance||0)>0?'#c2410c':'#15803d'}}>{fmt(bs.balance||0)}</td>
+                    <td><span className="pill" style={ss}>{bs.status}</span></td>
+                  </tr>,
+                  isExp && (
+                    <tr key={bs.id+'-exp'} className="expand-row">
+                      <td colSpan={6}>
+                        <div className="exp-box">
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,fontSize:12}}>
+                            <div><div style={{color:'#94a3b8',fontWeight:700,fontSize:10,textTransform:'uppercase'}}>Period</div><div>{bs.periodStart||'—'} – {bs.periodEnd||'—'}</div></div>
+                            <div><div style={{color:'#94a3b8',fontWeight:700,fontSize:10,textTransform:'uppercase'}}>Tax Group</div><div>{bs.taxGroupName||'—'}</div></div>
+                            <div><div style={{color:'#94a3b8',fontWeight:700,fontSize:10,textTransform:'uppercase'}}>Gross Amount</div><div>{fmt(bs.grossAmount||0)}</div></div>
+                            <div><div style={{color:'#94a3b8',fontWeight:700,fontSize:10,textTransform:'uppercase'}}>Applied</div><div>{fmt(bs.appliedAmount||0)}</div></div>
+                          </div>
+                          {bs.description && <div style={{marginTop:8,fontSize:12,color:'#64748b'}}>{bs.description}</div>}
+                          {/* Associated invoices and collections */}
+                          <div className="col-panel">
+                            <div>
+                              <div className="panel-hdr">Service Invoices</div>
+                              <table style={{fontSize:12}}>
+                                <thead><tr><th>SI ID</th><th>Date</th><th>Amount</th><th>Balance</th></tr></thead>
+                                <tbody>
+                                  {clientInvoices.filter(i=>i.billingStatementId===bs.id||i.billingStatementId===bs.bsId).length === 0
+                                    ? <tr><td colSpan={4} style={{textAlign:'center',color:'#94a3b8',padding:12}}>None</td></tr>
+                                    : clientInvoices.filter(i=>i.billingStatementId===bs.id||i.billingStatementId===bs.bsId).map(i=>(
+                                        <tr key={i.id}><td style={{fontFamily:'monospace',color:'#f97316'}}>{i.siId||i.id}</td><td>{i.siDate||'—'}</td><td>{fmt(i.amount||0)}</td><td>{fmt(i.balance||0)}</td></tr>
+                                      ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            <div>
+                              <div className="panel-hdr">Collections</div>
+                              <table style={{fontSize:12}}>
+                                <thead><tr><th>Coll. ID</th><th>Date</th><th>Received</th></tr></thead>
+                                <tbody>
+                                  {clientCollections.filter(c=>c.billingStatementId===bs.id||c.billingStatementId===bs.bsId).length === 0
+                                    ? <tr><td colSpan={3} style={{textAlign:'center',color:'#94a3b8',padding:12}}>None</td></tr>
+                                    : clientCollections.filter(c=>c.billingStatementId===bs.id||c.billingStatementId===bs.bsId).map(c=>(
+                                        <tr key={c.id}><td style={{fontFamily:'monospace',color:'#f97316'}}>{c.collectionId||c.id}</td><td>{c.collectionDate||'—'}</td><td>{fmt(c.amountReceived||0)}</td></tr>
+                                      ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                ];
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
-
-      <div className="bcp-body">
-        <div className="summary-bar">
-          <div className="scard"><div className="scard-label">Total Billed</div><div className="scard-value" style={{color:'#1d4ed8',fontSize:16}}>{fmt(totalBilled)}</div></div>
-          <div className="scard"><div className="scard-label">Collected</div><div className="scard-value" style={{color:'#15803d',fontSize:16}}>{fmt(totalCollected)}</div></div>
-          <div className="scard"><div className="scard-label">Outstanding</div><div className="scard-value" style={{color:balance>0?'#dc2626':'#15803d',fontSize:16}}>{fmt(balance)}</div></div>
-          <div className="scard"><div className="scard-label">Statements</div><div className="scard-value">{statements.length}</div></div>
-        </div>
-
-        <div className="tabs">
-          <button className={`tab ${tab==='statements'?'active':''}`} onClick={() => setTab('statements')}>Billing Statements ({statements.length})</button>
-          <button className={`tab ${tab==='collections'?'active':''}`} onClick={() => setTab('collections')}>Collections ({collections.length})</button>
-        </div>
-
-        {tab === 'statements' && (
-          <div className="card">
-            {statements.length === 0 ? (
-              <div className="empty"><p>No statements yet.</p><button className="btn btn-primary btn-sm" onClick={openNewStatement}>Create First Statement</button></div>
-            ) : (
-              <table>
-                <thead><tr><th>Period</th><th>Description</th><th style={{textAlign:'right'}}>Gross</th><th style={{textAlign:'right'}}>VAT</th><th style={{textAlign:'right'}}>EWT</th><th style={{textAlign:'right'}}>Net Due</th><th>Status</th><th>Actions</th></tr></thead>
-                <tbody>
-                  {statements.map(s => (
-                    <tr key={s.id}>
-                      <td style={{ fontWeight:700 }}>{s.period}</td>
-                      <td style={{ color:'#64748b', fontSize:12 }}>{s.description}</td>
-                      <td style={{ textAlign:'right' }}>{fmt(s.gross)}</td>
-                      <td style={{ textAlign:'right', color:'#64748b' }}>{fmt(s.vat)}</td>
-                      <td style={{ textAlign:'right', color:'#64748b' }}>{fmt(s.ewt)}</td>
-                      <td style={{ textAlign:'right', fontWeight:800, color:'#0f172a' }}>{fmt(s.netDue)}</td>
-                      <td><span className={stmtPill(s.status)}>{s.status}</span></td>
-                      <td>{s.status === 'Unpaid' && <button className="btn btn-ghost btn-sm" onClick={() => markPaid(s.id)}>Mark Paid</button>}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {tab === 'collections' && (
-          <div className="card">
-            {collections.length === 0 ? (
-              <div className="empty"><p>No collections recorded.</p><button className="btn btn-success btn-sm" onClick={openNewCollection}>Record Collection</button></div>
-            ) : (
-              <table>
-                <thead><tr><th>Date</th><th>OR Number</th><th>Payment Mode</th><th style={{textAlign:'right'}}>Amount</th><th>Notes</th><th>By</th></tr></thead>
-                <tbody>
-                  {collections.map(c => (
-                    <tr key={c.id}>
-                      <td style={{ fontWeight:700 }}>{c.date}</td>
-                      <td style={{ fontFamily:'monospace', fontSize:12 }}>{c.orNumber}</td>
-                      <td>{c.paymentMode}</td>
-                      <td style={{ textAlign:'right', fontWeight:800, color:'#15803d' }}>{fmt(c.amount)}</td>
-                      <td style={{ fontSize:12, color:'#94a3b8' }}>{c.notes}</td>
-                      <td style={{ fontSize:11, color:'#94a3b8' }}>{c.createdBy}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* New Statement Modal */}
-      {showStmtModal && (
-        <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setShowStmtModal(false)}>
-          <div className="modal">
-            <div className="modal-h"><strong>New Billing Statement — {book.contactName}</strong><button className="btn btn-ghost btn-sm" onClick={()=>setShowStmtModal(false)}>✕</button></div>
-            <div className="modal-b">
-              <div className="field"><label>Period (YYYY-MM) *</label><input type="month" value={stmtForm.period||''} onChange={e=>setStmtForm(f=>({...f,period:e.target.value}))} /></div>
-              <div className="field"><label>Gross Amount *</label><input type="number" value={stmtForm.gross||''} onChange={e=>setStmtForm(f=>({...f,gross:e.target.value}))} placeholder="0.00" /></div>
-              <div className="field full"><label>Description</label><textarea rows={2} value={stmtForm.description||''} onChange={e=>setStmtForm(f=>({...f,description:e.target.value}))} /></div>
-              {stmtForm.gross && (
-                <div className="field full">
-                  <label>Computed Amounts</label>
-                  <div className="computed-field" style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr', gap:12, background:'#f8fafc', border:'1px solid #e5e7eb', borderRadius:10, padding:12 }}>
-                    <div><div style={{fontSize:10,color:'#94a3b8',fontWeight:800}}>GROSS</div><div>{fmt(computed.gross)}</div></div>
-                    <div><div style={{fontSize:10,color:'#94a3b8',fontWeight:800}}>+ VAT 12%</div><div>{fmt(computed.vat)}</div></div>
-                    <div><div style={{fontSize:10,color:'#94a3b8',fontWeight:800}}>- EWT 2%</div><div>{fmt(computed.ewt)}</div></div>
-                    <div><div style={{fontSize:10,color:'#f97316',fontWeight:800}}>NET DUE</div><div style={{color:'#f97316'}}>{fmt(computed.netDue)}</div></div>
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>setShowStmtModal(false)}>Cancel</button>
-              <button className="btn btn-primary" onClick={handleSaveStatement} disabled={saving}>{saving?'Saving…':'Create Statement'}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Record Collection Modal */}
-      {showColModal && (
-        <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setShowColModal(false)}>
-          <div className="modal">
-            <div className="modal-h"><strong>Record Collection — {book.contactName}</strong><button className="btn btn-ghost btn-sm" onClick={()=>setShowColModal(false)}>✕</button></div>
-            <div className="modal-b">
-              <div className="field"><label>Date *</label><input type="date" value={colForm.date||''} onChange={e=>setColForm(f=>({...f,date:e.target.value}))} /></div>
-              <div className="field"><label>Amount *</label><input type="number" value={colForm.amount||''} onChange={e=>setColForm(f=>({...f,amount:e.target.value}))} placeholder="0.00" /></div>
-              <div className="field"><label>OR Number</label><input value={colForm.orNumber||''} onChange={e=>setColForm(f=>({...f,orNumber:e.target.value}))} /></div>
-              <div className="field"><label>Payment Mode</label>
-                <select value={colForm.paymentMode||'Check'} onChange={e=>setColForm(f=>({...f,paymentMode:e.target.value}))}>
-                  {['Check','Online Transfer','Cash','Credit Card','Debit Card'].map(m=><option key={m}>{m}</option>)}
-                </select>
-              </div>
-              <div className="field full"><label>Notes</label><textarea rows={2} value={colForm.notes||''} onChange={e=>setColForm(f=>({...f,notes:e.target.value}))} /></div>
-            </div>
-            <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>setShowColModal(false)}>Cancel</button>
-              <button className="btn btn-success" onClick={handleSaveCollection} disabled={saving}>{saving?'Saving…':'Record Collection'}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

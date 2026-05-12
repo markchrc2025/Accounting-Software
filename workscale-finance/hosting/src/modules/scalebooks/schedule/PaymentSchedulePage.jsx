@@ -127,9 +127,11 @@ export default function PaymentSchedulePage() {
   const [pmModal, setPmModal] = useState(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
+  const [confirmModal, setConfirmModal] = useState(null);
   const [calOffset, setCalOffset] = useState(0);
 
-  const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
+  const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); }
+  const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });;
 
   useEffect(() => {
     const q = query(collection(db,'paymentSchedules'), orderBy('createdAt','desc'));
@@ -198,17 +200,19 @@ export default function PaymentSchedulePage() {
     setSaving(false);
   }
 
-  async function cancelSchedule(id) {
-    if (!confirm('Cancel this schedule?')) return;
-    await updateDoc(doc(db,'paymentSchedules',id), {status:'Cancelled', updatedAt:serverTimestamp()});
-    showToast('Schedule cancelled.');
-    if (detailId===id) setDetailId(null);
+  function cancelSchedule(id) {
+    askConfirm('Cancel this schedule?', async () => {
+      await updateDoc(doc(db,'paymentSchedules',id), {status:'Cancelled', updatedAt:serverTimestamp()});
+      showToast('Schedule cancelled.');
+      if (detailId===id) setDetailId(null);
+    });
   }
 
-  async function deleteSchedule(id) {
-    if (!confirm('Permanently delete this schedule?')) return;
-    await deleteDoc(doc(db,'paymentSchedules',id));
-    if (detailId===id) setDetailId(null);
+  function deleteSchedule(id) {
+    askConfirm('Permanently delete this schedule?', async () => {
+      await deleteDoc(doc(db,'paymentSchedules',id));
+      if (detailId===id) setDetailId(null);
+    });
   }
 
   async function savePm(form) {
@@ -585,6 +589,23 @@ export default function PaymentSchedulePage() {
       </div>
       {modal!==null&&<ScheduleModal />}
       {pmModal!==null&&<PmModal />}
+      {confirmModal && (
+        <div className="backdrop" onClick={() => setConfirmModal(null)}>
+          <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
+            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:14,fontWeight:900,color:'#0b1220'}}>Confirm Action</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setConfirmModal(null)}>✕</button>
+            </div>
+            <div style={{padding:'18px'}}>
+              <p style={{margin:0,fontSize:14,color:'#0b1220',lineHeight:1.5}}>{confirmModal.message}</p>
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
+              <button className="btn btn-ghost" onClick={()=>setConfirmModal(null)}>Cancel</button>
+              <button className="btn btn-primary" style={{background:'#dc2626'}} onClick={()=>{confirmModal.onConfirm();setConfirmModal(null);}}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast&&<div className="toast">{toast}</div>}
     </div>
   );

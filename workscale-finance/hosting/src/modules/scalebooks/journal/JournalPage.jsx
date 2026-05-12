@@ -81,10 +81,12 @@ export default function JournalPage() {
   const [lines, setLines]       = useState([]);
   const [saving, setSaving]     = useState(false);
   const [toast, setToast]       = useState('');
+  const [confirmModal, setConfirmModal] = useState(null);
   const [page, setPage]         = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
+  const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
   useEffect(() => {
     return onSnapshot(
@@ -179,9 +181,10 @@ export default function JournalPage() {
     showToast('Reversing entry created.');
   }
 
-  async function deleteEntry(id) {
-    if(!confirm('Delete this journal entry?')) return;
-    await deleteDoc(doc(db,'journalEntries',id));
+  function deleteEntry(id) {
+    askConfirm('Delete this journal entry?', async () => {
+      await deleteDoc(doc(db,'journalEntries',id));
+    });
   }
 
   /* ── Line helpers ───────────────────────────────────────────── */
@@ -372,6 +375,23 @@ export default function JournalPage() {
         )}
       </div>
       {modal!==null&&<JEModal />}
+      {confirmModal && (
+        <div className="backdrop" onClick={() => setConfirmModal(null)}>
+          <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
+            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:14,fontWeight:900,color:'#0b1220'}}>Confirm Action</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setConfirmModal(null)}>✕</button>
+            </div>
+            <div style={{padding:'18px'}}>
+              <p style={{margin:0,fontSize:14,color:'#0b1220',lineHeight:1.5}}>{confirmModal.message}</p>
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
+              <button className="btn btn-ghost" onClick={()=>setConfirmModal(null)}>Cancel</button>
+              <button className="btn btn-primary" style={{background:'#dc2626'}} onClick={()=>{confirmModal.onConfirm();setConfirmModal(null);}}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast&&<div className="toast">{toast}</div>}
     </div>
   );

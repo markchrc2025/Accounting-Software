@@ -155,6 +155,7 @@ const CSS = `
   .cal-day   { font-size:11px; font-weight:700; margin-bottom:3px; }
   .cal-event { font-size:10px; background:#fff7ed; border:1px solid #fed7aa; border-radius:4px; padding:2px 4px; margin-bottom:2px; line-height:1.3; }
   .toast     { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; }
+  .backdrop  { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
 `;
 
 export default function FinancialPage() {
@@ -168,9 +169,11 @@ export default function FinancialPage() {
   const [nextId, setNextId]         = useState(1);
   const [saveStatus, setSaveStatus] = useState('');
   const [toast, setToast]           = useState('');
+  const [confirmModal, setConfirmModal] = useState(null);
   const saveTimerRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+  const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
   /* ── Firestore ─────────────────────────────────────────────────── */
   useEffect(() => {
@@ -205,12 +208,8 @@ export default function FinancialPage() {
   }, [saveToFirestore]);
 
   const updateLoan = useCallback((id, field, value) => {
-    setLoans(prev => {
-      const next = prev.map(l => l.id === id ? { ...l, [field]: value } : l);
-      debounceSave(next);
-      return next;
-    });
-  }, [debounceSave]);
+    setLoans(prev => prev.map(l => l.id === id ? { ...l, [field]: value } : l));
+  }, []);
 
   const addLoan = useCallback(() => {
     const iso = new Date().toISOString().slice(0, 7) + '-01';
@@ -233,13 +232,14 @@ export default function FinancialPage() {
   }, [debounceSave]);
 
   const deleteLoan = useCallback((id) => {
-    if (!confirm('Delete this loan?')) return;
-    setLoans(prev => {
-      const next = prev.filter(l => l.id !== id);
-      debounceSave(next);
-      return next;
+    askConfirm('Delete this loan?', () => {
+      setLoans(prev => {
+        const next = prev.filter(l => l.id !== id);
+        debounceSave(next);
+        return next;
+      });
     });
-  }, [debounceSave]);
+  }, [debounceSave, setConfirmModal]);
 
   const activeLoans    = loans.filter(l => l.status === 'Active');
   const totalPrincipal = activeLoans.reduce((s, l) => s + (parseFloat(l.principal) || 0), 0);
@@ -807,6 +807,23 @@ export default function FinancialPage() {
         </div>
       )}
 
+      {confirmModal && (
+        <div className="backdrop" onClick={() => setConfirmModal(null)}>
+          <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
+            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:14,fontWeight:900,color:'#0b1220'}}>Confirm Action</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setConfirmModal(null)}>✕</button>
+            </div>
+            <div style={{padding:'18px'}}>
+              <p style={{margin:0,fontSize:14,color:'#0b1220',lineHeight:1.5}}>{confirmModal.message}</p>
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
+              <button className="btn btn-ghost" onClick={()=>setConfirmModal(null)}>Cancel</button>
+              <button className="btn btn-primary" style={{background:'#dc2626'}} onClick={()=>{confirmModal.onConfirm();setConfirmModal(null);}}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

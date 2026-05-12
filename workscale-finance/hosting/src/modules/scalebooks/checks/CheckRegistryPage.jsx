@@ -79,8 +79,10 @@ export default function CheckRegistryPage() {
   const [search, setSearch]         = useState('');
   const [saving, setSaving]         = useState(false);
   const [toast, setToast]           = useState('');
+  const [confirmModal, setConfirmModal] = useState(null);
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
+  const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });;
 
   useEffect(() => {
     const q1 = query(collection(db,'checkRegister'),orderBy('issueDate','desc'));
@@ -146,10 +148,11 @@ export default function CheckRegistryPage() {
     setSaving(false);
   }
 
-  async function deleteCheck(id) {
-    if (!confirm('Delete this check entry?')) return;
-    await deleteDoc(doc(db,'checkRegister',id));
-    showToast('Deleted.');
+  function deleteCheck(id) {
+    askConfirm('Delete this check entry?', async () => {
+      await deleteDoc(doc(db,'checkRegister',id));
+      showToast('Deleted.');
+    });
   }
 
   async function updateStatus(form) {
@@ -300,7 +303,7 @@ export default function CheckRegistryPage() {
                       <td>
                         <div style={{display:'flex',gap:4}}>
                           <button className="btn btn-ghost btn-sm" onClick={()=>setCbModal({...cb})}>Edit</button>
-                          <button onClick={async()=>{if(!confirm('Delete checkbook?'))return;await deleteDoc(doc(db,'checkbookMaster',cb.id));}} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
+                          <button onClick={()=>askConfirm('Delete checkbook?', async()=>{await deleteDoc(doc(db,'checkbookMaster',cb.id));})} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
                         </div>
                       </td>
                     </tr>
@@ -451,6 +454,23 @@ export default function CheckRegistryPage() {
       {modal!==null&&<CheckModal />}
       {cbModal!==null&&<CheckbookModal />}
       {statusModal!==null&&<StatusUpdateModal />}
+      {confirmModal && (
+        <div className="backdrop" onClick={() => setConfirmModal(null)}>
+          <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
+            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:14,fontWeight:900,color:'#0b1220'}}>Confirm Action</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setConfirmModal(null)}>✕</button>
+            </div>
+            <div style={{padding:'18px'}}>
+              <p style={{margin:0,fontSize:14,color:'#0b1220',lineHeight:1.5}}>{confirmModal.message}</p>
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
+              <button className="btn btn-ghost" onClick={()=>setConfirmModal(null)}>Cancel</button>
+              <button className="btn btn-primary" style={{background:'#dc2626'}} onClick={()=>{confirmModal.onConfirm();setConfirmModal(null);}}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast&&<div className="toast">{toast}</div>}
     </div>
   );
