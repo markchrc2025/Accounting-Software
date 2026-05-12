@@ -7,6 +7,7 @@ import { auth, db } from '../firebase.js';
 export default function AuthGuard({ children }) {
   const [status, setStatus] = useState('loading'); // 'loading' | 'allowed' | 'denied'
   const [denyReason, setDenyReason] = useState('');
+  const [denyUid, setDenyUid] = useState('');
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -23,6 +24,7 @@ export default function AuthGuard({ children }) {
       } else {
         setStatus('denied');
         setDenyReason(user.email);
+        setDenyUid(user.uid);
       }
     });
     return unsub;
@@ -42,6 +44,7 @@ export default function AuthGuard({ children }) {
         <div style={{ fontSize: 48 }}>🔒</div>
         <h2 style={{ margin: 0 }}>Access Denied</h2>
         <p style={{ color: '#666', margin: 0 }}>Your account (<strong>{denyReason}</strong>) is not authorised to access this portal.</p>
+        <p style={{ fontFamily: 'monospace', fontSize: 12, background: '#f1f5f9', padding: '6px 12px', borderRadius: 8, margin: 0, userSelect: 'all' }}>UID: {denyUid}</p>
         <p style={{ color: '#999', fontSize: 12, margin: 0 }}>Contact your system administrator.</p>
         <button onClick={() => { auth.signOut(); navigate('/login'); }}
           style={{ marginTop: 8, padding: '10px 20px', borderRadius: 12, border: 'none', background: '#0b1220', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>

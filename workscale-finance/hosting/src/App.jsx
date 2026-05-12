@@ -3,6 +3,7 @@ import AuthGuard from './auth/AuthGuard.jsx';
 import LoginPage from './auth/LoginPage.jsx';
 import AppShell from './layouts/AppShell.jsx';
 import HomePage from './modules/home/HomePage.jsx';
+import ScaleBooksApp from './modules/scalebooks/ScaleBooksApp.jsx';
 
 export default function App() {
   return (
@@ -13,16 +14,15 @@ export default function App() {
           path="/*"
           element={
             <AuthGuard>
-              <AppShell>
-                <Routes>
-                  <Route path="/" element={<HomePage />} />
-                  <Route path="/accounting" element={<div style={{ padding: 32 }}>Accounting — coming soon</div>} />
-                  <Route path="/payroll" element={<div style={{ padding: 32 }}>Payroll — coming soon</div>} />
-                  <Route path="/billing" element={<div style={{ padding: 32 }}>Billing Book — coming soon</div>} />
-                  <Route path="/projections" element={<div style={{ padding: 32 }}>Projections — coming soon</div>} />
-                  <Route path="*" element={<Navigate to="/" replace />} />
-                </Routes>
-              </AppShell>
+              <Routes>
+                <Route path="/" element={<AppShell><HomePage /></AppShell>} />
+                <Route path="/scalebooks/*" element={<ScaleBooksApp />} />
+                {/* Legacy redirects */}
+                <Route path="/accounting" element={<Navigate to="/scalebooks" replace />} />
+                <Route path="/billing" element={<Navigate to="/scalebooks/billing" replace />} />
+                <Route path="/payroll" element={<AppShell><div style={{ padding: 32, color: '#64748b' }}>Payroll — managed by another team. Handoff pending.</div></AppShell>} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
             </AuthGuard>
           }
         />

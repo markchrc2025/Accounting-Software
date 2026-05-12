@@ -1,9 +1,18 @@
-import { signInWithPopup } from 'firebase/auth';
+import { signInWithPopup, onAuthStateChanged } from 'firebase/auth';
 import { useNavigate } from 'react-router-dom';
+import { useEffect } from 'react';
 import { auth, googleProvider } from '../firebase.js';
 
 export default function LoginPage() {
   const navigate = useNavigate();
+
+  useEffect(() => {
+    // If already signed in, skip login page immediately
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (user) navigate('/', { replace: true });
+    });
+    return unsub;
+  }, [navigate]);
 
   async function handleGoogleLogin() {
     try {
