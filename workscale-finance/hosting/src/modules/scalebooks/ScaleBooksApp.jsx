@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate } from 'react-router-dom';
-import { auth } from '../../firebase.js';
+import { auth, db } from '../../firebase.js';
+import { doc, onSnapshot } from 'firebase/firestore';
 
 import DashboardPage       from './DashboardPage.jsx';
 import VouchersPage        from './vouchers/VouchersPage.jsx';
@@ -138,7 +139,9 @@ const CSS = `
     width:34px; height:34px; border-radius:10px;
     background:#f97316; display:grid; place-items:center;
     font-weight:900; font-size:15px; flex-shrink:0; color:#fff;
+    overflow:hidden;
   }
+  .sb-logo img { width:100%; height:100%; object-fit:contain; background:#fff; padding:2px; box-sizing:border-box; }
   .sb-brand-txt { flex:1; overflow:hidden; }
   .sb-title { display:block; font-size:12px; font-weight:900; letter-spacing:.04em; color:#f1f5f9; white-space:nowrap; }
   .sb-sub   { display:block; font-size:9.5px; color:#475569; white-space:nowrap; margin-top:1px; letter-spacing:.02em; }
@@ -264,8 +267,19 @@ const CSS = `
 export default function ScaleBooksApp() {
   const [collapsed,  setCollapsed]  = useState(false);
   const [openGroups, setOpenGroups] = useState(() => new Set(NAV_GROUPS.map(g => g.key)));
+  const [profile,    setProfile]    = useState({ companyName: '', logoUrl: '' });
   const navigate = useNavigate();
   const user = auth.currentUser;
+
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'settings', 'profile'), snap => {
+      if (snap.exists()) {
+        const d = snap.data();
+        setProfile({ companyName: d.companyName || '', logoUrl: d.logoUrl || '' });
+      }
+    });
+    return unsub;
+  }, []);
 
   function handleSignOut() {
     auth.signOut().then(() => navigate('/login'));
@@ -289,11 +303,16 @@ export default function ScaleBooksApp() {
 
           {/* Brand */}
           <div className="sb-brand">
-            <div className="sb-logo">S</div>
+            <div className="sb-logo">
+              {profile.logoUrl
+                ? <img src={profile.logoUrl} alt="logo" onError={e => { e.target.style.display='none'; }} />
+                : 'S'
+              }
+            </div>
             {!collapsed && (
               <div className="sb-brand-txt">
                 <span className="sb-title">SCALEBOOKS</span>
-                <span className="sb-sub">FINANCE PORTAL</span>
+                <span className="sb-sub">{profile.companyName || 'FINANCE PORTAL'}</span>
               </div>
             )}
             <button

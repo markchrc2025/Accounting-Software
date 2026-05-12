@@ -3,7 +3,8 @@ import {
   doc, getDoc, setDoc, serverTimestamp,
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, orderBy,
 } from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+import { db, auth, storage } from '../../../firebase.js';
+import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 const ROLES         = ['VIEWER', 'REVIEWER', 'APPROVER', 'ADMIN'];
 const VOUCHER_TYPES = ['PAYMENT', 'PAYROLL', 'FINAL_PAY', 'LOAN'];
@@ -114,8 +115,9 @@ export default function SettingsPage() {
   const [catModal,     setCatModal]     = useState(null);
   const [termModal,    setTermModal]    = useState(null);
   const [confirmModal, setConfirmModal] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [toast,  setToast]  = useState('');
+  const [saving,        setSaving]        = useState(false);
+  const [logoUploading,  setLogoUploading]  = useState(false);
+  const [toast,          setToast]          = useState('');
 
   const showToast  = msg => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (msg, fn) => setConfirmModal({ msg, fn });
@@ -226,6 +228,20 @@ export default function SettingsPage() {
   function OrgProfile() {
     if (!profileForm) return <div style={{padding:40,textAlign:'center',color:'#94a3b8'}}>Loading…</div>;
     const up = (k, v) => setProfileForm(f => ({ ...f, [k]: v }));
+    const handleLogoUpload = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (!file.type.startsWith('image/')) return showToast('Please select an image file.');
+      setLogoUploading(true);
+      try {
+        const sRef = storageRef(storage, 'settings/company-logo');
+        await uploadBytes(sRef, file);
+        const url = await getDownloadURL(sRef);
+        up('logoUrl', url);
+        showToast('Logo uploaded.');
+      } catch(err) { showToast('Upload failed: ' + err.message); }
+      setLogoUploading(false);
+    };
     return (
       <>
         <div className="sp-ch">
@@ -254,16 +270,22 @@ export default function SettingsPage() {
               </select>
             </div>
           </div>
-        </div>
-        <div className="sp-card">
-          <div className="sp-card-title">Branding & Integrations</div>
-          <div className="grid2">
-            <div className="field col2">
-              <label>Company Logo URL</label>
-              <input value={profileForm.logoUrl} onChange={e=>up('logoUrl',e.target.value)} placeholder="https://…" />
-              {profileForm.logoUrl && <img src={profileForm.logoUrl} alt="logo" style={{marginTop:8,height:52,objectFit:'contain',borderRadius:8,border:'1px solid #e5e7eb',background:'#f8fafc',padding:4}} onError={e=>{e.target.style.display='none';}} />}
+          <div style={{marginTop:20,paddingTop:16,borderTop:'1px solid #f1f5f9'}}>
+            <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.06em',textTransform:'uppercase',marginBottom:10}}>Company Logo</div>
+            <div style={{display:'flex',alignItems:'center',gap:16}}>
+              {profileForm.logoUrl
+                ? <img src={profileForm.logoUrl} alt="logo" style={{height:64,width:120,objectFit:'contain',borderRadius:10,border:'1px solid #e5e7eb',background:'#f8fafc',padding:6}} onError={e=>{e.target.style.display='none';}} />
+                : <div style={{height:64,width:120,borderRadius:10,border:'2px dashed #e5e7eb',background:'#f8fafc',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,color:'#94a3b8'}}>No logo</div>
+              }
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                <label className="btn btn-ghost btn-sm" style={{cursor: logoUploading ? 'not-allowed' : 'pointer',display:'inline-flex',alignItems:'center',gap:6,opacity: logoUploading ? .5 : 1}}>
+                  {logoUploading ? 'Uploading…' : '📁 Upload Logo'}
+                  <input type="file" accept="image/*" style={{display:'none'}} disabled={logoUploading} onChange={handleLogoUpload} />
+                </label>
+                {profileForm.logoUrl && <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer'}} onClick={()=>up('logoUrl','')}>Remove</button>}
+                <span style={{fontSize:11,color:'#94a3b8'}}>PNG, JPG or SVG. Shown on documents.</span>
+              </div>
             </div>
-            <div className="field col2"><label>Billing Web App URL</label><input value={profileForm.billingWebAppUrl} onChange={e=>up('billingWebAppUrl',e.target.value)} placeholder="https://…" /></div>
           </div>
         </div>
         <div className="save-bar">
@@ -481,13 +503,13 @@ export default function SettingsPage() {
   }
 
   const SECTIONS = {
-    'org-profile':       <OrgProfile />,
-    'users-roles':       <UsersRoles />,
-    'setup-config':      <SetupConfig />,
-    'mod-vouchers':      <ModVouchers />,
-    'mod-checks':        <ModChecks />,
-    'ref-categories':    <RefCategories />,
-    'ref-payment-terms': <RefPaymentTerms />,
+    'org-profile':       OrgProfile,
+    'users-roles':       UsersRoles,
+    'setup-config':      SetupConfig,
+    'mod-vouchers':      ModVouchers,
+    'mod-checks':        ModChecks,
+    'ref-categories':    RefCategories,
+    'ref-payment-terms': RefPaymentTerms,
   };
 
   return (
@@ -515,7 +537,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="sp-content">
-        {SECTIONS[activeSection]}
+        {SECTIONS[activeSection] ? SECTIONS[activeSection]() : null}
       </div>
 
       {userModal && (
