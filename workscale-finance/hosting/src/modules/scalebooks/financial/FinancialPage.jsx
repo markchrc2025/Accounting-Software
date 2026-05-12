@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { doc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 
 /* ─── Constants ─────────────────────────────────────────────────── */
@@ -177,13 +177,12 @@ export default function FinancialPage() {
 
   /* ── Firestore ─────────────────────────────────────────────────── */
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'finc', 'profile'), snap => {
+    getDoc(doc(db, 'finc', 'profile')).then(snap => {
       const data = snap.data() || {};
       const ls = Array.isArray(data.loans) ? data.loans : [];
       setLoans(ls);
       setNextId(ls.reduce((m, l) => Math.max(m, l.id || 0), 0) + 1);
     });
-    return unsub;
   }, []);
 
   const saveToFirestore = useCallback(async (ls) => {
@@ -225,11 +224,9 @@ export default function FinancialPage() {
         paymentMethod: 'Check', pmChecks: [],
         pmAdaDay: '', pmAdaBank: '', pmBtBank: '', pmAutoVoucher: false,
       };
-      const next = [...prev, newLoan];
-      debounceSave(next);
-      return next;
+      return [...prev, newLoan];
     });
-  }, [debounceSave]);
+  }, [])
 
   const deleteLoan = useCallback((id) => {
     askConfirm('Delete this loan?', () => {
@@ -259,12 +256,6 @@ export default function FinancialPage() {
       <div>
         <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:12, flexWrap:'wrap' }}>
           <button className="btn btn-primary btn-sm" onClick={addLoan}>+ Add Loan</button>
-          <button className="btn btn-ghost btn-sm" onClick={() => saveToFirestore(loans)}>💾 Save</button>
-          {saveStatus && (
-            <span style={{ fontSize:11, color: saveStatus==='error'?'#dc2626':'#15803d' }}>
-              {saveStatus==='saving' ? 'Saving…' : saveStatus==='saved' ? 'Saved ✓' : 'Save Error'}
-            </span>
-          )}
           <span style={{ marginLeft:'auto', fontSize:12, color:'#64748b' }}>
             {activeLoans.length} active · Principal: <strong>{fmtCur(totalPrincipal)}</strong>
           </span>
