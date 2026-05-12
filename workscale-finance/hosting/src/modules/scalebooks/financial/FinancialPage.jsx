@@ -49,6 +49,21 @@ function calcMonthData(loan, elapsed) {
   return { principal: Math.max(pp,0), interest: Math.max(interest,0), balance: Math.max(bal0-pp,0) };
 }
 
+/* Build pay-days month list: [{key:'YYYY-MM', label:'Mon-YYYY'}] starting from disbursementDate for termMonths */
+function buildPayDaysMonths(loan) {
+  if (!loan.disbursementDate || !loan.termMonths) return [];
+  const start = new Date(loan.disbursementDate);
+  if (isNaN(start.getTime())) return [];
+  const months = [];
+  for (let i = 0; i < loan.termMonths; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth() + i, 1);
+    const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    const label = MONTH_NAMES[d.getMonth()] + '-' + d.getFullYear();
+    months.push({ key, label });
+  }
+  return months;
+}
+
 /* Build array of 'Mon-YYYY' labels from disbursementDate over termMonths */
 function buildLoanTimeline(loan) {
   if (!loan.disbursementDate || !loan.termMonths) return [];
@@ -170,6 +185,8 @@ export default function FinancialPage() {
   const [saveStatus, setSaveStatus] = useState('');
   const [toast, setToast]           = useState('');
   const [confirmModal, setConfirmModal] = useState(null);
+  const [pdFillD1, setPdFillD1]         = useState('');
+  const [pdFillD2, setPdFillD2]         = useState('');
   const saveTimerRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
@@ -321,8 +338,8 @@ export default function FinancialPage() {
                     </td>
                     <td>
                       {l.paymentFrequency === 'Semi-Monthly'
-                        ? <button className="pill pill-sm" onClick={()=>setPayDaysModal(l.id)} style={{cursor:'pointer',background:'#f0f9ff',borderColor:'#bae6fd',color:'#0284c7',border:'1px solid'}}>
-                            {l.payDays || 'Set'}
+                        ? <button className="pill pill-sm" onClick={()=>{setPayDaysModal(l.id);setPdFillD1('');setPdFillD2('');}} style={{cursor:'pointer',background:'#f0f9ff',borderColor:'#bae6fd',color:'#0284c7',border:'1px solid'}}>
+                            {l.payDayMode==='Variable per Month' ? 'Variable' : (l.payDay1&&l.payDay2 ? `${l.payDay1}/${l.payDay2}` : l.payDays||'Set')}
                           </button>
                         : <span style={{color:'#94a3b8',fontSize:10}}>Monthly</span>
                       }
@@ -681,11 +698,11 @@ export default function FinancialPage() {
 
       {/* Body */}
       <div className="fp-body">
-        {activeTab === 'loans'    && <LoansTab />}
-        {activeTab === 'schedule' && <ScheduleTab />}
-        {activeTab === 'summary'  && <SummaryTab />}
-        {activeTab === 'calendar' && <CalendarTab />}
-        {activeTab === 'payment'  && <PaymentTab />}
+        {activeTab === 'loans'    && LoansTab()}
+        {activeTab === 'schedule' && ScheduleTab()}
+        {activeTab === 'summary'  && SummaryTab()}
+        {activeTab === 'calendar' && CalendarTab()}
+        {activeTab === 'payment'  && PaymentTab()}
       </div>
 
       {/* Payment Method Modal */}
@@ -748,55 +765,127 @@ export default function FinancialPage() {
       )}
 
       {/* Pay Days Modal */}
-      {payDaysLoan && (
-        <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setPayDaysModal(null)}>
-          <div className="modal" style={{ width:'min(500px,98vw)' }}>
-            <div className="modal-h">
-              <strong>Semi-Monthly Pay Days — {payDaysLoan.name||`Loan ${payDaysLoan.id}`}</strong>
-              <button className="btn btn-ghost btn-sm" onClick={()=>setPayDaysModal(null)}>✕</button>
-            </div>
-            <div className="modal-b">
-              <div style={{ display:'flex', gap:8, marginBottom:16 }}>
-                {['Fixed','Custom'].map(mode => (
-                  <button key={mode}
-                    className={`btn btn-sm ${(payDaysLoan.payDayMode||'Fixed')===mode?'btn-primary':'btn-ghost'}`}
-                    onClick={()=>updateLoan(payDaysLoan.id,'payDayMode',mode)}>{mode}</button>
+      {payDaysLoan && (() => {
+        const pdMonths = buildPayDaysMonths(payDaysLoan);
+        const pdm      = payDaysLoan.payDaysPerMonth || {};
+        const pdMode   = payDaysLoan.payDayMode || 'Fixed';
+        const getCell  = (key, col) => (pdm[key]?.[col]) || '';
+        const setCell  = (key, col, val) => updateLoan(payDaysLoan.id, 'payDaysPerMonth', { ...pdm, [key]: { ...(pdm[key]||{}), [col]: val } });
+        const closePd  = () => { setPayDaysModal(null); setPdFillD1(''); setPdFillD2(''); };
+        return (
+          <div className="backdrop" onClick={e=>e.target===e.currentTarget&&closePd()}>
+            <div className="modal" style={{width:'min(500px,98vw)'}}>
+
+              {/* Orange banner */}
+              <div style={{background:'#f97316',color:'#fff',padding:'16px 20px',flexShrink:0,borderRadius:'16px 16px 0 0'}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                  <strong style={{fontSize:16,fontWeight:900}}>📅 Pay Days</strong>
+                  <button onClick={closePd} style={{background:'rgba(255,255,255,.25)',border:'none',color:'#fff',borderRadius:8,width:28,height:28,cursor:'pointer',fontSize:14,fontWeight:900,display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button>
+                </div>
+                <div style={{fontSize:12,opacity:.85,marginTop:4,fontWeight:600}}>{payDaysLoan.name||`Loan ${payDaysLoan.id}`}</div>
+              </div>
+
+              {/* Mode toggle bar */}
+              <div style={{display:'flex',alignItems:'center',gap:10,padding:'14px 20px',borderBottom:'1px solid #e5e7eb',background:'#fff'}}>
+                <span style={{fontSize:12,fontWeight:800,color:'#64748b',letterSpacing:'.04em'}}>MODE:</span>
+                {['Fixed','Variable per Month'].map(m => (
+                  <button key={m}
+                    onClick={()=>updateLoan(payDaysLoan.id,'payDayMode',m)}
+                    style={{border:`2px solid ${pdMode===m?'#f97316':'#e5e7eb'}`,borderRadius:10,padding:'6px 14px',fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:'inherit',background:pdMode===m?'#f97316':'#fff',color:pdMode===m?'#fff':'#64748b',transition:'all .15s'}}>
+                    {m}
+                  </button>
                 ))}
               </div>
-              {(payDaysLoan.payDayMode||'Fixed') === 'Fixed' ? (
-                <div className="field">
-                  <label>Two Pay Days (comma-separated, e.g. 15, 30)</label>
-                  <input value={payDaysLoan.payDays||''} onChange={e=>updateLoan(payDaysLoan.id,'payDays',e.target.value)} placeholder="15, 30" />
-                </div>
-              ) : (
-                <div>
-                  <p style={{ fontSize:12, color:'#64748b', marginTop:0 }}>
-                    Enter custom pay days per month (e.g. "15, 30"). Leave blank to skip that month.
-                  </p>
-                  {MONTH_NAMES.map((mn, mi) => {
-                    const yr  = calYear;
-                    const key = yr + '-' + String(mi+1).padStart(2,'0');
-                    return (
-                      <div key={key} style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
-                        <span style={{ width:36, fontSize:12, fontWeight:700 }}>{mn}</span>
-                        <input style={{ flex:1, border:'1px solid #e5e7eb', borderRadius:8, padding:'6px 10px', fontSize:12 }}
-                          placeholder="15, 30"
-                          value={(payDaysLoan.payDaysPerMonth||{})[key]||''}
-                          onChange={e=>updateLoan(payDaysLoan.id,'payDaysPerMonth',{...(payDaysLoan.payDaysPerMonth||{}),[key]:e.target.value})}
-                        />
+
+              {/* Body */}
+              <div className="modal-b" style={{padding:'18px 20px'}}>
+                {pdMode === 'Fixed' ? (
+                  <div>
+                    <p style={{margin:'0 0 16px',fontSize:13,color:'#64748b'}}>Same two pay days every month.</p>
+                    <div style={{display:'flex',alignItems:'flex-end',gap:14}}>
+                      <div className="field" style={{flex:1}}>
+                        <label>DAY 1</label>
+                        <input className="tbl-inp" type="number" min="1" max="31" placeholder="e.g. 15"
+                          style={{textAlign:'center',fontSize:18,fontWeight:800,padding:'10px 8px'}}
+                          value={payDaysLoan.payDay1||''}
+                          onChange={e=>updateLoan(payDaysLoan.id,'payDay1',e.target.value)} />
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>setPayDaysModal(null)}>Close</button>
-              <button className="btn btn-primary" onClick={()=>{ saveToFirestore(loans); setPayDaysModal(null); showToast('Pay days saved.'); }}>Save</button>
+                      <span style={{fontSize:24,color:'#cbd5e1',paddingBottom:10,fontWeight:300}}>/</span>
+                      <div className="field" style={{flex:1}}>
+                        <label>DAY 2</label>
+                        <input className="tbl-inp" type="number" min="1" max="31" placeholder="e.g. 30"
+                          style={{textAlign:'center',fontSize:18,fontWeight:800,padding:'10px 8px'}}
+                          value={payDaysLoan.payDay2||''}
+                          onChange={e=>updateLoan(payDaysLoan.id,'payDay2',e.target.value)} />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <p style={{margin:'0 0 12px',fontSize:12,color:'#64748b'}}>
+                      Set specific days per month. Use <strong>Fill All</strong> to apply a day to every month at once.
+                    </p>
+                    {pdMonths.length === 0 ? (
+                      <div style={{color:'#94a3b8',fontSize:12,textAlign:'center',padding:'24px 0'}}>
+                        Set a First Payment date and Term (months) in the Loan Registry first.
+                      </div>
+                    ) : (
+                      <table style={{width:'100%',borderCollapse:'collapse'}}>
+                        <thead>
+                          <tr>
+                            <th style={{textAlign:'left',fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.05em',textTransform:'uppercase',padding:'8px 10px',background:'#f8fafc',borderBottom:'2px solid #e5e7eb'}}>MONTH</th>
+                            <th style={{textAlign:'center',fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.05em',textTransform:'uppercase',padding:'8px 10px',background:'#f8fafc',borderBottom:'2px solid #e5e7eb'}}>Day 1</th>
+                            <th style={{textAlign:'center',fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.05em',textTransform:'uppercase',padding:'8px 10px',background:'#f8fafc',borderBottom:'2px solid #e5e7eb'}}>Day 2</th>
+                          </tr>
+                          {/* Fill All row */}
+                          <tr style={{background:'#fffbeb'}}>
+                            <td style={{padding:'6px 10px',borderBottom:'2px solid #fde68a',fontSize:12,fontWeight:700,color:'#92400e'}}>Fill All →</td>
+                            <td style={{padding:'5px 8px',borderBottom:'2px solid #fde68a',textAlign:'center'}}>
+                              <input type="number" min="1" max="31" placeholder="Day"
+                                style={{border:'2px dashed #fbbf24',borderRadius:8,padding:'5px 0',fontSize:13,width:72,textAlign:'center',fontFamily:'inherit',background:'#fffbeb',boxSizing:'border-box'}}
+                                value={pdFillD1}
+                                onChange={e=>{ const v=e.target.value; setPdFillD1(v); const u={...pdm}; pdMonths.forEach(({key})=>{u[key]={...(u[key]||{}),d1:v}}); updateLoan(payDaysLoan.id,'payDaysPerMonth',u); }} />
+                            </td>
+                            <td style={{padding:'5px 8px',borderBottom:'2px solid #fde68a',textAlign:'center'}}>
+                              <input type="number" min="1" max="31" placeholder="Day"
+                                style={{border:'2px dashed #fbbf24',borderRadius:8,padding:'5px 0',fontSize:13,width:72,textAlign:'center',fontFamily:'inherit',background:'#fffbeb',boxSizing:'border-box'}}
+                                value={pdFillD2}
+                                onChange={e=>{ const v=e.target.value; setPdFillD2(v); const u={...pdm}; pdMonths.forEach(({key})=>{u[key]={...(u[key]||{}),d2:v}}); updateLoan(payDaysLoan.id,'payDaysPerMonth',u); }} />
+                            </td>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pdMonths.map(({key,label}) => (
+                            <tr key={key}>
+                              <td style={{padding:'5px 10px',borderBottom:'1px solid #f1f5f9',fontSize:12,fontWeight:700}}>{label}</td>
+                              <td style={{padding:'5px 8px',borderBottom:'1px solid #f1f5f9',textAlign:'center'}}>
+                                <input type="number" min="1" max="31" placeholder="D1"
+                                  style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'5px 0',fontSize:12,width:72,textAlign:'center',fontFamily:'inherit',boxSizing:'border-box'}}
+                                  value={getCell(key,'d1')}
+                                  onChange={e=>setCell(key,'d1',e.target.value)} />
+                              </td>
+                              <td style={{padding:'5px 8px',borderBottom:'1px solid #f1f5f9',textAlign:'center'}}>
+                                <input type="number" min="1" max="31" placeholder="D2"
+                                  style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'5px 0',fontSize:12,width:72,textAlign:'center',fontFamily:'inherit',boxSizing:'border-box'}}
+                                  value={getCell(key,'d2')}
+                                  onChange={e=>setCell(key,'d2',e.target.value)} />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="modal-f">
+                <button className="btn btn-primary" onClick={()=>{ saveToFirestore(loans); closePd(); showToast('Pay days saved.'); }}>Done</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {confirmModal && (
         <div className="backdrop" onClick={() => setConfirmModal(null)}>
