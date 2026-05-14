@@ -4,6 +4,7 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import ContactPicker from '../../../components/ContactPicker.jsx';
+import { nextBillingStatementId } from '../../../utils/documentIds.js';
 
 const BS_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Sent','Partial','Paid','Voided'];
 
@@ -119,16 +120,8 @@ export default function BillingPage() {
     return a;
   }, [statements, search, filterStatus, filterClient, dateFrom, dateTo]);
 
-  const genBsId = () => {
-    const d = new Date();
-    const yy = String(d.getFullYear()).slice(2);
-    const mm = String(d.getMonth()+1).padStart(2,'0');
-    const seq = String(Math.floor(Math.random()*9000)+1000);
-    return `BS${yy}${mm}${seq}`;
-  };
-
   const openNew = () => setModal({
-    isNew:true, bsId:genBsId(), contactId:'', contactName:'', billingDate:today(), dueDate:'', creditTerm:30,
+    isNew:true, bsId:'', contactId:'', contactName:'', billingDate:today(), dueDate:'', creditTerm:30,
     periodStart:'', periodEnd:'', description:'', grossAmount:0, taxGroupName:'VAT', totalVatInclusive:0,
     netDue:0, balance:0, incomeAccount:'', notes:'', status:'Draft', lines:[]
   });
@@ -139,7 +132,8 @@ export default function BillingPage() {
     setSaving(true);
     try {
       const { isNew, id, ...rest } = modal;
-      const payload = { ...rest, status: statusOverride || rest.status, balance: Number(rest.netDue||0) - Number(rest.appliedAmount||0), updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
+      const bsId = isNew ? await nextBillingStatementId(rest.billingDate || today()) : (rest.bsId || '');
+      const payload = { ...rest, bsId, status: statusOverride || rest.status, balance: Number(rest.netDue||0) - Number(rest.appliedAmount||0), updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
       if (isNew) await addDoc(collection(db,'billingStatements'), { ...payload, appliedAmount:0, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||'' });
       else       await updateDoc(doc(db,'billingStatements',id), payload);
       showToast('Billing statement saved.'); setModal(null);
@@ -187,13 +181,49 @@ export default function BillingPage() {
         <button className="btn btn-primary" onClick={openNew}>＋ New Statement</button>
       </div>
       <div className="bl-body">
-        <div className="kpi-row">
-          <div className="kpi-card"><div className="kpi-label">Total</div><div className="kpi-value">{kpis.total}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Draft</div><div className="kpi-value">{kpis.draft}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Pending</div><div className="kpi-value">{kpis.pending}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Sent/Active</div><div className="kpi-value">{kpis.sent}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Paid</div><div className="kpi-value">{kpis.paid}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Total Balance</div><div className="kpi-value orange" style={{fontSize:16}}>{fmt(kpis.balance)}</div></div>
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Balance</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.balance)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Outstanding receivables</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#0369a1 0%,#0284c7 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.95 11 19.79 19.79 0 01.88 2.38 2 2 0 012.86.22h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.09 7.91a16 16 0 006 6l.97-.97a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Sent / Active</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.sent}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Delivered to clients</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Paid</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.paid}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Fully settled statements</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
+          {[
+            {label:'Total',value:kpis.total,sub:'all statements',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>},
+            {label:'Draft',value:kpis.draft,sub:'not yet sent',color:'#64748b',bg:'#f8fafc',border:'#e2e8f0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>},
+            {label:'Pending',value:kpis.pending,sub:'awaiting approval',color:'#d97706',bg:'#fffbeb',border:'#fde68a',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
+            </div>
+          ))}
         </div>
 
         <div className="toolbar">
@@ -272,7 +302,7 @@ export default function BillingPage() {
               <div className="grid2" style={{gap:12}}>
                 <div className="field">
                   <label>BS ID</label>
-                  <input value={modal.bsId||''} onChange={e=>setModal(m=>({...m,bsId:e.target.value}))} />
+                  <input value={modal.bsId || ''} readOnly placeholder={modal.isNew ? 'Auto-assigned on save' : ''} style={modal.isNew ? {background:'#f8fafc',color:'#64748b',fontWeight:700} : undefined} />
                 </div>
                 <div className="field">
                   <label>Client / Contact</label>

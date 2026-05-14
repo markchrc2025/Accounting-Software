@@ -4,6 +4,7 @@ import {
   serverTimestamp, getDocs, where
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import { nextDisbursementReportId } from '../../../utils/documentIds.js';
 
 const fmt = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
 const uid = () => Math.random().toString(36).slice(2, 10).toUpperCase();
@@ -77,11 +78,6 @@ const CSS = `
 function StatusPill({ status }) {
   const s = STATUS_STYLES[status] || STATUS_STYLES['Draft'];
   return <span className="pill" style={s}>{status || 'Draft'}</span>;
-}
-
-function genReportId() {
-  const d = new Date(); const y = d.getFullYear(); const m = String(d.getMonth()+1).padStart(2,'0');
-  return `DR${y}${m}${String(Math.floor(Math.random()*9000)+1000)}`;
 }
 
 export default function DisbursementsPage() {
@@ -239,7 +235,7 @@ export default function DisbursementsPage() {
         await updateDoc(doc(db,'disbursementReports',editing.id), payload);
         showToast('Report updated.');
       } else {
-        const reportId = genReportId();
+        const reportId = await nextDisbursementReportId(form.date);
         await addDoc(collection(db,'disbursementReports'), { ...payload, reportId, createdAt:serverTimestamp(), createdBy:user });
         // Mark vouchers as For Disbursement
         await Promise.all(drLines.map(l => {
@@ -262,13 +258,54 @@ export default function DisbursementsPage() {
         status:newStatus, ...(reason?{rejectReason:reason}:{}),
         updatedAt:serverTimestamp(), updatedBy:user
       });
-      // If Approved → mark all vouchers as Paid
+      // If Approved → mark all vouchers as Paid AND auto-post loan payments
       if (newStatus === 'Approved') {
         const lines = report.lines || [];
-        await Promise.all(lines.map(l => {
+        await Promise.all(lines.map(async l => {
           const v = vouchers.find(v2 => (v2.voucherId||v2.id) === l.voucherId);
-          if (v) return updateDoc(doc(db,'vouchers',v.id), { status:'Paid', updatedAt:serverTimestamp(), updatedBy:user });
-        }).filter(Boolean));
+          if (!v) return;
+          // 1) mark voucher as Paid
+          await updateDoc(doc(db,'vouchers',v.id), { status:'Paid', updatedAt:serverTimestamp(), updatedBy:user });
+
+          // 2) Phase 5: auto-post to loanPayments when voucher is linked to a loan
+          //    and we haven't already posted (idempotency via loanPaymentId).
+          if (v.loanId && !v.loanPaymentId) {
+            const vLines = Array.isArray(v.lines) ? v.lines : [];
+            const interestAmt  = vLines
+              .filter(x => (x.category||'').toLowerCase() === 'finance cost')
+              .reduce((s, x) => s + (Number(x.amount) || 0), 0);
+            const principalAmt = vLines
+              .filter(x => (x.category||'').toLowerCase() === 'loans payable')
+              .reduce((s, x) => s + (Number(x.amount) || 0), 0);
+            const total = Number(v.totalAmount) || (interestAmt + principalAmt);
+            const penaltyAmt = Math.max(0, total - interestAmt - principalAmt);
+
+            try {
+              const payRef = await addDoc(collection(db,'loanPayments'), {
+                loanId:      v.loanId,
+                loanName:    v.contactSummary || '',
+                date:        report.date || v.preparationDate || today(),
+                interest:    interestAmt,
+                principal:   principalAmt,
+                penalty:     penaltyAmt,
+                total,
+                method:      'Voucher',
+                referenceNo: l.checkNo || l.refNo || '',
+                bank:        l.bankCode || v.paymentFromAccountCode || '',
+                voucherId:   v.voucherId || v.id,
+                disbursementReportId: report.reportId || report.id,
+                allocations: [], // FIFO allocation by reconciliation engine
+                notes:       `Auto-posted from Disbursement Report ${report.reportId||report.id}`,
+                source:      'disbursement-auto',
+                createdAt:   serverTimestamp(),
+                createdBy:   user,
+              });
+              await updateDoc(doc(db,'vouchers',v.id), { loanPaymentId: payRef.id });
+            } catch (err) {
+              console.error('Auto-post loan payment failed for voucher', v.id, err);
+            }
+          }
+        }));
       }
       showToast(`Status updated to ${newStatus}.`);
       setStatusModal(null);
@@ -313,18 +350,46 @@ export default function DisbursementsPage() {
       </div>
 
       <div className="dp-body">
-        {/* KPIs */}
-        <div className="kpi-row">
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#1e40af 0%,#2563eb 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Amount</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.totalAmt)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Across {kpis.total} report{kpis.total!==1?'s':''}</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Approved</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.approved}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Ready for release</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#b45309 0%,#d97706 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Pending</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.pending}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Under review</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
           {[
-            { label:'Total Reports',    value: kpis.total },
-            { label:'Draft',            value: kpis.draft },
-            { label:'Pending',          value: kpis.pending },
-            { label:'Approved',         value: kpis.approved },
-            { label:'Total Amount',     value: fmt(kpis.totalAmt) },
-          ].map(k => (
-            <div className="kpi-card" key={k.label}>
-              <div className="kpi-label">{k.label}</div>
-              <div className="kpi-value">{k.value}</div>
+            {label:'Total Reports',value:kpis.total,sub:'all disbursement reports',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>},
+            {label:'Draft',value:kpis.draft,sub:'not yet submitted',color:'#64748b',bg:'#f8fafc',border:'#e2e8f0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
             </div>
           ))}
         </div>

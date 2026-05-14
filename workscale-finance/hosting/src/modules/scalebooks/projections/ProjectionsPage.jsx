@@ -4,6 +4,7 @@ import {
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import { nextWeeklyProjectionId } from '../../../utils/documentIds.js';
 
 const PROJ_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Rejected'];
 const VOUCHER_TYPES = ['Check','Cash','Journal Voucher','Payroll','Final Pay','Government Remittance'];
@@ -124,8 +125,12 @@ export default function ProjectionsPage() {
     try {
       const totalOut = (form.lines||[]).reduce((s,l)=>s+(parseFloat(l.amount)||0),0);
       const totalIn = (form.inflowLines||[]).reduce((s,l)=>s+(parseFloat(l.amount)||0),0);
+      const isNew = !form.id;
+      const projId = isNew
+        ? await nextWeeklyProjectionId(form.startDate || form.endDate || new Date().toISOString().slice(0,10))
+        : (form.projId || '');
       const payload = {
-        projId: form.projId||'', weekCoverage: form.weekCoverage||'',
+        projId, weekCoverage: form.weekCoverage||'',
         startDate: form.startDate||'', endDate: form.endDate||'',
         status: form.status||'Draft',
         totalAmount: totalOut, totalInflow: totalIn,
@@ -179,7 +184,7 @@ export default function ProjectionsPage() {
   function duplicateProjection(proj) {
     const copy = {
       ...proj, id:undefined,
-      projId: (proj.projId||'PROJ') + '-COPY',
+      projId: '',
       status:'Draft',
       lines: (proj.lines||[]).map(l=>({...l,status:'Pending',linkedId:''})),
       inflowLines: [...(proj.inflowLines||[])],
@@ -213,7 +218,7 @@ export default function ProjectionsPage() {
           </div>
           <div className="modal-b">
             <div className="grid3">
-              <div className="field"><label>Projection ID *</label><input value={form.projId} onChange={e=>upd('projId',e.target.value)} placeholder="e.g. PROJ-2025-W01" /></div>
+              <div className="field"><label>Projection ID</label><input value={form.projId} readOnly placeholder={isEdit ? '' : 'Auto-assigned on save'} style={isEdit ? undefined : {background:'#f8fafc',color:'#64748b',fontWeight:700}} /></div>
               <div className="field"><label>Week Coverage</label><input value={form.weekCoverage} onChange={e=>upd('weekCoverage',e.target.value)} placeholder="e.g. Jan 1–7, 2025" /></div>
               <div className="field"><label>Status</label><select value={form.status} onChange={e=>upd('status',e.target.value)}>{PROJ_STATUSES.map(s=><option key={s}>{s}</option>)}</select></div>
               <div className="field"><label>Start Date</label><input type="date" value={form.startDate} onChange={e=>upd('startDate',e.target.value)} /></div>
@@ -293,7 +298,7 @@ export default function ProjectionsPage() {
             </div>
             <div style={{display:'flex',gap:8}}>
               <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
-              <button className="btn btn-primary" disabled={saving} onClick={()=>{if(!form.projId.trim()) return alert('Projection ID required.');saveProjection(form);}}>{saving?'Saving…':isEdit?'Save Changes':'Create Projection'}</button>
+              <button className="btn btn-primary" disabled={saving} onClick={()=>saveProjection(form)}>{saving?'Saving…':isEdit?'Save Changes':'Create Projection'}</button>
             </div>
           </div>
         </div>
@@ -331,15 +336,50 @@ export default function ProjectionsPage() {
         <button className="btn btn-primary" onClick={()=>setModal({})}>+ New Projection</button>
       </div>
       <div className="proj-body">
-        {/* KPI row */}
-        <div className="kpi-row">
-          {PROJ_STATUSES.map(s=>{
-            const ss=STATUS_STYLES[s];
-            return <div key={s} className="kpi" style={{borderTop:`3px solid ${ss.border}`}}>
-              <div className="kpi-lbl">{s}</div>
-              <div className="kpi-val" style={{color:ss.color}}>{countsByStatus[s]||0}</div>
-            </div>;
-          })}
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Approved</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{countsByStatus['Approved']||0}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{fmtCur(projections.filter(p=>p.status==='Approved').reduce((s,p)=>s+(parseFloat(p.totalAmount)||0),0))} approved</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#b45309 0%,#d97706 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Pending</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{(countsByStatus['Pending Review']||0)+(countsByStatus['Pending Approval']||0)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{fmtCur(totalPending)} under review</div>
+          </div>
+          <div style={{background:(countsByStatus['Rejected']||0)>0?'linear-gradient(135deg,#991b1b 0%,#dc2626 100%)':'linear-gradient(135deg,#334155 0%,#475569 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Rejected</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{countsByStatus['Rejected']||0}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{(countsByStatus['Rejected']||0)>0?'Needs revision':'All projections clean'}</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
+          {[
+            {label:'Total',value:projections.length,sub:'all projections',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>},
+            {label:'Draft',value:countsByStatus['Draft']||0,sub:'not yet submitted',color:'#64748b',bg:'#f8fafc',border:'#e2e8f0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>},
+            {label:'Pending Review',value:countsByStatus['Pending Review']||0,sub:'awaiting review',color:'#d97706',bg:'#fffbeb',border:'#fde68a',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>},
+            {label:'Pending Approval',value:countsByStatus['Pending Approval']||0,sub:'awaiting final sign-off',color:'#c2410c',bg:'#fff7ed',border:'#fed7aa',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
+            </div>
+          ))}
         </div>
         {/* Filters */}
         <div className="filters">

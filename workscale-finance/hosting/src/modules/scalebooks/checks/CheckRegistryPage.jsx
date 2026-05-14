@@ -6,6 +6,7 @@ import {
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
+import { nextCheckVoucherId } from '../../../utils/documentIds.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CHECKBOOK_TYPES = ['Regular', 'Business', 'Payroll', 'Manager'];
@@ -115,6 +116,11 @@ export default function CheckRegistryPage() {
   const [filterBank,   setFilterBank]   = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [search,       setSearch]       = useState('');
+  const [dateFrom,     setDateFrom]     = useState('');
+  const [dateTo,       setDateTo]       = useState('');
+  const [periodPreset, setPeriodPreset] = useState(''); // '', 'week', 'month', 'year'
+  const [analyticsBucket, setAnalyticsBucket] = useState('month'); // 'week' | 'month' | 'year'
+  const [analyticsBank,   setAnalyticsBank]   = useState('');
   const [saving,       setSaving]       = useState(false);
   const [toast,        setToast]        = useState('');
 
@@ -162,13 +168,6 @@ export default function CheckRegistryPage() {
   const activeCheckbook = (bankCode) =>
     checkbooks.find(cb => cb.bankCode === bankCode && cb.isActive !== false) || null;
 
-  const genCheckVoucherId = () => {
-    const d = new Date();
-    const prefix = `CV${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`;
-    const count  = vouchers.filter(v => (v.voucherId||'').startsWith(prefix)).length;
-    return `${prefix}-${String(count + 1).padStart(4,'0')}`;
-  };
-
   const genCheckId = (checkNumber) => {
     const d = new Date();
     const yyyyMMdd = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
@@ -180,10 +179,33 @@ export default function CheckRegistryPage() {
   CHECK_STATUSES.forEach(s => { countsByStatus[s] = checks.filter(c => c.status === s).length; });
   const totalIssued = checks.filter(c => c.status === 'Issued').reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
 
+  // Apply preset to date range whenever it changes
+  useEffect(() => {
+    if (!periodPreset) return;
+    const now = new Date();
+    if (periodPreset === 'week') {
+      const day = now.getDay(); // 0=Sun
+      const start = new Date(now); start.setDate(now.getDate() - day);
+      const end   = new Date(start); end.setDate(start.getDate() + 6);
+      setDateFrom(start.toISOString().slice(0,10));
+      setDateTo(end.toISOString().slice(0,10));
+    } else if (periodPreset === 'month') {
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      const end   = new Date(now.getFullYear(), now.getMonth()+1, 0);
+      setDateFrom(start.toISOString().slice(0,10));
+      setDateTo(end.toISOString().slice(0,10));
+    } else if (periodPreset === 'year') {
+      setDateFrom(`${now.getFullYear()}-01-01`);
+      setDateTo(`${now.getFullYear()}-12-31`);
+    }
+  }, [periodPreset]);
+
   // Filtered checks
   const filtered = useMemo(() => checks.filter(c => {
     if (filterBank   && c.bankCode !== filterBank)   return false;
     if (filterStatus && c.status   !== filterStatus) return false;
+    if (dateFrom && (c.issueDate||'') < dateFrom) return false;
+    if (dateTo   && (c.issueDate||'') > dateTo)   return false;
     if (search) {
       const q = search.toLowerCase();
       if (!((String(c.checkNumber||'')).toLowerCase().includes(q) ||
@@ -192,7 +214,48 @@ export default function CheckRegistryPage() {
             (c.checkId||'').toLowerCase().includes(q))) return false;
     }
     return true;
-  }), [checks, filterBank, filterStatus, search]);
+  }), [checks, filterBank, filterStatus, search, dateFrom, dateTo]);
+
+  // Outstanding aging buckets (Issued only, by days since issueDate)
+  const aging = useMemo(() => {
+    const buckets = { '0-30':{n:0,a:0}, '31-60':{n:0,a:0}, '61-90':{n:0,a:0}, '90+':{n:0,a:0} };
+    const now = new Date();
+    checks.filter(c => c.status === 'Issued').forEach(c => {
+      const d = new Date(c.issueDate); if (isNaN(d)) return;
+      const days = Math.floor((now - d) / 86400000);
+      const amt  = parseFloat(c.amount) || 0;
+      const k = days <= 30 ? '0-30' : days <= 60 ? '31-60' : days <= 90 ? '61-90' : '90+';
+      buckets[k].n += 1; buckets[k].a += amt;
+    });
+    return buckets;
+  }, [checks]);
+
+  // Time-series buckets for analytics tab
+  function bucketKey(dateStr, bucket) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr); if (isNaN(d)) return '';
+    if (bucket === 'year')  return String(d.getFullYear());
+    if (bucket === 'month') return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    // week (ISO-ish: YYYY-Www, week starts Sunday for simplicity)
+    const onejan = new Date(d.getFullYear(), 0, 1);
+    const wk = Math.ceil(((d - onejan) / 86400000 + onejan.getDay() + 1) / 7);
+    return `${d.getFullYear()}-W${String(wk).padStart(2,'0')}`;
+  }
+  const series = useMemo(() => {
+    const map = new Map(); // key -> { issuedN, issuedA, clearedN, clearedA, voidedN, voidedA }
+    checks.forEach(c => {
+      if (analyticsBank && c.bankCode !== analyticsBank) return;
+      const k = bucketKey(c.issueDate, analyticsBucket);
+      if (!k) return;
+      if (!map.has(k)) map.set(k, { key:k, issuedN:0, issuedA:0, clearedN:0, clearedA:0, voidedN:0, voidedA:0 });
+      const row = map.get(k);
+      const amt = parseFloat(c.amount) || 0;
+      row.issuedN += 1; row.issuedA += amt;
+      if (c.status === 'Cleared') { row.clearedN += 1; row.clearedA += amt; }
+      if (c.status === 'Voided')  { row.voidedN  += 1; row.voidedA  += amt; }
+    });
+    return [...map.values()].sort((a,b) => b.key.localeCompare(a.key));
+  }, [checks, analyticsBucket, analyticsBank]);
 
   // ── Line helpers ───────────────────────────────────────────────────────────
   const setLine = (i, key, val) => setCvLines(prev => prev.map((l, idx) => {
@@ -219,21 +282,79 @@ export default function CheckRegistryPage() {
 
   const journalLines = useMemo(() => {
     const jl = [];
-    cvLines.forEach(l => {
-      const amt = Number(l.amount)||0;
-      const tax = Number(l.taxAmt)||0;
-      if (!amt) return;
-      const expAmt = l.inclusive ? amt - tax : amt;
-      if (l.expenseAccount) jl.push({ account: l.expenseAccount, debit: expAmt, credit: 0 });
-      if (tax > 0 && l.taxType && l.taxType !== 'N/A') {
-        const taxAcct = l.taxType.includes('VAT') ? 'Input VAT' : `EWT Payable — ${l.taxType}`;
-        if (!l.inclusive) jl.push({ account: taxAcct, debit: 0, credit: tax });
+
+    // Format account as "(code) Name"
+    const acctLabel = (codeOrFull, fallback = '—') => {
+      if (!codeOrFull) return fallback;
+      if (codeOrFull.includes(' — ')) {
+        const [c, ...rest] = codeOrFull.split(' — ');
+        return `(${c.trim()}) ${rest.join(' — ').trim()}`;
       }
+      const found = accounts.find(a => a.code === codeOrFull);
+      return found ? `(${found.code}) ${found.name}` : codeOrFull;
+    };
+
+    // Check Vouchers are purchases → use taxAccountPurchases for separate tracking
+    const taxRateLabel = (rateDoc) => {
+      const raw = rateDoc.trackingType === 'separate'
+        ? (rateDoc.taxAccountPurchases || rateDoc.taxAccountSingle || '')
+        : (rateDoc.taxAccountSingle || '');
+      return raw ? acctLabel(raw) : `Tax — ${rateDoc.name}`;
+    };
+
+    let bankCreditTotal = 0;
+
+    cvLines.forEach(l => {
+      const amt = Number(l.amount) || 0;
+      const tax = Number(l.taxAmt)  || 0;
+      if (!amt) return;
+
+      // 1. Expense debit (net of inclusive tax)
+      const expAmt = (tax > 0 && l.inclusive) ? amt - tax : amt;
+      if (l.expenseAccount) {
+        jl.push({ account: acctLabel(l.expenseAccount), debit: expAmt, credit: 0 });
+      }
+
+      // 2. Tax debit lines (purchase = input tax)
+      if (tax > 0 && l.taxRateId) {
+        const rateDoc = taxRates.find(r => r.id === l.taxRateId);
+        if (rateDoc) {
+          jl.push({ account: taxRateLabel(rateDoc), debit: tax, credit: 0 });
+        } else {
+          // Tax group — split pro-rata across constituent rates
+          const groupDoc = taxGroups.find(g => g.id === l.taxRateId);
+          if (groupDoc?.rateNames?.length) {
+            const effectiveRate = groupDoc.rateNames.reduce((s, rn) => {
+              const r = taxRates.find(x => x.name === rn);
+              return s + (r?.rate || 0);
+            }, 0);
+            groupDoc.rateNames.forEach(rn => {
+              const r = taxRates.find(x => x.name === rn);
+              if (!r) return;
+              const share = effectiveRate > 0
+                ? Math.round((r.rate / effectiveRate) * tax * 100) / 100
+                : Math.round(tax / groupDoc.rateNames.length * 100) / 100;
+              jl.push({ account: taxRateLabel(r), debit: share, credit: 0 });
+            });
+          } else {
+            jl.push({ account: `Tax — ${l.taxType || 'Unknown'}`, debit: tax, credit: 0 });
+          }
+        }
+      }
+
+      // 3. Bank credit: gross amount paid
+      bankCreditTotal += l.inclusive ? amt : amt + tax;
     });
+
+    // 4. Bank / Cash credit
     const bankAcct = bankAccounts.find(a => a.code === cvForm.bankCode || a.id === cvForm.bankCode);
-    if (netCash > 0) jl.push({ account: bankAcct ? `${bankAcct.code} — ${bankAcct.name}` : (cvForm.bankCode || 'Bank / Cash'), debit: 0, credit: netCash });
+    const bankLabel = bankAcct
+      ? acctLabel(`${bankAcct.code} — ${bankAcct.name}`)
+      : (cvForm.bankCode || 'Bank / Cash');
+    if (bankCreditTotal > 0) jl.push({ account: bankLabel, debit: 0, credit: bankCreditTotal });
+
     return jl;
-  }, [cvLines, cvForm.bankCode, bankAccounts, netCash]);
+  }, [cvLines, cvForm.bankCode, bankAccounts, taxRates, taxGroups, accounts]);
 
   const jDebit  = journalLines.reduce((s,j) => s+j.debit,  0);
   const jCredit = journalLines.reduce((s,j) => s+j.credit, 0);
@@ -269,7 +390,7 @@ export default function CheckRegistryPage() {
 
     setSaving(true);
     try {
-      const voucherId    = genCheckVoucherId();
+      const voucherId    = await nextCheckVoucherId(cvForm.issueDate);
       const checkId      = genCheckId(assignedCheckNo);
       const payeeSummary = [...new Set(cvLines.map(l => l.contact).filter(Boolean))].join(', ') || cvForm.purposeCategory || '';
 
@@ -415,16 +536,60 @@ export default function CheckRegistryPage() {
   function RegisterTab() {
     return (
       <div>
-        <div className="kpi-row">
-          {CHECK_STATUSES.map(s => {
-            const st = STATUS_STYLES[s];
-            return (
-              <div key={s} className="kpi" style={{ borderTop:`3px solid ${st.borderColor}` }}>
-                <div className="kpi-lbl">{s}</div>
-                <div className="kpi-val" style={{ color:st.color }}>{countsByStatus[s] || 0}</div>
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#0369a1 0%,#0284c7 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Issued</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{countsByStatus['Issued']||0}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Outstanding: {fmt(totalIssued)}</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Cleared</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{countsByStatus['Cleared']||0}</div>
+            {(() => { const pct = checks.length > 0 ? Math.round((countsByStatus['Cleared']||0)/checks.length*100) : 0; return (
+              <div style={{marginTop:10}}><div style={{height:4,background:'rgba(255,255,255,.25)',borderRadius:99,marginBottom:5}}><div style={{height:'100%',width:`${pct}%`,background:'#fff',borderRadius:99}}/></div><div style={{fontSize:11,opacity:.8}}>{pct}% of all checks</div></div>
+            ); })()}
+          </div>
+          <div style={{background:'linear-gradient(135deg,#991b1b 0%,#dc2626 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Voided</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{countsByStatus['Voided']||0}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Cancelled checks</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Stopped</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{countsByStatus['Stopped']||0}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Payment halted</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
+          {[
+            {label:'Total Checks',value:checks.length,sub:`${filtered.length} matching filters`,color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2M9 12h6M9 16h4"/></svg>},
+            {label:'Stale',value:countsByStatus['Stale']||0,sub:'outstanding too long',color:'#64748b',bg:'#f8fafc',border:'#e2e8f0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>},
+            {label:'Checkbooks',value:checkbooks.length,sub:'registered accounts',color:'#0369a1',bg:'#f0f9ff',border:'#bae6fd',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>},
+            {label:'Outstanding',value:fmt(totalIssued),sub:'from issued checks',color:'#c2410c',bg:'#fff7ed',border:'#fed7aa',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
               </div>
-            );
-          })}
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
+            </div>
+          ))}
         </div>
         <div className="filters">
           <button className="btn btn-primary btn-sm" onClick={openNewCv}>+ New Check Voucher</button>
@@ -700,7 +865,7 @@ export default function CheckRegistryPage() {
               <tbody>
                 {journalLines.map((j, i) => (
                   <tr key={i}>
-                    <td style={{ fontFamily:'monospace', fontSize:12 }}>{j.account}</td>
+                    <td style={{ fontFamily:'monospace', fontSize:12, paddingLeft: j.credit > 0 ? 28 : 8 }}>{j.account}</td>
                     <td style={{ textAlign:'right', fontWeight:700, color:j.debit?'#1d4ed8':'#94a3b8' }}>{j.debit ? fmtN(j.debit) : '—'}</td>
                     <td style={{ textAlign:'right', fontWeight:700, color:j.credit?'#15803d':'#94a3b8' }}>{j.credit ? fmtN(j.credit) : '—'}</td>
                   </tr>
@@ -847,12 +1012,17 @@ export default function CheckRegistryPage() {
         </div>
       </div>
       <div className="cr-tabs">
-        {[{key:'register',label:'Check Register'},{key:'checkbooks',label:'Checkbook Management'}].map(t => (
+        {[
+          {key:'register',label:'Check Register'},
+          {key:'analytics',label:'Analytics & Aging'},
+          {key:'checkbooks',label:'Checkbook Management'},
+        ].map(t => (
           <button key={t.key} className={`cr-tab${activeTab===t.key?' cr-tab-active':''}`} onClick={() => setActiveTab(t.key)}>{t.label}</button>
         ))}
       </div>
       <div className="cr-body">
         {activeTab === 'register'   && <RegisterTab />}
+        {activeTab === 'analytics'  && <AnalyticsTab />}
         {activeTab === 'checkbooks' && <CheckbooksTab />}
       </div>
       {cvModal     !== null && <CheckVoucherModal />}

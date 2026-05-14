@@ -111,11 +111,47 @@ export default function BillingClientPage() {
         <strong style={{fontSize:18,fontWeight:900,color:'#0b1220'}}>CLIENT BILLING VIEW</strong>
       </div>
       <div className="bc-body">
-        <div className="kpi-row">
-          <div className="kpi-card"><div className="kpi-label">Clients</div><div className="kpi-value">{kpis.clients}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Statements</div><div className="kpi-value">{kpis.statements}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Outstanding Balance</div><div className="kpi-value orange" style={{fontSize:15}}>{fmt(kpis.balance)}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Total Collected</div><div className="kpi-value" style={{fontSize:15}}>{fmt(kpis.collected)}</div></div>
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Outstanding Balance</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.balance)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Across active statements</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Collected</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.collected)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>From all collections</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#0369a1 0%,#0284c7 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Clients</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.clients}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{kpis.statements} statement{kpis.statements!==1?'s':''} total</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
+          {[
+            {label:'Statements',value:kpis.statements,sub:'all billing statements',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
+            </div>
+          ))}
         </div>
 
         <div className="toolbar">

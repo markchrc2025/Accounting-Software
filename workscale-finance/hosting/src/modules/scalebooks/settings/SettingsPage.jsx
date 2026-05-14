@@ -6,6 +6,7 @@ import {
 import { db, auth, storage } from '../../../firebase.js';
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
+import { invalidateDocIdSettings } from '../../../utils/documentIds.js';
 
 const GLOBAL_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
 const MODULE_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
@@ -18,6 +19,16 @@ const MODULE_GROUPS = [
 ];
 const VOUCHER_TYPES = ['PAYMENT', 'PAYROLL', 'FINAL_PAY', 'LOAN'];
 const MONTHS        = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+const formatTin = v => {
+  const d = v.replace(/\D/g, '').slice(0, 14);
+  const main = d.slice(0, 9);
+  const branch = d.slice(9);
+  const parts = [];
+  for (let i = 0; i < main.length; i += 3) parts.push(main.slice(i, i + 3));
+  const result = parts.join('-');
+  return branch.length ? result + '-' + branch : result;
+};
 
 const MODULE_BACKUP_GROUPS = [
   { group: 'Disbursement', modules: [
@@ -186,6 +197,11 @@ export default function SettingsPage() {
   const [restoreModal,  setRestoreModal]  = useState(null);
   const [resetModal,    setResetModal]    = useState(null);
   const [dataWorking,   setDataWorking]   = useState(false);
+  const [counters,      setCounters]      = useState({}); // { periodKey: seq }
+  const [seqOverrides,  setSeqOverrides]  = useState({}); // { periodKey: editedSeq }
+  const _today = new Date();
+  const [selYear,  setSelYear]  = useState(_today.getFullYear());
+  const [selMonth, setSelMonth] = useState(_today.getMonth() + 1); // 1-12
 
   const { isAdmin } = usePermissions();
   const showToast  = msg => { setToast(msg); setTimeout(() => setToast(''), 3000); };
@@ -219,6 +235,17 @@ export default function SettingsPage() {
         drPrefix:     d.drPrefix     || 'DR',
         wpPrefix:     d.wpPrefix     || 'WP',
         isPrefix:     d.isPrefix     || 'IS',
+        bsPrefix:     d.bsPrefix     || 'BS',
+        colPrefix:    d.colPrefix    || 'COL',
+        cntPrefix:    d.cntPrefix    || 'CNT',
+        jePrefix:     d.jePrefix     || 'JE',
+        btPrefix:     d.btPrefix     || 'BT',
+        psPrefix:     d.psPrefix     || 'PS',
+        brPrefix:     d.brPrefix     || 'BREC',
+        prPrefix:     d.prPrefix     || 'PR',
+        fpPrefix:     d.fpPrefix     || 'FP',
+        lvPrefix:     d.lvPrefix     || 'LV',
+        chkPrefix:    d.chkPrefix    || 'CHK',
         includeYear:  d.includeYear  !== false,
         includeMonth: d.includeMonth !== false,
         enabledVoucherTypes:    d.enabledVoucherTypes    || [...VOUCHER_TYPES],
@@ -234,7 +261,12 @@ export default function SettingsPage() {
     const u1 = onSnapshot(query(collection(db, 'appUsers'),          orderBy('email')), s => setUsers(s.docs.map(d => ({id:d.id,...d.data()}))));
     const u2 = onSnapshot(query(collection(db, 'purposeCategories'), orderBy('name')),  s => setCategories(s.docs.map(d => ({id:d.id,...d.data()}))));
     const u3 = onSnapshot(query(collection(db, 'paymentTerms'),      orderBy('days')),  s => setPaymentTerms(s.docs.map(d => ({id:d.id,...d.data()}))));
-    return () => { u1(); u2(); u3(); };
+    const u4 = onSnapshot(collection(db, 'documentCounters'), s => {
+      const map = {};
+      s.docs.forEach(d => { map[d.id] = Number(d.data()?.seq || 0); });
+      setCounters(map);
+    });
+    return () => { u1(); u2(); u3(); u4(); };
   }, []);
 
   const saveProfile = async () => {
@@ -250,6 +282,23 @@ export default function SettingsPage() {
     setSaving(true);
     try {
       await setDoc(doc(db, 'settings', 'modules'), { ...moduleForm, updatedAt:serverTimestamp(), updatedBy:me }, { merge:true });
+      // Persist any admin-edited counter sequences.
+      if (isAdmin && Object.keys(seqOverrides).length) {
+        const writes = Object.entries(seqOverrides).map(async ([periodKey, val]) => {
+          // Field shows the NEXT sequence to be issued; counter stores last-issued (next-1).
+          const nextN = Math.max(1, parseInt(val, 10) || 1);
+          const seq   = nextN - 1;
+          if (seq === (counters[periodKey] || 0)) return;
+          // Derive prefix from periodKey by stripping trailing digits (year/month).
+          const prefix = periodKey.replace(/\d+$/, '');
+          await setDoc(doc(db, 'documentCounters', periodKey), {
+            prefix, periodKey, seq, updatedAt: serverTimestamp(), updatedBy: me,
+          }, { merge: true });
+        });
+        await Promise.all(writes);
+        setSeqOverrides({});
+      }
+      invalidateDocIdSettings();
       showToast('Settings saved.');
     } catch(e) { showToast('Error: ' + e.message); }
     setSaving(false);
@@ -337,7 +386,7 @@ export default function SettingsPage() {
             <div className="field col2"><label>Address</label><textarea rows={2} value={profileForm.companyAddress} onChange={e=>up('companyAddress',e.target.value)} /></div>
             <div className="field"><label>City</label><input value={profileForm.city} onChange={e=>up('city',e.target.value)} placeholder="e.g. Makati City" /></div>
             <div className="field"><label>Zip Code</label><input value={profileForm.zipCode} onChange={e=>up('zipCode',e.target.value)} placeholder="e.g. 1200" /></div>
-            <div className="field"><label>TIN</label><input value={profileForm.companyTin} onChange={e=>up('companyTin',e.target.value)} placeholder="000-000-000-000" /></div>
+            <div className="field"><label>TIN</label><input value={profileForm.companyTin} onChange={e=>up('companyTin',formatTin(e.target.value))} placeholder="000-000-000-000" inputMode="numeric" /></div>
             <div className="field"><label>Email</label><input type="email" value={profileForm.companyEmail} onChange={e=>up('companyEmail',e.target.value)} /></div>
             <div className="field"><label>Phone</label><input value={profileForm.companyPhone} onChange={e=>up('companyPhone',e.target.value)} /></div>
             <div className="field">
@@ -512,17 +561,107 @@ export default function SettingsPage() {
   function SetupConfig() {
     if (!moduleForm) return <div style={{padding:40,textAlign:'center',color:'#94a3b8'}}>Loading…</div>;
     const up = (k,v) => setModuleForm(f=>({...f,[k]:v}));
+
+    // Compute the period key for a given prefix using the live
+    // include-year/month toggles AND the admin-selected period (year/month),
+    // so each month has its own counter — matching how IDs are issued
+    // from the document's own date.
+    const currentPeriodKey = (rawPrefix) => {
+      const prefix = String(rawPrefix || '').toUpperCase();
+      let key = prefix;
+      if (moduleForm.includeYear)  key += String(selYear);
+      if (moduleForm.includeMonth) key += String(selMonth).padStart(2, '0');
+      return key;
+    };
+    const seqValue = (rawPrefix) => {
+      const pk = currentPeriodKey(rawPrefix);
+      if (Object.prototype.hasOwnProperty.call(seqOverrides, pk)) return seqOverrides[pk];
+      // Display the NEXT sequence (what will appear on the next saved document),
+      // i.e. counter + 1. When nothing has been issued yet, this is 1.
+      return (counters[pk] || 0) + 1;
+    };
+    const onSeqChange = (rawPrefix, v) => {
+      if (!isAdmin) return;
+      const pk = currentPeriodKey(rawPrefix);
+      setSeqOverrides(o => ({ ...o, [pk]: v.replace(/[^\d]/g, '') }));
+    };
+
+    const PREFIX_FIELDS = [
+      ['Payment Voucher',     'vcPrefix',  'PV'],
+      ['Check Voucher',       'cvPrefix',  'CV'],
+      ['Disbursement Report', 'drPrefix',  'DR'],
+      ['Weekly Projection',   'wpPrefix',  'WP'],
+      ['Service Invoice',     'isPrefix',  'IS'],
+      ['Billing Statement',   'bsPrefix',  'BS'],
+      ['Collection',          'colPrefix', 'COL'],
+      ['Contact',             'cntPrefix', 'CNT'],
+      ['Journal Entry',       'jePrefix',  'JE'],
+      ['Bank Transaction',    'btPrefix',  'BT'],
+      ['Payment Schedule',    'psPrefix',  'PS'],
+      ['Bank Reconciliation', 'brPrefix',  'BREC'],
+      ['Payroll Voucher',     'prPrefix',  'PR'],
+      ['Final Pay Voucher',   'fpPrefix',  'FP'],
+      ['Loan Voucher',        'lvPrefix',  'LV'],
+      ['Check Number Tag',    'chkPrefix', 'CHK'],
+    ];
+
     return (
       <>
-        <div className="sp-ch"><h1>Setup & Configurations</h1><p>Document ID prefixes and numbering format applied across all modules.</p></div>
+        <div className="sp-ch"><h1>Setup & Configurations</h1><p>Document ID prefixes and numbering format applied across all modules. Each month has its own counter — pick a period below to view or edit its Next Sequence{isAdmin?'':' (read-only — Admins can edit)'}.</p></div>
         <div className="sp-card">
           <div className="sp-card-title">Document ID Prefixes</div>
+          {(moduleForm.includeYear || moduleForm.includeMonth) && (
+            <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:14,padding:'10px 12px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:6}}>
+              <strong style={{fontSize:12,color:'#475569'}}>Period:</strong>
+              {moduleForm.includeMonth && (
+                <select value={selMonth} onChange={e=>setSelMonth(parseInt(e.target.value,10))} style={{padding:'4px 8px'}}>
+                  {MONTHS.map((m,i)=><option key={i+1} value={i+1}>{m}</option>)}
+                </select>
+              )}
+              {moduleForm.includeYear && (
+                <select value={selYear} onChange={e=>setSelYear(parseInt(e.target.value,10))} style={{padding:'4px 8px'}}>
+                  {Array.from({length:11},(_,i)=>_today.getFullYear()-5+i).map(y=>(
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                onClick={()=>{ setSelYear(_today.getFullYear()); setSelMonth(_today.getMonth()+1); }}
+                style={{marginLeft:'auto',padding:'4px 10px',fontSize:11,border:'1px solid #cbd5e1',background:'#fff',borderRadius:4,cursor:'pointer'}}
+              >Today</button>
+            </div>
+          )}
           <div className="grid3">
-            <div className="field"><label>Payment Voucher</label><input value={moduleForm.vcPrefix} onChange={e=>up('vcPrefix',e.target.value)} placeholder="PV" /></div>
-            <div className="field"><label>Check Voucher</label><input value={moduleForm.cvPrefix} onChange={e=>up('cvPrefix',e.target.value)} placeholder="CV" /></div>
-            <div className="field"><label>Disbursement Report</label><input value={moduleForm.drPrefix} onChange={e=>up('drPrefix',e.target.value)} placeholder="DR" /></div>
-            <div className="field"><label>Weekly Projection</label><input value={moduleForm.wpPrefix} onChange={e=>up('wpPrefix',e.target.value)} placeholder="WP" /></div>
-            <div className="field"><label>Service Invoice</label><input value={moduleForm.isPrefix} onChange={e=>up('isPrefix',e.target.value)} placeholder="IS" /></div>
+            {PREFIX_FIELDS.map(([label, key, ph]) => {
+              const pk    = currentPeriodKey(moduleForm[key] || ph);
+              const next  = seqValue(moduleForm[key] || ph);
+              const dirty = Object.prototype.hasOwnProperty.call(seqOverrides, pk);
+              return (
+                <div className="field" key={key}>
+                  <label>{label}</label>
+                  <div style={{display:'flex',gap:6}}>
+                    <input
+                      style={{flex:'1 1 auto',minWidth:0}}
+                      value={moduleForm[key]}
+                      onChange={e=>up(key,e.target.value)}
+                      placeholder={ph}
+                    />
+                    <input
+                      style={{width:90,fontFamily:'monospace',textAlign:'right',background:isAdmin?(dirty?'#fef3c7':'#fff'):'#f1f5f9',color:isAdmin?'#0b1220':'#64748b'}}
+                      value={String(next).padStart(4,'0')}
+                      onChange={e=>onSeqChange(moduleForm[key] || ph, e.target.value)}
+                      readOnly={!isAdmin}
+                      title={isAdmin ? `Next sequence for ${pk}. The next saved document will use this value.` : `Next sequence for ${pk}. Only Admins can edit.`}
+                      placeholder="0001"
+                    />
+                  </div>
+                  <div style={{fontSize:10,color:'#94a3b8',marginTop:4,fontFamily:'monospace'}}>
+                    {pk}-{String(next).padStart(4,'0')} (next)
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
         <div className="sp-card">

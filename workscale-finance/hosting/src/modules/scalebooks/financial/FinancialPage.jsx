@@ -1,7 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs } from 'firebase/firestore';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs, onSnapshot, query, orderBy, deleteDoc } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
+import { nextVoucherId } from '../../../utils/documentIds.js';
+import { recomputeLoanState, daysBetween } from './loanMonitoring.js';
+import RecordPaymentModal from './RecordPaymentModal.jsx';
 
 /* ─── Constants ─────────────────────────────────────────────────── */
 const LOAN_TYPES = [
@@ -176,7 +179,7 @@ const CSS = `
 
 export default function FinancialPage() {
   const [loans, setLoans]           = useState([]);
-  const [activeTab, setActiveTab]   = useState('loans');
+  const [activeTab, setActiveTab]   = useState('dashboard');
   const [scheduleYear, setScheduleYear] = useState('all');
   const [pmModal, setPmModal]       = useState(null);  // loan.id
   const [payDaysModal, setPayDaysModal] = useState(null); // loan.id
@@ -196,6 +199,13 @@ export default function FinancialPage() {
   const [vSaving,      setVSaving]        = useState(false);
   const saveTimerRef = useRef(null);
 
+  // Phase 2/3: actual payments + monitoring
+  const [payments,      setPayments]      = useState([]);
+  const [voucherDocs,   setVoucherDocs]   = useState([]);
+  const [payModal,      setPayModal]      = useState(null);  // loan.id
+  const [monitorFilter, setMonitorFilter] = useState('outstanding'); // outstanding | paidoff | atrisk | all
+  const [historyLoanFilter, setHistoryLoanFilter] = useState('all');
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
@@ -210,7 +220,54 @@ export default function FinancialPage() {
     getDocs(collection(db, 'accounts')).then(s =>
       setCalAccounts(s.docs.map(d => ({ id: d.id, ...d.data() })))
     );
+    // Live subscription to loan payments
+    const unsub = onSnapshot(
+      query(collection(db, 'loanPayments'), orderBy('date', 'desc')),
+      snap => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+      err  => console.error('loanPayments subscription error:', err)
+    );
+    // Live subscription to vouchers (for status badge in Payment History)
+    const unsubV = onSnapshot(
+      query(collection(db, 'vouchers'), orderBy('createdAt', 'desc')),
+      snap => setVoucherDocs(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+      err  => console.error('vouchers subscription error:', err)
+    );
+    return () => { unsub(); unsubV(); };
   }, []);
+
+  /* ── Voucher lookup map (by human-readable voucherId string) ──── */
+  const voucherMap = useMemo(() => {
+    const m = {};
+    for (const v of voucherDocs) if (v.voucherId) m[v.voucherId] = v;
+    return m;
+  }, [voucherDocs]);
+
+  const VOUCHER_STATUS_STYLE = {
+    'Pending':           { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
+    'Pending Review':    { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
+    'Pending Approval':  { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
+    'Approved':          { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
+    'For Disbursement':  { background:'#f0f9ff', borderColor:'#bae6fd', color:'#0369a1' },
+    'Paid':              { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' },
+    'Rejected':          { background:'#fef2f2', borderColor:'#fecaca', color:'#dc2626' },
+    'Voided':            { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
+  };
+
+  /* ── Group payments by loanId & compute monitoring states ─────── */
+  const paymentsByLoan = useMemo(() => {
+    const map = {};
+    for (const p of payments) {
+      if (p.loanId == null) continue;
+      (map[p.loanId] = map[p.loanId] || []).push(p);
+    }
+    return map;
+  }, [payments]);
+
+  const loanStates = useMemo(() => {
+    const map = {};
+    for (const l of loans) map[l.id] = recomputeLoanState(l, paymentsByLoan[l.id] || []);
+    return map;
+  }, [loans, paymentsByLoan]);
 
   const saveToFirestore = useCallback(async (ls) => {
     setSaveStatus('saving');
@@ -317,12 +374,11 @@ export default function FinancialPage() {
       const user = auth.currentUser?.email || '';
       const totalAmount = vLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
       const contactSummary = [...new Set(vLines.map(l=>l.contact).filter(Boolean))].join(', ');
-      const d = new Date();
-      const periodKey = `LV${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`;
-      const voucherId = `${periodKey}-${String(Math.floor(Math.random()*9000)+1000)}`;
+      const voucherType = vForm.voucherType || 'LOAN';
+      const voucherId = await nextVoucherId(voucherType, vForm.preparationDate);
       await addDoc(collection(db,'vouchers'), {
         voucherId,
-        voucherType: vForm.voucherType || 'LOAN',
+        voucherType,
         preparationDate: vForm.preparationDate,
         purposeCategory: vForm.purposeCategory,
         paymentFromAccountCode: vForm.paymentFrom,
@@ -349,12 +405,22 @@ export default function FinancialPage() {
   }, [vForm, vLines]);
 
   const TABS = [
-    { key: 'loans',    label: 'Loan Registry' },
-    { key: 'schedule', label: 'Amortization Schedule' },
-    { key: 'summary',  label: 'Summary' },
-    { key: 'calendar', label: 'Calendar' },
-    { key: 'payment',  label: 'Payment Method' },
+    { key: 'dashboard',  label: 'Dashboard' },
+    { key: 'loans',      label: 'Loan Registry' },
+    { key: 'monitoring', label: 'Loan Monitoring' },
+    { key: 'schedule',   label: 'Amortization' },
+    { key: 'history',    label: 'Payment History' },
+    { key: 'calendar',   label: 'Calendar' },
+    { key: 'summary',    label: 'Reports' },
+    { key: 'payment',    label: 'Settings' },
   ];
+
+  const deletePayment = useCallback((paymentId) => {
+    askConfirm('Delete this payment record? This cannot be undone.', async () => {
+      try { await deleteDoc(doc(db, 'loanPayments', paymentId)); showToast('Payment deleted.'); }
+      catch (e) { showToast('Error: ' + e.message); }
+    });
+  }, []);
 
   /* ── Tab: Loan Registry ────────────────────────────────────────── */
   function LoansTab() {
@@ -365,6 +431,12 @@ export default function FinancialPage() {
           <span style={{ marginLeft:'auto', fontSize:12, color:'#64748b' }}>
             {activeLoans.length} active · Principal: <strong>{fmtCur(totalPrincipal)}</strong>
           </span>
+          {saveStatus && (
+            <span style={{ fontSize:11, color: saveStatus==='error'?'#dc2626':'#15803d', fontWeight:600 }}>
+              {saveStatus==='saving'?'Saving…':saveStatus==='saved'?'Saved ✓':'Save Error'}
+            </span>
+          )}
+          <button className="btn btn-dark btn-sm" onClick={()=>saveToFirestore(loans)}>Save</button>
         </div>
         {loans.length === 0 ? (
           <div className="empty">No loans yet. Click "+ Add Loan" to begin.</div>
@@ -389,6 +461,8 @@ export default function FinancialPage() {
                   <th style={{width:90}}>Status</th>
                   <th style={{width:110}}>Frequency</th>
                   <th style={{width:90}}>Pay Days</th>
+                  <th style={{minWidth:110}}>Last Payment</th>
+                  <th style={{minWidth:110, textAlign:'right'}}>Outstanding</th>
                   <th style={{width:36}}></th>
                 </tr>
               </thead>
@@ -433,12 +507,640 @@ export default function FinancialPage() {
                         : <span style={{color:'#94a3b8',fontSize:10}}>Monthly</span>
                       }
                     </td>
+                    <td style={{ fontSize:11 }}>
+                      {loanStates[l.id]?.lastPaymentDate || <span style={{ color:'#cbd5e1' }}>—</span>}
+                    </td>
+                    <td style={{ textAlign:'right', fontWeight:700, color: (loanStates[l.id]?.outstandingPrincipal||0) > 0 ? '#c2410c' : '#15803d' }}>
+                      {fmtCur(loanStates[l.id]?.outstandingPrincipal || 0)}
+                    </td>
                     <td>
                       <button onClick={()=>deleteLoan(l.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:14,padding:'2px 4px'}}>✕</button>
                     </td>
                   </tr>
                 ))}
               </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ── Tab: Dashboard (Phase 4a) ─────────────────────────────────── */
+  function DashboardTab() {
+    if (loans.length === 0) return <div className="empty">No loans yet. Add loans in the Loan Registry tab to see dashboard insights.</div>;
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const yearStart = todayStr.slice(0, 4) + '-01-01';
+
+    // Portfolio aggregates
+    const portfolio = loans.reduce((acc, l) => {
+      const st = loanStates[l.id] || {};
+      acc.totalBorrowed       += Number(l.principal) || 0;
+      acc.totalOutstanding    += st.outstandingPrincipal || 0;
+      acc.totalPaidPrincipal  += st.paidPrincipal || 0;
+      acc.totalPaidInterest   += st.paidInterest  || 0;
+      acc.totalScheduledInt   += st.totalScheduledInterest || 0;
+      acc.atRiskAmount        += st.overdueAmount || 0;
+      if (st.derivedStatus === 'Paid-Off') acc.paidOffCount++;
+      else if (st.derivedStatus === 'Overdue') acc.overdueCount++;
+      else if (l.status === 'Disposed') acc.disposedCount++;
+      else acc.activeCount++;
+      return acc;
+    }, { totalBorrowed:0, totalOutstanding:0, totalPaidPrincipal:0, totalPaidInterest:0,
+         totalScheduledInt:0, atRiskAmount:0, paidOffCount:0, overdueCount:0, activeCount:0, disposedCount:0 });
+
+    // Interest paid this year (YTD)
+    const ytdInterest = payments
+      .filter(p => (p.date||'') >= yearStart)
+      .reduce((s, p) => s + (Number(p.interest)||0), 0);
+    const ytdPrincipal = payments
+      .filter(p => (p.date||'') >= yearStart)
+      .reduce((s, p) => s + (Number(p.principal)||0), 0);
+
+    // Build alert rows: overdue first, then due in next 14 days
+    const alerts = [];
+    loans.forEach(l => {
+      const st = loanStates[l.id] || {};
+      if (st.derivedStatus === 'Paid-Off' || l.status === 'Disposed') return;
+      if ((st.overdueAmount || 0) > 0) {
+        alerts.push({ loan: l, type: 'overdue', amount: st.overdueAmount,
+          dueDate: st.nextDueDate, missedCount: st.missedCount || 0 });
+      } else if (st.nextDueDate) {
+        const days = daysBetween(todayStr, st.nextDueDate);
+        if (days >= 0 && days <= 14) {
+          alerts.push({ loan: l, type: days <= 7 ? 'duesoon' : 'upcoming',
+            amount: st.nextDueAmount || 0, dueDate: st.nextDueDate, daysToDue: days });
+        }
+      }
+    });
+    // Sort: overdue first, then duesoon, then upcoming; within group by date asc
+    const ORDER = { overdue:0, duesoon:1, upcoming:2 };
+    alerts.sort((a, b) => (ORDER[a.type] - ORDER[b.type]) || ((a.dueDate||'').localeCompare(b.dueDate||'')));
+
+    const ALERT_STYLE = {
+      overdue:  { bg:'#fef2f2', border:'#fca5a5', color:'#dc2626', label:'OVERDUE',
+        icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg> },
+      duesoon:  { bg:'#fff7ed', border:'#fdba74', color:'#c2410c', label:'DUE SOON',
+        icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg> },
+      upcoming: { bg:'#f0f9ff', border:'#bae6fd', color:'#0369a1', label:'UPCOMING',
+        icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M8 7V3m8 4V3M3 11h18M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg> },
+    };
+
+    // Recent payments (last 5)
+    const recentPayments = [...payments].slice(0, 5);
+
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+        {/* ── KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:14 }}>
+
+          {/* Total Borrowed */}
+          <div style={{
+            background:'linear-gradient(135deg,#0369a1 0%,#0284c7 100%)',
+            borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
+          }}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 21h20M4 21V8l8-5 8 5v13M10 21V12h4v9"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Borrowed</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.totalBorrowed)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.75}}>Across {loans.length} loan{loans.length!==1?'s':''}</div>
+            <div style={{marginTop:8,display:'flex',gap:16,fontSize:11}}>
+              <span style={{display:'flex',alignItems:'center',gap:5}}>
+                <svg width="7" height="7" viewBox="0 0 7 7"><circle cx="3.5" cy="3.5" r="3.5" fill="currentColor"/></svg>
+                {portfolio.activeCount} active
+              </span>
+              <span style={{display:'flex',alignItems:'center',gap:5,opacity:.7}}>
+                <svg width="7" height="7" viewBox="0 0 7 7" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="3.5" cy="3.5" r="2.8"/></svg>
+                {portfolio.paidOffCount} paid off
+              </span>
+            </div>
+          </div>
+
+          {/* Total Outstanding */}
+          {(() => {
+            const pct = portfolio.totalBorrowed > 0
+              ? Math.min(100, (portfolio.totalOutstanding / portfolio.totalBorrowed) * 100)
+              : 0;
+            return (
+              <div style={{
+                background:'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)',
+                borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
+              }}>
+                <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                </div>
+                <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Outstanding</div>
+                <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.totalOutstanding)}</div>
+                <div style={{marginTop:10,height:5,background:'rgba(255,255,255,.25)',borderRadius:99}}>
+                  <div style={{height:'100%',width:`${pct}%`,background:'#fff',borderRadius:99,transition:'width .6s'}} />
+                </div>
+                <div style={{marginTop:5,fontSize:11,opacity:.8,display:'flex',justifyContent:'space-between'}}>
+                  <span>{pct.toFixed(1)}% of borrowed</span>
+                  <span>{(100-pct).toFixed(1)}% repaid</span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Paid to Date */}
+          <div style={{
+            background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',
+            borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
+          }}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Paid to Date</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.totalPaidPrincipal + portfolio.totalPaidInterest)}</div>
+            <div style={{marginTop:10,display:'flex',gap:6,flexWrap:'wrap',fontSize:11}}>
+              <span style={{background:'rgba(255,255,255,.18)',borderRadius:6,padding:'2px 8px'}}>Pri {fmtCur(portfolio.totalPaidPrincipal)}</span>
+              <span style={{background:'rgba(255,255,255,.18)',borderRadius:6,padding:'2px 8px'}}>Int {fmtCur(portfolio.totalPaidInterest)}</span>
+            </div>
+          </div>
+
+          {/* At Risk */}
+          <div style={{
+            background: portfolio.atRiskAmount > 0
+              ? 'linear-gradient(135deg,#991b1b 0%,#dc2626 100%)'
+              : 'linear-gradient(135deg,#166534 0%,#16a34a 100%)',
+            borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
+          }}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              {portfolio.atRiskAmount > 0
+                ? <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                : <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+              }
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>At Risk · Overdue</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.atRiskAmount)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>
+              {portfolio.atRiskAmount > 0
+                ? `${portfolio.overdueCount} loan${portfolio.overdueCount!==1?'s':''} with missed payments`
+                : 'All payments current'}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Secondary KPI Row ──────────────────────────────────────── */}
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:10 }}>
+          {[
+            { label:'Active Loans',
+              value: portfolio.activeCount, sub: 'carrying balance', color:'#1d4ed8', bg:'#eff6ff', border:'#bfdbfe',
+              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2M9 12h6M9 16h4"/></svg> },
+            { label:'Paid Off',
+              value: portfolio.paidOffCount, sub: 'fully settled', color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0',
+              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M5 13l4 4L19 7"/></svg> },
+            { label:'Disposed',
+              value: portfolio.disposedCount, sub: 'written-off / closed', color:'#64748b', bg:'#f8fafc', border:'#e2e8f0',
+              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M20 7H4a2 2 0 000 4h16a2 2 0 000-4zM8 11v8M12 11v8M16 11v8"/></svg> },
+            { label:'Interest Paid YTD',
+              value: fmtCur(ytdInterest), sub: new Date().getFullYear()+' year to date', color:'#dc2626', bg:'#fef2f2', border:'#fecaca',
+              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg> },
+            { label:'Principal Paid YTD',
+              value: fmtCur(ytdPrincipal), sub: new Date().getFullYear()+' year to date', color:'#2563eb', bg:'#eff6ff', border:'#bfdbfe',
+              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg> },
+          ].map(({ label, value, sub, color, bg, border, icon }) => (
+            <div key={label} style={{
+              background: bg, border:`1px solid ${border}`, borderRadius:12, padding:'14px 15px',
+            }}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:10,color:'#94a3b8',marginTop:5}}>{sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Alerts feed */}
+        <div className="card" style={{padding:0}}>
+          <div style={{padding:'12px 16px',borderBottom:'1px solid #f1f5f9',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <strong style={{fontSize:13}}>Alerts &amp; Upcoming Payments</strong>
+            <span style={{fontSize:11,color:'#64748b'}}>{alerts.length} item{alerts.length!==1?'s':''}</span>
+          </div>
+          {alerts.length === 0 ? (
+            <div className="empty" style={{padding:'28px 16px'}}>
+              All clear — no overdue loans and nothing due in the next 14 days.
+            </div>
+          ) : (
+            <div>
+              {alerts.map((a, idx) => {
+                const s = ALERT_STYLE[a.type];
+                return (
+                  <div key={idx} style={{
+                    display:'flex',alignItems:'center',gap:12,padding:'12px 16px',
+                    borderBottom: idx < alerts.length-1 ? '1px solid #f1f5f9' : 'none',
+                    background: s.bg,
+                  }}>‌
+                    <span style={{color:s.color,display:'flex',flexShrink:0}}>{s.icon}</span>
+                    <span className="pill" style={{background:'#fff',borderColor:s.border,color:s.color,fontSize:10}}>
+                      {s.label}
+                    </span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:13,color:'#0f172a'}}>{a.loan.name || `Loan ${a.loan.id}`}</div>
+                      <div style={{fontSize:11,color:'#64748b',marginTop:2}}>
+                        {a.loan.loanType || 'Loan'}
+                        {a.type === 'overdue' && a.missedCount > 0 && <> · {a.missedCount} missed payment{a.missedCount!==1?'s':''}</>}
+                        {a.type !== 'overdue' && a.daysToDue != null && <> · in {a.daysToDue} day{a.daysToDue!==1?'s':''}</>}
+                      </div>
+                    </div>
+                    <div style={{textAlign:'right'}}>
+                      <div style={{fontWeight:800,fontSize:13,color:s.color}}>{fmtCur(a.amount)}</div>
+                      <div style={{fontSize:10,color:'#64748b',marginTop:2}}>Due {a.dueDate || '—'}</div>
+                    </div>
+                    <button className="btn btn-primary btn-sm" onClick={()=>setPayModal(a.loan.id)}>Record</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Recent payments */}
+        {recentPayments.length > 0 && (
+          <div className="card" style={{padding:0}}>
+            <div style={{padding:'12px 16px',borderBottom:'1px solid #f1f5f9',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:13}}>Recent Payments</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setActiveTab('history')}>View all →</button>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th><th>Loan</th><th>Method</th>
+                  <th style={{textAlign:'right'}}>Interest</th>
+                  <th style={{textAlign:'right'}}>Principal</th>
+                  <th style={{textAlign:'right'}}>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentPayments.map(p => {
+                  const l = loans.find(x => x.id === p.loanId);
+                  return (
+                    <tr key={p.id}>
+                      <td style={{fontSize:12}}>{p.date}</td>
+                      <td style={{fontWeight:600}}>{l?.name || p.loanName || p.loanId}</td>
+                      <td><span className="pill" style={{background:'#f1f5f9',borderColor:'#cbd5e1',color:'#475569'}}>{p.method || '—'}</span></td>
+                      <td style={{textAlign:'right',color:'#dc2626'}}>{fmtCur(p.interest||0)}</td>
+                      <td style={{textAlign:'right',color:'#2563eb'}}>{fmtCur(p.principal||0)}</td>
+                      <td style={{textAlign:'right',fontWeight:700}}>{fmtCur(p.total||0)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ── Tab: Loan Monitoring (Phase 3) ────────────────────────────── */
+  function MonitoringTab() {
+    if (loans.length === 0) return <div className="empty">No loans yet. Add loans in the Loan Registry tab.</div>;
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Build rows decorated with state
+    const rows = loans.map(l => ({ loan: l, st: loanStates[l.id] || {} }));
+
+    // Filter by category
+    let filtered;
+    if (monitorFilter === 'outstanding') {
+      filtered = rows.filter(r => !r.st.isPaidOff && r.loan.status !== 'Disposed');
+    } else if (monitorFilter === 'paidoff') {
+      filtered = rows.filter(r => r.st.isPaidOff);
+    } else if (monitorFilter === 'atrisk') {
+      filtered = rows.filter(r => (r.st.missedCount || 0) > 0 && !r.st.isPaidOff);
+    } else {
+      filtered = rows;
+    }
+
+    // Portfolio KPIs (across all loans, not just filtered)
+    const kpi = rows.reduce((acc, r) => {
+      acc.totalPrincipal += parseFloat(r.loan.principal) || 0;
+      acc.totalOutstanding += r.st.outstandingPrincipal || 0;
+      acc.totalPaidPrincipal += r.st.paidPrincipal || 0;
+      acc.totalPaidInterest += r.st.paidInterest || 0;
+      if (r.st.isPaidOff) acc.paidOffCount++;
+      else if (r.loan.status !== 'Disposed') acc.outstandingCount++;
+      if ((r.st.missedCount || 0) > 0 && !r.st.isPaidOff) acc.atRiskCount++;
+      return acc;
+    }, { totalPrincipal:0, totalOutstanding:0, totalPaidPrincipal:0, totalPaidInterest:0,
+         outstandingCount:0, paidOffCount:0, atRiskCount:0 });
+
+    const StatusPill = ({ status }) => {
+      const map = {
+        'Paid-Off':  { bg:'#f0fdf4', border:'#bbf7d0', color:'#15803d' },
+        'Overdue':   { bg:'#fef2f2', border:'#fecaca', color:'#b91c1c' },
+        'Current':   { bg:'#eff6ff', border:'#bfdbfe', color:'#1d4ed8' },
+        'Active':    { bg:'#fff7ed', border:'#fed7aa', color:'#c2410c' },
+        'Disposed':  { bg:'#f8fafc', border:'#e2e8f0', color:'#94a3b8' },
+      };
+      const s = map[status] || map.Active;
+      return <span className="pill" style={{ background:s.bg, borderColor:s.border, color:s.color }}>{status}</span>;
+    };
+
+    const FilterChip = ({ k, label, count, accent }) => (
+      <button
+        onClick={() => setMonitorFilter(k)}
+        style={{
+          border: monitorFilter === k ? `2px solid ${accent}` : '2px solid #e5e7eb',
+          background: monitorFilter === k ? accent : '#fff',
+          color: monitorFilter === k ? '#fff' : '#0b1220',
+          borderRadius: 999, padding: '6px 14px', fontSize: 12, fontWeight: 800,
+          cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 8,
+        }}
+      >
+        {label}
+        <span style={{
+          background: monitorFilter === k ? 'rgba(255,255,255,.25)' : '#f1f5f9',
+          color: monitorFilter === k ? '#fff' : '#64748b',
+          borderRadius: 999, padding: '1px 8px', fontSize: 11, fontWeight: 800,
+        }}>{count}</span>
+      </button>
+    );
+
+    return (
+      <div>
+        {/* KPI cards */}
+        <div className="summary-bar">
+          <div className="scard">
+            <div className="scard-label">Total Borrowed</div>
+            <div className="scard-value">{fmtCur(kpi.totalPrincipal)}</div>
+            <div style={{ fontSize:10, color:'#94a3b8', marginTop:4 }}>{rows.length} loan{rows.length!==1?'s':''}</div>
+          </div>
+          <div className="scard">
+            <div className="scard-label">Outstanding Balance</div>
+            <div className="scard-value" style={{ color:'#c2410c' }}>{fmtCur(kpi.totalOutstanding)}</div>
+            <div style={{ fontSize:10, color:'#94a3b8', marginTop:4 }}>{kpi.outstandingCount} active</div>
+          </div>
+          <div className="scard">
+            <div className="scard-label">Principal Paid-to-Date</div>
+            <div className="scard-value" style={{ color:'#15803d' }}>{fmtCur(kpi.totalPaidPrincipal)}</div>
+            <div style={{ fontSize:10, color:'#94a3b8', marginTop:4 }}>Interest paid: {fmtCur(kpi.totalPaidInterest)}</div>
+          </div>
+          <div className="scard">
+            <div className="scard-label">At-Risk Loans</div>
+            <div className="scard-value" style={{ color: kpi.atRiskCount > 0 ? '#b91c1c' : '#15803d' }}>
+              {kpi.atRiskCount}
+            </div>
+            <div style={{ fontSize:10, color:'#94a3b8', marginTop:4 }}>{kpi.paidOffCount} paid-off</div>
+          </div>
+        </div>
+
+        {/* Filter chips */}
+        <div style={{ display:'flex', gap:8, marginBottom:14, flexWrap:'wrap' }}>
+          <FilterChip k="outstanding" label="Outstanding" count={kpi.outstandingCount} accent="#c2410c" />
+          <FilterChip k="atrisk"      label="At-Risk / Overdue" count={kpi.atRiskCount}     accent="#b91c1c" />
+          <FilterChip k="paidoff"     label="Paid-Off"    count={kpi.paidOffCount}    accent="#15803d" />
+          <FilterChip k="all"         label="All Loans"   count={rows.length}         accent="#0f172a" />
+        </div>
+
+        {filtered.length === 0 ? (
+          <div className="empty">
+            {monitorFilter === 'paidoff'
+              ? 'No paid-off loans yet.'
+              : monitorFilter === 'atrisk'
+              ? 'No at-risk loans. Everything is current.'
+              : 'No loans in this category.'}
+          </div>
+        ) : (
+          <div style={{ overflowX:'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Lender / Loan</th>
+                  <th>Type</th>
+                  <th style={{textAlign:'right'}}>Principal</th>
+                  <th style={{textAlign:'right'}}>Outstanding</th>
+                  <th style={{width:140}}>% Paid</th>
+                  <th>Last Payment</th>
+                  <th>Next Due</th>
+                  <th style={{textAlign:'right'}}>Next Amt</th>
+                  <th>Status</th>
+                  <th style={{width:170}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(({ loan: l, st }) => {
+                  const pct = st.percentPaid || 0;
+                  const dToNext = daysBetween(today, st.nextDueDate);
+                  const dSinceLast = daysBetween(st.lastPaymentDate, today);
+                  return (
+                    <tr key={l.id}>
+                      <td style={{ fontWeight:700 }}>{l.name || `Loan ${l.id}`}</td>
+                      <td style={{ color:'#64748b' }}>{l.loanType || '—'}</td>
+                      <td style={{ textAlign:'right' }}>{fmtCur(parseFloat(l.principal)||0)}</td>
+                      <td style={{ textAlign:'right', fontWeight:800, color: st.outstandingPrincipal > 0 ? '#c2410c' : '#15803d' }}>
+                        {fmtCur(st.outstandingPrincipal || 0)}
+                      </td>
+                      <td>
+                        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                          <div style={{ flex:1, background:'#f1f5f9', borderRadius:6, height:8, overflow:'hidden' }}>
+                            <div style={{
+                              width:`${pct}%`, height:'100%',
+                              background: pct >= 100 ? '#15803d' : '#f97316',
+                            }} />
+                          </div>
+                          <span style={{ fontSize:11, fontWeight:700, color:'#64748b', minWidth:38, textAlign:'right' }}>
+                            {pct.toFixed(0)}%
+                          </span>
+                        </div>
+                      </td>
+                      <td style={{ fontSize:11 }}>
+                        {st.lastPaymentDate ? (
+                          <>
+                            {st.lastPaymentDate}
+                            {dSinceLast != null && <span style={{ color:'#94a3b8', marginLeft:6 }}>({dSinceLast}d ago)</span>}
+                          </>
+                        ) : <span style={{ color:'#cbd5e1' }}>—</span>}
+                      </td>
+                      <td style={{ fontSize:11 }}>
+                        {st.nextDueDate ? (
+                          <>
+                            {st.nextDueDate}
+                            {dToNext != null && (
+                              <span style={{
+                                marginLeft:6, fontWeight:700,
+                                color: dToNext < 0 ? '#b91c1c' : dToNext <= 7 ? '#c2410c' : '#94a3b8',
+                              }}>
+                                {dToNext < 0 ? `${Math.abs(dToNext)}d overdue` : `in ${dToNext}d`}
+                              </span>
+                            )}
+                          </>
+                        ) : <span style={{ color:'#cbd5e1' }}>—</span>}
+                      </td>
+                      <td style={{ textAlign:'right' }}>{st.nextDueAmount ? fmtCur(st.nextDueAmount) : '—'}</td>
+                      <td><StatusPill status={st.derivedStatus || 'Active'} /></td>
+                      <td style={{ textAlign:'right' }}>
+                        {!st.isPaidOff && l.status !== 'Disposed' && (
+                          <button className="btn btn-primary btn-sm" onClick={()=>setPayModal(l.id)}>
+                            + Record Payment
+                          </button>
+                        )}
+                        {st.isPaidOff && (
+                          <span style={{ fontSize:11, color:'#15803d', fontWeight:700 }}>
+                            ✓ Paid {st.payoffDate || ''}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Overdue installments breakdown — when At-Risk filter active */}
+        {monitorFilter === 'atrisk' && filtered.length > 0 && (
+          <div style={{ marginTop:24 }}>
+            <div style={{ fontSize:11, fontWeight:800, color:'#b91c1c', letterSpacing:'.07em',
+              textTransform:'uppercase', marginBottom:10, paddingBottom:6, borderBottom:'2px solid #fecaca' }}>
+              Overdue Installments
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Loan</th>
+                  <th>Period</th>
+                  <th>Due Date</th>
+                  <th>Days Overdue</th>
+                  <th style={{textAlign:'right'}}>Interest Due</th>
+                  <th style={{textAlign:'right'}}>Principal Due</th>
+                  <th style={{textAlign:'right'}}>Total Due</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.flatMap(({ loan: l, st }) =>
+                  (st.schedule || [])
+                    .filter(r => r.status === 'overdue' || (r.status === 'partial' && r.dueDate < today))
+                    .map(r => {
+                      const intDue = Math.max(0, r.scheduledInterest - r.paidInterest);
+                      const priDue = Math.max(0, r.scheduledPrincipal - r.paidPrincipal);
+                      const days = daysBetween(r.dueDate, today) || 0;
+                      return (
+                        <tr key={l.id+'-'+r.period}>
+                          <td style={{ fontWeight:700 }}>{l.name || `Loan ${l.id}`}</td>
+                          <td>{r.label} (P{r.period})</td>
+                          <td style={{ fontSize:11 }}>{r.dueDate}</td>
+                          <td style={{ color:'#b91c1c', fontWeight:700 }}>{days}d</td>
+                          <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(intDue)}</td>
+                          <td style={{ textAlign:'right', color:'#2563eb' }}>{fmtCur(priDue)}</td>
+                          <td style={{ textAlign:'right', fontWeight:900 }}>{fmtCur(intDue+priDue)}</td>
+                        </tr>
+                      );
+                    })
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ── Tab: Payment History (Phase 2) ────────────────────────────── */
+  function HistoryTab() {
+    const filtered = historyLoanFilter === 'all'
+      ? payments
+      : payments.filter(p => String(p.loanId) === String(historyLoanFilter));
+
+    const totals = filtered.reduce((acc, p) => {
+      acc.interest  += p.interest  || 0;
+      acc.principal += p.principal || 0;
+      acc.penalty   += p.penalty   || 0;
+      acc.total     += p.total     || 0;
+      return acc;
+    }, { interest:0, principal:0, penalty:0, total:0 });
+
+    return (
+      <div>
+        <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:12, flexWrap:'wrap' }}>
+          <label style={{ fontSize:11, fontWeight:800, color:'#64748b', letterSpacing:'.05em' }}>
+            FILTER BY LOAN:
+          </label>
+          <select className="tbl-sel" value={historyLoanFilter} onChange={e=>setHistoryLoanFilter(e.target.value)}>
+            <option value="all">All Loans</option>
+            {loans.map(l => <option key={l.id} value={l.id}>{l.name || `Loan ${l.id}`}</option>)}
+          </select>
+          <span style={{ marginLeft:'auto', fontSize:12, color:'#64748b' }}>
+            {filtered.length} payment{filtered.length!==1?'s':''} · Total <strong>{fmtCur(totals.total)}</strong>
+          </span>
+        </div>
+
+        {filtered.length === 0 ? (
+          <div className="empty">
+            No payments recorded yet. Use the <strong>Loan Monitoring</strong> tab to record a payment.
+          </div>
+        ) : (
+          <div style={{ overflowX:'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Loan</th>
+                  <th>Method</th>
+                  <th>Reference</th>
+                  <th>Voucher</th>
+                  <th style={{textAlign:'right'}}>Interest</th>
+                  <th style={{textAlign:'right'}}>Principal</th>
+                  <th style={{textAlign:'right'}}>Penalty</th>
+                  <th style={{textAlign:'right'}}>Total</th>
+                  <th>Notes</th>
+                  <th style={{width:36}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(p => (
+                  <tr key={p.id}>
+                    <td style={{ fontSize:11, fontWeight:700 }}>{p.date}</td>
+                    <td style={{ fontWeight:700 }}>{p.loanName || `Loan ${p.loanId}`}</td>
+                    <td style={{ fontSize:11, color:'#64748b' }}>{p.method || '—'}</td>
+                    <td style={{ fontSize:11, color:'#64748b' }}>{p.referenceNo || '—'}</td>
+                    <td>
+                      {p.voucherId ? (() => {
+                        const vDoc = voucherMap[p.voucherId];
+                        const st   = vDoc?.status || null;
+                        const sty  = st ? VOUCHER_STATUS_STYLE[st] : null;
+                        return (
+                          <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+                            <span style={{ fontSize:11, fontWeight:700, color:'#0b1220', fontFamily:'monospace' }}>{p.voucherId}</span>
+                            {st ? (
+                              <span style={{ display:'inline-block', padding:'2px 7px', borderRadius:999, fontSize:10, fontWeight:800, border:'1px solid', whiteSpace:'nowrap', ...sty }}>{st}</span>
+                            ) : (
+                              <span style={{ fontSize:10, color:'#94a3b8' }}>loading…</span>
+                            )}
+                          </div>
+                        );
+                      })() : <span style={{ color:'#94a3b8' }}>—</span>}
+                    </td>
+                    <td style={{ textAlign:'right', color:'#dc2626' }}>{p.interest ? fmtCur(p.interest) : '—'}</td>
+                    <td style={{ textAlign:'right', color:'#2563eb' }}>{p.principal ? fmtCur(p.principal) : '—'}</td>
+                    <td style={{ textAlign:'right', color:'#7c2d12' }}>{p.penalty ? fmtCur(p.penalty) : '—'}</td>
+                    <td style={{ textAlign:'right', fontWeight:900 }}>{fmtCur(p.total || 0)}</td>
+                    <td style={{ fontSize:11, color:'#64748b', maxWidth:220, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                      {p.notes || ''}
+                    </td>
+                    <td>
+                      <button onClick={()=>deletePayment(p.id)} style={{ background:'none', border:'none', color:'#dc2626', cursor:'pointer', fontWeight:900, fontSize:14 }}>✕</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={5}>TOTALS</td>
+                  <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(totals.interest)}</td>
+                  <td style={{ textAlign:'right', color:'#2563eb' }}>{fmtCur(totals.principal)}</td>
+                  <td style={{ textAlign:'right', color:'#7c2d12' }}>{fmtCur(totals.penalty)}</td>
+                  <td style={{ textAlign:'right' }}>{fmtCur(totals.total)}</td>
+                  <td colSpan={2}></td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}
@@ -685,9 +1387,12 @@ export default function FinancialPage() {
       const label = MONTH_NAMES[calMonth] + '-' + calYear;
       const row   = sched.find(r => r.label === label);
       if (!row) return;
+      // Phase 4b: derive payment status for this loan/month from loanStates
+      const stRow = loanStates[l.id]?.schedule?.find(r => r.label === label);
+      const status = stRow?.status || 'scheduled';
       const add = (day, principal, interest) => {
         if (!events[day]) events[day] = [];
-        events[day].push({ loan: l, principal, interest });
+        events[day].push({ loan: l, principal, interest, status });
       };
       if (l.paymentFrequency === 'Semi-Monthly') {
         const key   = calYear + '-' + String(calMonth+1).padStart(2,'0');
@@ -742,6 +1447,17 @@ export default function FinancialPage() {
           </span>
         </div>
 
+        {/* Phase 4b: Status legend */}
+        <div style={{ display:'flex', gap:14, alignItems:'center', flexWrap:'wrap',
+          background:'#f8fafc', border:'1px solid #e5e7eb', borderRadius:8,
+          padding:'6px 12px', marginBottom:8, fontSize:11, fontWeight:600, color:'#64748b' }}>
+          <span>Status:</span>
+          <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#16a34a'}}/>Paid</span>
+          <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#d97706'}}/>Partial</span>
+          <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#dc2626'}}/>Overdue</span>
+          <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:'50%',background:'#f97316'}}/>Scheduled</span>
+        </div>
+
         {/* Day-of-week header */}
         <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:2, marginBottom:2 }}>
           {DOW.map(d => (
@@ -779,20 +1495,38 @@ export default function FinancialPage() {
                   const dayPri   = dayEvts.reduce((s,e)=>s+e.principal,0);
                   const isToday  = day===todayD.getDate()&&calMonth===todayD.getMonth()&&calYear===todayD.getFullYear();
                   const hasEvts  = dayEvts.length > 0;
+                  // Phase 4b: aggregate worst status across the day's events
+                  let dayStatus = null;
+                  if (hasEvts) {
+                    if (dayEvts.some(e => e.status === 'overdue'))      dayStatus = 'overdue';
+                    else if (dayEvts.some(e => e.status === 'partial')) dayStatus = 'partial';
+                    else if (dayEvts.every(e => e.status === 'paid'))   dayStatus = 'paid';
+                    else                                                dayStatus = 'scheduled';
+                  }
+                  const STATUS_BG = { paid:'#f0fdf4', partial:'#fffbeb', overdue:'#fef2f2', scheduled:'#fff7ed' };
+                  const STATUS_BORDER = { paid:'#86efac', partial:'#fcd34d', overdue:'#fca5a5', scheduled:'#fed7aa' };
+                  const bgColor     = dayStatus ? STATUS_BG[dayStatus] : '#fff';
+                  const borderColor = isToday ? '#f97316' : (dayStatus ? STATUS_BORDER[dayStatus] : '#e5e7eb');
                   return (
                     <div key={di}
                       onClick={() => hasEvts && setCalDayModal({ day, month: calMonth, year: calYear, events: dayEvts })}
                       style={{
-                        minHeight:72, background:'#fff', border:`1px solid ${isToday?'#f97316':'#e5e7eb'}`,
+                        minHeight:72, background:bgColor, border:`1px solid ${borderColor}`,
                         borderRadius:8, padding:'6px 7px', cursor: hasEvts ? 'pointer' : 'default',
-                        transition:'box-shadow .15s',
+                        transition:'box-shadow .15s', position:'relative',
                         boxShadow: hasEvts ? '0 1px 4px rgba(0,0,0,.06)' : 'none',
                       }}
                       onMouseEnter={e => { if(hasEvts) e.currentTarget.style.boxShadow='0 3px 10px rgba(249,115,22,.18)'; }}
                       onMouseLeave={e => { e.currentTarget.style.boxShadow= hasEvts ? '0 1px 4px rgba(0,0,0,.06)' : 'none'; }}
                     >
                       <div style={{ fontWeight:700, fontSize:12, marginBottom:3,
-                        color: isToday ? '#f97316' : '#0b1220' }}>{day}</div>
+                        color: isToday ? '#f97316' : '#0b1220', display:'flex', alignItems:'center', gap:4 }}>
+                        <span>{day}</span>
+                        {dayStatus && (
+                          <span style={{ width:6, height:6, borderRadius:'50%',
+                            background: dayStatus==='paid'?'#16a34a':dayStatus==='partial'?'#d97706':dayStatus==='overdue'?'#dc2626':'#f97316' }} />
+                        )}
+                      </div>
                       {hasEvts && (
                         <>
                           {dayInt > 0 && <div style={{ fontSize:10, color:'#dc2626', fontWeight:700 }}>Int {fmtCur(dayInt)}</div>}
@@ -890,14 +1624,7 @@ export default function FinancialPage() {
         <div>
           <h1 style={{ margin:0, fontSize:18, fontWeight:900 }}>Financial Management</h1>
         </div>
-        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
-          {saveStatus && (
-            <span style={{ fontSize:11, color: saveStatus==='error'?'#dc2626':'#15803d' }}>
-              {saveStatus==='saving'?'Saving…':saveStatus==='saved'?'Saved ✓':'Save Error'}
-            </span>
-          )}
-          <button className="btn btn-primary btn-sm" onClick={()=>saveToFirestore(loans)}>💾 Save All</button>
-        </div>
+        <div />
       </div>
 
       {/* Tab Bar */}
@@ -911,12 +1638,30 @@ export default function FinancialPage() {
 
       {/* Body */}
       <div className="fp-body">
-        {activeTab === 'loans'    && LoansTab()}
-        {activeTab === 'schedule' && ScheduleTab()}
-        {activeTab === 'summary'  && SummaryTab()}
-        {activeTab === 'calendar' && CalendarTab()}
-        {activeTab === 'payment'  && PaymentTab()}
+        {activeTab === 'dashboard'  && DashboardTab()}
+        {activeTab === 'loans'      && LoansTab()}
+        {activeTab === 'monitoring' && MonitoringTab()}
+        {activeTab === 'history'    && HistoryTab()}
+        {activeTab === 'schedule'   && ScheduleTab()}
+        {activeTab === 'summary'    && SummaryTab()}
+        {activeTab === 'calendar'   && CalendarTab()}
+        {activeTab === 'payment'    && PaymentTab()}
       </div>
+
+      {/* Record Payment Modal (Phase 2) */}
+      {payModal && (() => {
+        const l  = loans.find(x => x.id === payModal);
+        if (!l) return null;
+        const st = loanStates[l.id] || {};
+        return (
+          <RecordPaymentModal
+            loan={l}
+            loanState={st}
+            onClose={() => setPayModal(null)}
+            onSaved={() => showToast('Payment recorded.')}
+          />
+        );
+      })()}
 
       {/* Payment Method Modal */}
       {pmLoan && (

@@ -4,6 +4,7 @@ import {
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import { nextPaymentScheduleId } from '../../../utils/documentIds.js';
 
 const CATEGORIES = ['Rent','Utilities','Insurance','Salaries','Loan Payment','Subscription','Tax','Other'];
 const FREQS = ['Monthly','Quarterly','Semi-Annual','Annual','One-Time'];
@@ -192,7 +193,8 @@ export default function PaymentSchedulePage() {
         await updateDoc(doc(db,'paymentSchedules',form.id), payload);
         showToast('Schedule updated.');
       } else {
-        await addDoc(collection(db,'paymentSchedules'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
+        const scheduleId = await nextPaymentScheduleId(form.startDate||form.dueDate||new Date().toISOString().slice(0,10));
+        await addDoc(collection(db,'paymentSchedules'), {...payload, scheduleId, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
         showToast('Schedule created.');
       }
       setModal(null);
@@ -564,11 +566,51 @@ export default function PaymentSchedulePage() {
         </div>
       </div>
       <div style={{padding:'10px 22px 0',flexShrink:0,background:'#fff'}}>
-        <div className="kpi-row">
-          <div className="kpi"><div className="kpi-lbl">This Month Total</div><div className="kpi-val">{fmtCur(thisMonthTotal)}</div></div>
-          <div className="kpi"><div className="kpi-lbl">Pending This Month</div><div className="kpi-val" style={{color:'#f97316'}}>{pendingThisMonth}</div></div>
-          <div className="kpi"><div className="kpi-lbl">Overdue</div><div className="kpi-val" style={{color:overdueCount>0?'#dc2626':'#0b1220'}}>{overdueCount}</div></div>
-          <div className="kpi"><div className="kpi-lbl">Annual Projection (12mo)</div><div className="kpi-val">{fmtCur(annual12mo)}</div></div>
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#0369a1 0%,#0284c7 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>This Month Total</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(thisMonthTotal)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{pendingThisMonth} schedule{pendingThisMonth!==1?'s':''} due this month</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#1e3a5f 0%,#1d4ed8 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="M18.4 9L13 3.6 6.8 9.8 3.8 7"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Annual Projection</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(annual12mo)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Next 12 months forecast</div>
+          </div>
+          <div style={{background:overdueCount>0?'linear-gradient(135deg,#991b1b 0%,#dc2626 100%)':'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              {overdueCount>0
+                ? <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                : <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              }
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Overdue</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{overdueCount}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{overdueCount>0?`${overdueCount} missed payment${overdueCount!==1?'s':''}`:'All payments current'}</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:12}}>
+          {[
+            {label:'Pending This Month',value:pendingThisMonth,sub:'schedules due now',color:'#f97316',bg:'#fff7ed',border:'#fed7aa',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>},
+            {label:'Active Schedules',value:activeScheds.length,sub:'total active',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2M9 12h6M9 16h4"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
+            </div>
+          ))}
         </div>
         <div className="filters">
           <input placeholder="Search title or vendor…" value={search} onChange={e=>setSearch(e.target.value)} style={{minWidth:180}} />

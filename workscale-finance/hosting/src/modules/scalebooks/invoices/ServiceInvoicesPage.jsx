@@ -4,6 +4,7 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import ContactPicker from '../../../components/ContactPicker.jsx';
+import { nextServiceInvoiceId } from '../../../utils/documentIds.js';
 
 const SI_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Sent','Partial','Paid','Voided'];
 const STATUS_STYLES = {
@@ -102,19 +103,15 @@ export default function ServiceInvoicesPage() {
     return a;
   }, [invoices, search, filterStatus]);
 
-  const genSiId = () => {
-    const d = new Date();
-    const yy = String(d.getFullYear()).slice(2);
-    const mm = String(d.getMonth()+1).padStart(2,'0');
-    return `IS${yy}${mm}${String(Math.floor(Math.random()*9000)+1000)}`;
-  };
+  const genSiId = async (date) => nextServiceInvoiceId(date);
 
   const save = async (statusOverride) => {
     if (!modal?.contactName?.trim()) { showToast('Contact required.'); return; }
     setSaving(true);
     try {
       const { isNew, id, ...rest } = modal;
-      const payload = { ...rest, status: statusOverride||rest.status, balance: Number(rest.amount||0) - Number(rest.appliedAmount||0), updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
+      const siId = isNew ? await genSiId(rest.siDate || today()) : (rest.siId || '');
+      const payload = { ...rest, siId, status: statusOverride||rest.status, balance: Number(rest.amount||0) - Number(rest.appliedAmount||0), updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
       if (isNew) await addDoc(collection(db,'serviceInvoices'), { ...payload, appliedAmount:0, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||'' });
       else       await updateDoc(doc(db,'serviceInvoices',id), payload);
       showToast('Invoice saved.'); setModal(null);
@@ -143,15 +140,51 @@ export default function ServiceInvoicesPage() {
       <style>{CSS}</style>
       <div className="si-top">
         <strong style={{fontSize:18,fontWeight:900,color:'#0b1220'}}>SERVICE INVOICES</strong>
-        <button className="btn btn-primary" onClick={()=>setModal({...EMPTY,siId:genSiId(),siDate:today()})}>＋ New Invoice</button>
+        <button className="btn btn-primary" onClick={()=>setModal({...EMPTY,siId:'',siDate:today()})}>＋ New Invoice</button>
       </div>
       <div className="si-body">
-        <div className="kpi-row">
-          <div className="kpi-card"><div className="kpi-label">Total</div><div className="kpi-value">{kpis.total}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Draft</div><div className="kpi-value">{kpis.draft}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Pending</div><div className="kpi-value">{kpis.pending}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Paid</div><div className="kpi-value">{kpis.paid}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Total Balance</div><div className="kpi-value orange" style={{fontSize:14}}>{fmt(kpis.balance)}</div></div>
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Balance</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.balance)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Outstanding receivables</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Paid</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.paid}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Fully collected invoices</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#b45309 0%,#d97706 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Pending</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.pending}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Awaiting approval</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
+          {[
+            {label:'Total Invoices',value:kpis.total,sub:'all service invoices',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>},
+            {label:'Draft',value:kpis.draft,sub:'not yet submitted',color:'#64748b',bg:'#f8fafc',border:'#e2e8f0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
+            </div>
+          ))}
         </div>
         <div className="toolbar">
           <input className="input" placeholder="🔍 Search SI ID or client…" value={search} onChange={e=>setSearch(e.target.value)} style={{flex:'1 1 180px',minWidth:140}} />
@@ -205,7 +238,7 @@ export default function ServiceInvoicesPage() {
               <div className="grid2" style={{gap:12}}>
                 <div className="field">
                   <label>SI ID</label>
-                  <input value={modal.siId||''} onChange={e=>setModal(m=>({...m,siId:e.target.value}))} />
+                  <input value={modal.siId || ''} readOnly placeholder={modal.isNew ? 'Auto-assigned on save' : ''} style={modal.isNew ? {background:'#f8fafc',color:'#64748b',fontWeight:700} : undefined} />
                 </div>
                 <div className="field">
                   <label>Client / Contact</label>

@@ -4,6 +4,7 @@ import {
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import { nextJournalEntryId } from '../../../utils/documentIds.js';
 
 const JE_TYPES = ['Manual','Adjusting','Closing','Reversing'];
 const PAGE_SIZES = [20, 50, 100];
@@ -122,8 +123,7 @@ export default function JournalPage() {
 
   /* ── Open new JE modal ──────────────────────────────────────── */
   function openNew() {
-    const jeId='JE-'+new Date().getFullYear()+'-'+uid();
-    setModal({jeId, date:new Date().toISOString().slice(0,10), description:'', type:'Manual', status:'Draft', reference:''});
+    setModal({jeId:'', date:new Date().toISOString().slice(0,10), description:'', type:'Manual', status:'Draft', reference:''});
     setLines([
       {id:uid(),accountCode:'',accountName:'',description:'',debit:'',credit:''},
       {id:uid(),accountCode:'',accountName:'',description:'',debit:'',credit:''},
@@ -143,8 +143,9 @@ export default function JournalPage() {
       const totalDebit  = validLines.reduce((s,l)=>s+(parseFloat(l.debit)||0),0);
       const totalCredit = validLines.reduce((s,l)=>s+(parseFloat(l.credit)||0),0);
       if (Math.abs(totalDebit-totalCredit)>0.005) { alert('Debits must equal Credits before saving.'); setSaving(false); return; }
+      const jeId = form.id ? (form.jeId||'') : (form.jeId || await nextJournalEntryId(form.date));
       const payload = {
-        jeId: form.jeId||'', date: form.date||'', description: form.description||'',
+        jeId, date: form.date||'', description: form.description||'',
         type: form.type||'Manual', reference: form.reference||'',
         status: postNow?'Posted':(form.status||'Draft'),
         lines: validLines.map(l=>({accountCode:l.accountCode||'',accountName:l.accountName||'',description:l.description||'',debit:parseFloat(l.debit)||0,credit:parseFloat(l.credit)||0})),
@@ -169,8 +170,9 @@ export default function JournalPage() {
   }
 
   async function reverseEntry(e) {
+    const today = new Date().toISOString().slice(0,10);
     const rev = {
-      jeId:'JE-REV-'+uid(), date:new Date().toISOString().slice(0,10),
+      jeId: await nextJournalEntryId(today), date: today,
       description:`Reversal of ${e.jeId}`, type:'Reversing', reference:e.jeId, status:'Draft',
       lines:(e.lines||[]).map(l=>({accountCode:l.accountCode,accountName:l.accountName,description:l.description,debit:l.credit||0,credit:l.debit||0})),
       totalDebit:e.totalCredit||0, totalCredit:e.totalDebit||0,
@@ -212,7 +214,7 @@ export default function JournalPage() {
           </div>
           <div className="modal-b">
             <div className="grid4">
-              <div className="field"><label>JE ID *</label><input value={modal.jeId} onChange={e=>setModal(m=>({...m,jeId:e.target.value}))} /></div>
+              <div className="field"><label>JE ID</label><input value={modal.jeId} placeholder="Auto-assigned on save" readOnly /></div>
               <div className="field"><label>Date *</label><input type="date" value={modal.date} onChange={e=>setModal(m=>({...m,date:e.target.value}))} /></div>
               <div className="field"><label>Type</label><select value={modal.type||'Manual'} onChange={e=>setModal(m=>({...m,type:e.target.value}))}>{JE_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
               <div className="field"><label>Reference</label><input value={modal.reference||''} onChange={e=>setModal(m=>({...m,reference:e.target.value}))} /></div>

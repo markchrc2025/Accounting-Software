@@ -4,6 +4,7 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import ContactPicker from '../../../components/ContactPicker.jsx';
+import { nextCollectionId } from '../../../utils/documentIds.js';
 
 const COLL_STATUSES = ['Unposted','Posted','Voided'];
 const STATUS_STYLES = {
@@ -99,20 +100,14 @@ export default function CollectionsPage() {
     return a;
   }, [collections, search, filterStatus, dateFrom, dateTo]);
 
-  const genId = () => {
-    const d = new Date();
-    const yy = String(d.getFullYear()).slice(2);
-    const mm = String(d.getMonth()+1).padStart(2,'0');
-    return `COL${yy}${mm}${String(Math.floor(Math.random()*9000)+1000)}`;
-  };
-
   const save = async () => {
     if (!modal?.contactName?.trim()) { showToast('Contact required.'); return; }
     setSaving(true);
     try {
       const { isNew, id, ...rest } = modal;
+      const collectionId = isNew ? await nextCollectionId(rest.collectionDate || today()) : (rest.collectionId || '');
       const unapplied = Number(rest.amountReceived||0) - Number(rest.appliedAmount||0);
-      const payload = { ...rest, unappliedAmount: unapplied, updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
+      const payload = { ...rest, collectionId, unappliedAmount: unapplied, updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
       if (isNew) await addDoc(collection(db,'collections'), { ...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||'' });
       else       await updateDoc(doc(db,'collections',id), payload);
       showToast('Collection saved.'); setModal(null);
@@ -139,15 +134,54 @@ export default function CollectionsPage() {
       <style>{CSS}</style>
       <div className="cl-top">
         <strong style={{fontSize:18,fontWeight:900,color:'#0b1220'}}>COLLECTIONS</strong>
-        <button className="btn btn-primary" onClick={()=>setModal({...EMPTY,collectionId:genId(),collectionDate:today()})}>＋ Record Collection</button>
+        <button className="btn btn-primary" onClick={()=>setModal({...EMPTY,collectionId:'',collectionDate:today()})}>＋ Record Collection</button>
       </div>
       <div className="cl-body">
-        <div className="kpi-row">
-          <div className="kpi-card"><div className="kpi-label">Total</div><div className="kpi-value">{kpis.total}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Unposted</div><div className="kpi-value">{kpis.unposted}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Posted</div><div className="kpi-value">{kpis.posted}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Total Received</div><div className="kpi-value orange" style={{fontSize:14}}>{fmt(kpis.received)}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Unapplied</div><div className="kpi-value" style={{fontSize:14,color:kpis.unapplied>0?'#c2410c':'#15803d'}}>{fmt(kpis.unapplied)}</div></div>
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#0369a1 0%,#0284c7 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Received</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.received)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Across {kpis.total} collection{kpis.total!==1?'s':''}</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Posted</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.posted}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Confirmed &amp; journal-posted</div>
+          </div>
+          <div style={{background:kpis.unapplied>0?'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)':'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              {kpis.unapplied>0
+                ? <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                : <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              }
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Unapplied</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.unapplied)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{kpis.unapplied>0?'Needs allocation':'Fully applied'}</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
+          {[
+            {label:'Total',value:kpis.total,sub:'all collections',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>},
+            {label:'Unposted',value:kpis.unposted,sub:'awaiting posting',color:'#d97706',bg:'#fffbeb',border:'#fde68a',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
+            </div>
+          ))}
         </div>
         <div className="toolbar">
           <input className="input" placeholder="🔍 Search ID, client, ref…" value={search} onChange={e=>setSearch(e.target.value)} style={{flex:'1 1 180px',minWidth:140}} />
@@ -205,7 +239,7 @@ export default function CollectionsPage() {
               <div className="grid2" style={{gap:12}}>
                 <div className="field">
                   <label>Collection ID</label>
-                  <input value={modal.collectionId||''} onChange={e=>setModal(m=>({...m,collectionId:e.target.value}))} />
+                  <input value={modal.collectionId || ''} readOnly placeholder={modal.isNew ? 'Auto-assigned on save' : ''} style={modal.isNew ? {background:'#f8fafc',color:'#64748b',fontWeight:700} : undefined} />
                 </div>
                 <div className="field">
                   <label>Client / Contact</label>

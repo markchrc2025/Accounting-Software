@@ -4,6 +4,7 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
+import { nextContactId } from '../../../utils/documentIds.js';
 
 // ── Constants ─────────────────────────────────────────────
 const CONTACT_TYPES = ['Customer','Supplier','Employee','Contractor','Government','Other'];
@@ -12,6 +13,16 @@ const PAYMENT_TERMS = ['Due on Receipt','Net 7','Net 15','Net 30','Net 45','Net 
 const CURRENCIES    = ['PHP','USD','EUR','SGD','HKD','JPY','CNY','GBP','AUD'];
 const CATEGORY_SUGGESTIONS = ['Deployed','In-house','Trading','Service','Logistics','Affiliate','Government','Other'];
 const SALUTATIONS   = ['','Mr.','Ms.','Mrs.','Dr.','Atty.','Engr.','Hon.'];
+
+const formatTin = v => {
+  const d = v.replace(/\D/g, '').slice(0, 14);
+  const main = d.slice(0, 9);
+  const branch = d.slice(9);
+  const parts = [];
+  for (let i = 0; i < main.length; i += 3) parts.push(main.slice(i, i + 3));
+  const result = parts.join('-');
+  return branch.length ? result + '-' + branch : result;
+};
 
 const TYPE_PILL = {
   Supplier:   { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
@@ -160,14 +171,8 @@ export default function ContactsPage() {
     return a;
   }, [contacts, search, filterType, filterStatus, filterIncomplete]);
 
-  // ── Sequential ID ───────────────────────────────────────
-  const genContactId = () => {
-    const nums = contacts
-      .map(c => /^CNT-(\d+)$/.exec(c.contactId || ''))
-      .filter(Boolean).map(m => Number(m[1]));
-    const next = (nums.length ? Math.max(...nums) : 0) + 1;
-    return `CNT-${String(next).padStart(4,'0')}`;
-  };
+  // ── Sequential ID (atomic, assigned at save) ──────────────
+  const todayStr = () => new Date().toISOString().slice(0,10);
 
   // ── Save ────────────────────────────────────────────────
   const save = async () => {
@@ -193,7 +198,7 @@ export default function ContactsPage() {
         updatedBy: email,
       };
       if (isNew) {
-        if (!payload.contactId) payload.contactId = genContactId();
+        if (!payload.contactId) payload.contactId = await nextContactId(todayStr());
         await addDoc(collection(db,'contacts'), { ...payload, createdAt:serverTimestamp(), createdBy:email });
       } else {
         await updateDoc(doc(db,'contacts',id), payload);
@@ -218,7 +223,7 @@ export default function ContactsPage() {
 
   const openNew = () => {
     const m = EMPTY_MODAL();
-    m.contactId = genContactId();
+    m.contactId = '';
     setModal(m); setTab('general');
   };
   const openEdit = (c) => {
@@ -380,7 +385,9 @@ function ContactModal({ modal, setModal, tab, setTab, contacts, arOptions, apOpt
         <div className="modal-h">
           <strong>
             {modal.isNew ? 'Add Contact' : 'Edit Contact'}
-            {modal.contactId && <span style={{marginLeft:10,fontFamily:'monospace',fontSize:12,color:'#94a3b8'}}>{modal.contactId}</span>}
+            {modal.contactId
+              ? <span style={{marginLeft:10,fontFamily:'monospace',fontSize:12,color:'#94a3b8'}}>{modal.contactId}</span>
+              : <span style={{marginLeft:10,fontFamily:'monospace',fontSize:12,color:'#94a3b8'}}>Auto-assigned on save</span>}
             {modal.needsCompletion && <span className="pill pill-warn" style={{marginLeft:8}}>NEEDS DETAILS</span>}
           </strong>
           <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
@@ -510,7 +517,7 @@ function ContactModal({ modal, setModal, tab, setTab, contacts, arOptions, apOpt
             <div className="grid2">
               <div className="field">
                 <label>TIN</label>
-                <input value={modal.tin||''} onChange={e=>update('tin',e.target.value)} placeholder="000-000-000-000" />
+                <input value={modal.tin||''} onChange={e=>update('tin',formatTin(e.target.value))} placeholder="000-000-000-000" inputMode="numeric" />
               </div>
               <div className="field">
                 <label>Email</label>

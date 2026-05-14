@@ -53,7 +53,7 @@ export default function ContactPicker({
 
   const selected = useMemo(
     () => contacts.find(c => c.id === value) ||
-          contacts.find(c => (c.contactId || '') === value) ||
+          (value ? contacts.find(c => (c.contactId || '') === value) : null) ||
           (displayName ? contacts.find(c => (c.name || '').toLowerCase() === displayName.toLowerCase()) : null),
     [contacts, value, displayName]
   );

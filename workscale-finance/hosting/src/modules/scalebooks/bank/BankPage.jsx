@@ -4,6 +4,7 @@ import {
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import { nextBankTransactionId, nextBankReconciliationId } from '../../../utils/documentIds.js';
 
 const BANK_PALETTE = ['#1e40af','#15803d','#b91c1c','#a16207','#7e22ce','#0e7490','#9a3412','#64748b'];
 const fmtPHP = n => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
@@ -138,7 +139,10 @@ export default function BankPage() {
     try {
       const payload = { bankCode:form.bankCode||'', date:form.date||'', description:form.description||'', reference:form.reference||'', debit:parseFloat(form.debit)||0, credit:parseFloat(form.credit)||0, type:form.type||'', status:form.status||'', source:'Manual', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
       if (form.id) await updateDoc(doc(db,'bankTransactions',form.id), payload);
-      else await addDoc(collection(db,'bankTransactions'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
+      else {
+        const txId = await nextBankTransactionId(form.date);
+        await addDoc(collection(db,'bankTransactions'), {...payload, txId, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
+      }
       setTxModal(null); showToast('Transaction saved.');
     } catch(e) { console.error(e); alert('Save failed.'); }
     setSaving(false);
@@ -528,7 +532,8 @@ export default function BankPage() {
       if(!stmtDate)  return alert('Enter statement ending date.');
       setReconSaving(true);
       try {
-        await addDoc(collection(db,'bankReconciliations'),{bankCode:reconBank,beginningBalance:beginBal||0,endingBalance:parseFloat(stmtBal)||0,periodEnding:stmtDate,clearedCount:0,reconciledAt:serverTimestamp(),reconciledBy:auth.currentUser?.email||''});
+        const reconId = await nextBankReconciliationId(stmtDate);
+        await addDoc(collection(db,'bankReconciliations'),{reconId,bankCode:reconBank,beginningBalance:beginBal||0,endingBalance:parseFloat(stmtBal)||0,periodEnding:stmtDate,clearedCount:0,reconciledAt:serverTimestamp(),reconciledBy:auth.currentUser?.email||''});
         showToast('Reconciliation saved.'); setStmtBal(''); setStmtDate('');
       } catch(e) { console.error(e); alert('Save failed.'); }
       setReconSaving(false);

@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
-  serverTimestamp, getDocs
+  serverTimestamp, getDoc, getDocs
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
+import { nextVoucherId, previewVoucherId } from '../../../utils/documentIds.js';
 
 const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
 const fmtP = (n) => new Intl.NumberFormat('en-PH', { minimumFractionDigits:0, maximumFractionDigits:4 }).format(n || 0) + '%';
@@ -26,10 +27,6 @@ const AUTO_BANK_TYPES = ['PAYROLL','FINAL_PAY'];
 const TAX_VISIBLE_TYPES = ['PAYMENT'];
 const STATUSES = ['Pending','Pending Review','Pending Approval','Approved','For Disbursement','Paid','Rejected','Voided'];
 
-const PURPOSE_SUGGESTIONS = [
-  'Bills Payment','Salaries and Wages','Rent','Utilities','Professional Fees',
-  'Office Supplies','Transportation','Representation','Taxes','Contractor Payment',
-];
 
 const STATUS_STYLES = {
   'Pending':            { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
@@ -67,7 +64,7 @@ const CSS = `
   tr:last-child td { border-bottom:none; }
   .pill { display:inline-block; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid; white-space:nowrap; }
   .backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
-  .modal    { width:min(960px,98vw); max-height:92vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
+  .modal    { width:min(1400px,98vw); max-height:92vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
   .modal-sm { width:min(480px,98vw); }
   .modal-h  { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid #e5e7eb; background:#f8fafc; flex-shrink:0; }
   .modal-h strong { font-size:15px; font-weight:900; }
@@ -105,11 +102,13 @@ function StatusPill({ status }) {
 }
 
 export default function VouchersPage() {
-  const [vouchers,   setVouchers]  = useState([]);
-  const [accounts,   setAccounts]  = useState([]);
-  const [contacts,   setContacts]  = useState([]);
-  const [taxRates,   setTaxRates]  = useState([]);
-  const [taxGroups,  setTaxGroups] = useState([]);
+  const [vouchers,         setVouchers]         = useState([]);
+  const [accounts,         setAccounts]         = useState([]);
+  const [contacts,         setContacts]         = useState([]);
+  const [taxRates,         setTaxRates]         = useState([]);
+  const [taxGroups,        setTaxGroups]        = useState([]);
+  const [purposeCategories, setPurposeCategories] = useState([]);
+  const [loans, setLoans] = useState([]); // for LOAN voucher → loanId picker
 
   // Filters
   const [search,        setSearch]       = useState('');
@@ -133,9 +132,10 @@ export default function VouchersPage() {
   const [expandId, setExpandId] = useState(null);
 
   // Modals
-  const [showModal,   setShowModal]   = useState(false);
-  const [viewModal,   setViewModal]   = useState(null);
-  const [statusModal, setStatusModal] = useState(null); // { voucher, newStatus, reason }
+  const [showModal,    setShowModal]   = useState(false);
+  const [viewModal,    setViewModal]   = useState(null);
+  const [statusModal,  setStatusModal] = useState(null); // { voucher, newStatus, reason }
+  const [newAcctModal, setNewAcctModal] = useState(null);
 
   // Form
   const [editing,   setEditing]   = useState(null);
@@ -155,22 +155,32 @@ export default function VouchersPage() {
       query(collection(db, 'vouchers'), orderBy('createdAt', 'desc')),
       snap => setVouchers(snap.docs.map(d => ({ id: d.id, ...d.data() })))
     );
-    getDocs(collection(db, 'accounts')).then(s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
+    const unsubAccounts = onSnapshot(query(collection(db,'accounts'), orderBy('code')), s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
     const unsubContacts = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
     const unsubRates  = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap => setTaxRates(snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>r.isActive!==false)));
     const unsubGroups = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap => setTaxGroups(snap.docs.map(d=>({id:d.id,...d.data()})).filter(g=>g.isActive!==false)));
-    return () => { unsub(); unsubContacts(); unsubRates(); unsubGroups(); };
+    const unsubCats   = onSnapshot(query(collection(db,'purposeCategories'), orderBy('name')), snap => setPurposeCategories(snap.docs.map(d => d.data().name).filter(Boolean)));
+    // Loans (for LOAN voucher loanId picker)
+    getDoc(doc(db,'finc','profile')).then(snap => {
+      const data = snap.data() || {};
+      setLoans(Array.isArray(data.loans) ? data.loans : []);
+    });
+    return () => { unsub(); unsubAccounts(); unsubContacts(); unsubRates(); unsubGroups(); unsubCats(); };
   }, []);
 
-  // Generate sequential voucher ID: PREFIX-YYYYMM-NNNN (based on existing count in DB)
-  const genId = (type) => {
-    const d = new Date(); const y = d.getFullYear(); const m = String(d.getMonth()+1).padStart(2,'0');
-    const prefix = type === 'PAYMENT' ? 'PV' : type === 'PAYROLL' ? 'PR' : type === 'FINAL_PAY' ? 'FP' : type === 'LOAN' ? 'LV' : 'VCH';
-    const periodKey = `${prefix}${y}${m}`;
-    const existing = vouchers.filter(v => (v.voucherId||'').startsWith(periodKey));
-    const seq = String(existing.length + 1).padStart(4, '0');
-    return `${periodKey}-${seq}`;
-  };
+  // Voucher IDs are assigned atomically by `nextVoucherId` at save time
+  // (see saveVoucher / duplicate). The form shows a placeholder preview
+  // computed from settings + the current preparation date.
+  const [idPreview, setIdPreview] = useState('');
+  useEffect(() => {
+    if (editing) { setIdPreview(''); return; }
+    if (!showModal) return;
+    let cancelled = false;
+    previewVoucherId(form.voucherType || 'PAYMENT', form.preparationDate)
+      .then(p => { if (!cancelled) setIdPreview(p); })
+      .catch(() => { if (!cancelled) setIdPreview(''); });
+    return () => { cancelled = true; };
+  }, [showModal, editing, form.voucherType, form.preparationDate]);
 
   // Filtered + sorted
   const filtered = useMemo(() => {
@@ -251,21 +261,21 @@ export default function VouchersPage() {
   // Open create/edit modal
   const openNew = () => {
     setEditing(null);
-    setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'', inclusive:false });
+    setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'', inclusive:false, loanId:'' });
     setLines([EMPTY_LINE()]);
     setShowModal(true);
   };
 
   const openEdit = (v) => {
     setEditing(v);
-    setForm({ voucherType:v.voucherType||'PAYMENT', preparationDate:v.preparationDate||today(), purposeCategory:v.purposeCategory||'', paymentFrom:v.paymentFromAccountCode||'', status:v.status||'Pending', notes:v.notes||'', inclusive: !!(v.lines||[]).find(l=>l.taxRateId)?.inclusive });
+    setForm({ voucherType:v.voucherType||'PAYMENT', preparationDate:v.preparationDate||today(), purposeCategory:v.purposeCategory||'', paymentFrom:v.paymentFromAccountCode||'', status:v.status||'Pending', notes:v.notes||'', inclusive: !!(v.lines||[]).find(l=>l.taxRateId)?.inclusive, loanId: v.loanId || '' });
     setLines((v.lines||[]).map(l => ({ id:uid(), contactId:l.contactId||'', contact:l.contact||'', expenseAccount:l.expenseAccountCode||'', description:l.description||'', amount:String(l.amount||''), category:l.category||'', taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:l.taxRate||0, taxAmt:l.taxAmt||0, inclusive:l.inclusive||false })));
     if ((v.lines||[]).length === 0) setLines([EMPTY_LINE()]);
     setShowModal(true);
   };
 
   const duplicate = async (v) => {
-    const newId = genId(v.voucherType||'PAYMENT');
+    const newId = await nextVoucherId(v.voucherType||'PAYMENT', today());
     await addDoc(collection(db,'vouchers'), {
       voucherId: newId, voucherType: v.voucherType, preparationDate: today(),
       purposeCategory: v.purposeCategory, paymentFromAccountCode: v.paymentFromAccountCode,
@@ -297,6 +307,9 @@ export default function VouchersPage() {
       totalAmount,
       status:                newStatus || form.status,
       notes:                 form.notes||'',
+      // Phase 5: link LOAN vouchers to a specific loan so the disbursement
+      // approval step can auto-post a payment to loanPayments.
+      loanId: form.voucherType === 'LOAN' ? (form.loanId || '') : '',
       lines: lines.map((l,i) => ({ lineNo:i+1, contactId:l.contactId||'', contact:l.contact, expenseAccountCode:l.expenseAccount, description:l.description, amount:Number(l.amount)||0, category:l.category, taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:Number(l.taxRate)||0, taxAmt:Number(l.taxAmt)||0, inclusive:!!l.inclusive })),
       updatedAt: serverTimestamp(), updatedBy: user
     };
@@ -306,7 +319,7 @@ export default function VouchersPage() {
         await updateDoc(doc(db,'vouchers',editing.id), payload);
         showToast('Voucher updated.');
       } else {
-        const voucherId = genId(form.voucherType);
+        const voucherId = await nextVoucherId(form.voucherType, form.preparationDate);
         await addDoc(collection(db,'vouchers'), { ...payload, voucherId, createdAt:serverTimestamp(), createdBy:user });
         showToast('Voucher created.');
       }
@@ -330,6 +343,23 @@ export default function VouchersPage() {
       setStatusModal(null);
     } catch(e) { showToast('Error: ' + e.message); }
     setSaving(false);
+  };
+
+  const handleSaveNewAcct = async () => {
+    if (!newAcctModal.code.trim() || !newAcctModal.name.trim()) { showToast('Account code and name are required.'); return; }
+    setNewAcctModal(m => ({...m, saving:true}));
+    try {
+      await addDoc(collection(db,'accounts'), {
+        code:      newAcctModal.code.trim(),
+        name:      newAcctModal.name.trim(),
+        type:      newAcctModal.type,
+        subType:   newAcctModal.subType,
+        parent:    newAcctModal.parent || '',
+        createdAt: serverTimestamp(), createdBy: user,
+      });
+      showToast(`Account ${newAcctModal.code.trim()} created.`);
+      setNewAcctModal(null);
+    } catch(e) { showToast('Error: ' + e.message); setNewAcctModal(m => ({...m, saving:false})); }
   };
 
   const sortIcon = (col) => sortCol === col ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
@@ -406,9 +436,10 @@ export default function VouchersPage() {
     };
 
     // Get display label for a taxRate doc
+    // Payment Vouchers are purchases → use taxAccountPurchases for separate tracking
     const taxRateLabel = (rateDoc) => {
       const raw = rateDoc.trackingType === 'separate'
-        ? (rateDoc.taxAccountSales || rateDoc.taxAccountSingle || '')
+        ? (rateDoc.taxAccountPurchases || rateDoc.taxAccountSingle || '')
         : (rateDoc.taxAccountSingle || '');
       return raw ? acctLabel(raw) : `Tax — ${rateDoc.name}`;
     };
@@ -504,18 +535,47 @@ export default function VouchersPage() {
       </div>
 
       <div className="vp-body">
-        {/* KPIs */}
-        <div className="kpi-row">
+        {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:14,marginBottom:12}}>
+          <div style={{background:'linear-gradient(135deg,#1e40af 0%,#2563eb 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Active Amount</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmt(kpis.totalAmt)}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Across {kpis.total} voucher{kpis.total!==1?'s':''}</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Approved</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.approved}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Ready for disbursement</div>
+          </div>
+          <div style={{background:'linear-gradient(135deg,#b45309 0%,#d97706 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
+            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            </div>
+            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Pending / In-Review</div>
+            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{kpis.pending}</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>Awaiting approval</div>
+          </div>
+        </div>
+        {/* ── Secondary KPI Row ─────────────────────────────────────────── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
           {[
-            { label:'Total Vouchers', value:kpis.total },
-            { label:'Pending / In-Review', value:kpis.pending },
-            { label:'Approved', value:kpis.approved },
-            { label:'Paid', value:kpis.paid },
-            { label:'Total Amount (Active)', value:fmt(kpis.totalAmt) },
-          ].map(k => (
-            <div className="kpi-card" key={k.label}>
-              <div className="kpi-label">{k.label}</div>
-              <div className="kpi-value">{k.value}</div>
+            {label:'Total Vouchers',value:kpis.total,sub:'all vouchers',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>},
+            {label:'Paid',value:kpis.paid,sub:'fully disbursed',color:'#15803d',bg:'#f0fdf4',border:'#bbf7d0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M5 13l4 4L19 7"/></svg>},
+            {label:'Voided',value:vouchers.filter(v=>v.status==='Voided').length,sub:'cancelled entries',color:'#dc2626',bg:'#fef2f2',border:'#fecaca',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>},
+          ].map(({label,value,sub,color,bg,border,icon})=>(
+            <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                <span style={{color,display:'flex'}}>{icon}</span>
+                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
+              <div style={{fontSize:11,color:'#94a3b8',marginTop:4}}>{sub}</div>
             </div>
           ))}
         </div>
@@ -667,7 +727,7 @@ export default function VouchersPage() {
                 {/* Row 1: Voucher ID (read-only) | Voucher Type | Preparation Date */}
                 <div className="field col2">
                   <label>Voucher ID</label>
-                  <input readOnly value={editing ? (editing.voucherId||editing.id) : genId(form.voucherType||'PAYMENT')} style={{background:'#f8fafc',color:'#64748b',fontWeight:700}} />
+                  <input readOnly value={editing ? (editing.voucherId||editing.id) : (idPreview || 'Auto-assigned on save')} style={{background:'#f8fafc',color:'#64748b',fontWeight:700}} />
                 </div>
                 <div className="field col2">
                   <label>Voucher Type</label>
@@ -691,7 +751,7 @@ export default function VouchersPage() {
                   <div className="field col2">
                     <label>Purpose / Category</label>
                     <input value={form.purposeCategory||''} onChange={e=>setForm(f=>({...f,purposeCategory:e.target.value}))} placeholder="e.g. Bills Payment, Salaries…" list="purpose-suggestions" />
-                    <datalist id="purpose-suggestions">{PURPOSE_SUGGESTIONS.map(s=><option key={s} value={s} />)}</datalist>
+                    <datalist id="purpose-suggestions">{purposeCategories.map(s=><option key={s} value={s} />)}</datalist>
                   </div>
                 )}
 
@@ -723,9 +783,28 @@ export default function VouchersPage() {
                   </div>
                 )}
                 {isLoan && (
-                  <div className="field col6" style={{background:'#fdf4ff',border:'1px solid #e9d5ff',borderRadius:10,padding:'10px 14px',fontSize:12,color:'#7c3aed',fontWeight:700}}>
-                    ℹ️ Loan Voucher — Used to record loan releases or amortization payments.
-                  </div>
+                  <>
+                    <div className="field col6" style={{background:'#fdf4ff',border:'1px solid #e9d5ff',borderRadius:10,padding:'10px 14px',fontSize:12,color:'#7c3aed',fontWeight:700}}>
+                      ℹ️ Loan Voucher — Used to record loan releases or amortization payments. When this voucher is paid through a Disbursement Report, a payment will auto-post to <strong>Loan Monitoring</strong>.
+                    </div>
+                    <div className="field col3">
+                      <label>Linked Loan</label>
+                      <select value={form.loanId||''} onChange={e=>setForm(f=>({...f,loanId:e.target.value}))}>
+                        <option value="">— None (skip auto-post) —</option>
+                        {loans.filter(l=>l.status!=='Disposed').map(l => (
+                          <option key={l.id} value={l.id}>{l.name||`Loan ${l.id}`} — {l.loanType||'Loan'}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="field col3" style={{justifyContent:'flex-end'}}>
+                      <label>&nbsp;</label>
+                      <div style={{fontSize:11,color:'#64748b',fontWeight:600,padding:'9px 0'}}>
+                        {form.loanId
+                          ? <>✅ Auto-post enabled. Tag lines with category <code>Finance Cost</code> (interest) or <code>Loans Payable</code> (principal) for accurate split.</>
+                          : 'No loan linked — payment will not auto-post.'}
+                      </div>
+                    </div>
+                  </>
                 )}
                 <div className="field col6">
                   <label>Notes</label>
@@ -774,10 +853,11 @@ export default function VouchersPage() {
                       </td>
                       <td>
                         <AccountCombobox
-                          options={accounts.map(a=>({value:a.code||a.id,label:`${a.name} (${a.code||a.id})`}))}
+                          rawAccounts={accounts}
                           value={l.expenseAccount}
                           onChange={v=>setLine(i,'expenseAccount',v)}
                           placeholder="— Select Account —"
+                          onNewAccount={()=>setNewAcctModal({code:'',name:'',type:'Expense',subType:'General and Administrative Expenses',parent:'',saving:false})}
                         />
                       </td>
                       <td><input value={l.description} onChange={e=>setLine(i,'description',e.target.value)} placeholder="Description" /></td>
@@ -966,6 +1046,98 @@ export default function VouchersPage() {
             <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
               <button className="btn btn-ghost" onClick={()=>setConfirmModal(null)}>Cancel</button>
               <button className="btn btn-primary" style={{background:'#dc2626'}} onClick={()=>{confirmModal.onConfirm();setConfirmModal(null);}}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* New Account Modal */}
+      {newAcctModal && (
+        <div className="backdrop" onClick={()=>setNewAcctModal(null)}>
+          <div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
+            <div className="modal-h">
+              <strong>New Account</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setNewAcctModal(null)}>✕</button>
+            </div>
+            <div className="modal-b" style={{display:'flex',flexDirection:'column',gap:12}}>
+              <div className="field">
+                <label>Account Code <span style={{color:'#ef4444'}}>*</span></label>
+                <input value={newAcctModal.code} onChange={e=>setNewAcctModal(m=>({...m,code:e.target.value}))} placeholder="e.g. 5001001" autoFocus />
+              </div>
+              <div className="field">
+                <label>Account Name <span style={{color:'#ef4444'}}>*</span></label>
+                <input value={newAcctModal.name} onChange={e=>setNewAcctModal(m=>({...m,name:e.target.value}))} placeholder="e.g. Office Supplies" />
+              </div>
+              <div className="field">
+                <label>Type</label>
+                <select value={newAcctModal.type} onChange={e=>setNewAcctModal(m=>({...m,type:e.target.value,subType:(ACCT_SUBTYPES[e.target.value]||[''])[0]}))}>                  {ACCT_TYPES.map(t=><option key={t}>{t}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Sub-Type</label>
+                <select value={newAcctModal.subType} onChange={e=>setNewAcctModal(m=>({...m,subType:e.target.value}))}>
+                  {(ACCT_SUBTYPES[newAcctModal.type]||[]).map(s=><option key={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Parent Account <span style={{color:'#94a3b8',fontWeight:400}}>(optional)</span></label>
+                <select value={newAcctModal.parent} onChange={e=>setNewAcctModal(m=>({...m,parent:e.target.value}))}>
+                  <option value="">— None —</option>
+                  {accounts.filter(a=>!a.parent).sort((a,b)=>(a.code||'').localeCompare(b.code||'')).map(a=><option key={a.code||a.id} value={a.code||a.id}>[{a.code}] {a.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="modal-f">
+              <button className="btn btn-ghost" onClick={()=>setNewAcctModal(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSaveNewAcct} disabled={newAcctModal.saving || !newAcctModal.code.trim() || !newAcctModal.name.trim()}>
+                {newAcctModal.saving ? 'Saving…' : 'Create Account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New Account Modal */}
+      {newAcctModal && (
+        <div className="backdrop" onClick={()=>setNewAcctModal(null)}>
+          <div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
+            <div className="modal-h">
+              <strong>New Account</strong>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setNewAcctModal(null)}>✕</button>
+            </div>
+            <div className="modal-b" style={{display:'flex',flexDirection:'column',gap:12}}>
+              <div className="field">
+                <label>Account Code <span style={{color:'#ef4444'}}>*</span></label>
+                <input value={newAcctModal.code} onChange={e=>setNewAcctModal(m=>({...m,code:e.target.value}))} placeholder="e.g. 5001001" autoFocus />
+              </div>
+              <div className="field">
+                <label>Account Name <span style={{color:'#ef4444'}}>*</span></label>
+                <input value={newAcctModal.name} onChange={e=>setNewAcctModal(m=>({...m,name:e.target.value}))} placeholder="e.g. Office Supplies" />
+              </div>
+              <div className="field">
+                <label>Type</label>
+                <select value={newAcctModal.type} onChange={e=>setNewAcctModal(m=>({...m,type:e.target.value,subType:(ACCT_SUBTYPES[e.target.value]||[''])[0]}))}>
+                  {ACCT_TYPES.map(t=><option key={t}>{t}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Sub-Type</label>
+                <select value={newAcctModal.subType} onChange={e=>setNewAcctModal(m=>({...m,subType:e.target.value}))}>
+                  {(ACCT_SUBTYPES[newAcctModal.type]||[]).map(s=><option key={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Parent Account <span style={{color:'#94a3b8',fontWeight:400}}>(optional)</span></label>
+                <select value={newAcctModal.parent} onChange={e=>setNewAcctModal(m=>({...m,parent:e.target.value}))}>
+                  <option value="">— None —</option>
+                  {accounts.filter(a=>!a.parent).sort((a,b)=>(a.code||'').localeCompare(b.code||'')).map(a=><option key={a.code||a.id} value={a.code||a.id}>[{a.code}] {a.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="modal-f">
+              <button className="btn btn-ghost" onClick={()=>setNewAcctModal(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSaveNewAcct} disabled={newAcctModal.saving || !newAcctModal.code.trim() || !newAcctModal.name.trim()}>
+                {newAcctModal.saving ? 'Saving…' : 'Create Account'}
+              </button>
             </div>
           </div>
         </div>
