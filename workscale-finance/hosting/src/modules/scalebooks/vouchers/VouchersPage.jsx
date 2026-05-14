@@ -668,8 +668,10 @@ export default function VouchersPage() {
                         <datalist id={`clist-${i}`}>{contacts.map(c=><option key={c.id} value={c.name||c.id} />)}</datalist>
                       </td>
                       <td>
-                        <input value={l.expenseAccount} onChange={e=>setLine(i,'expenseAccount',e.target.value)} placeholder="Account code / name" list={`alist-${i}`} />
-                        <datalist id={`alist-${i}`}>{accounts.map(a=><option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}</datalist>
+                        <select value={l.expenseAccount} onChange={e=>setLine(i,'expenseAccount',e.target.value)}>
+                          <option value="">— Select Account —</option>
+                          {accounts.map(a=><option key={a.id} value={a.code||a.id}>{a.name} ({a.code||a.id})</option>)}
+                        </select>
                       </td>
                       <td><input value={l.description} onChange={e=>setLine(i,'description',e.target.value)} placeholder="Description" /></td>
                       {isAutoBank && (

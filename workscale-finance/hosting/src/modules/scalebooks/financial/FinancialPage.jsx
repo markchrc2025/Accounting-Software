@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 
 /* ─── Constants ─────────────────────────────────────────────────── */
@@ -187,6 +187,11 @@ export default function FinancialPage() {
   const [confirmModal, setConfirmModal] = useState(null);
   const [pdFillD1, setPdFillD1]         = useState('');
   const [pdFillD2, setPdFillD2]         = useState('');
+  const [calVoucherModal, setCalVoucherModal] = useState(null); // { day, month, year, events }
+  const [calAccounts, setCalAccounts]     = useState([]);
+  const [vForm,        setVForm]          = useState({});
+  const [vLines,       setVLines]         = useState([]);
+  const [vSaving,      setVSaving]        = useState(false);
   const saveTimerRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
@@ -200,6 +205,9 @@ export default function FinancialPage() {
       setLoans(ls);
       setNextId(ls.reduce((m, l) => Math.max(m, l.id || 0), 0) + 1);
     });
+    getDocs(collection(db, 'accounts')).then(s =>
+      setCalAccounts(s.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
   }, []);
 
   const saveToFirestore = useCallback(async (ls) => {
@@ -258,6 +266,85 @@ export default function FinancialPage() {
   const activeLoans    = loans.filter(l => l.status === 'Active');
   const totalPrincipal = activeLoans.reduce((s, l) => s + (parseFloat(l.principal) || 0), 0);
   const totalInterest  = activeLoans.reduce((s, l) => s + loanTotalInterest(l), 0);
+
+  /* ── Build voucher lines from calendar day events ──────────────── */
+  const buildVoucherLines = useCallback((day, month, year, dayEvts, accounts) => {
+    const monthLabel = MONTH_NAMES[month] + '-' + year;
+    const fcAcct = accounts.find(a => (a.name||'').toLowerCase().includes('finance cost'));
+    const lpAcct = accounts.find(a => (a.name||'').toLowerCase().includes('loans payable'));
+    const lines = [];
+    dayEvts.forEach(e => {
+      const loanDesc = `${e.loan.name||`Loan ${e.loan.id}`} (${e.loan.loanType||'Term Loan'} \u2022 ${e.loan.interestMethod||'Reducing Balance'}) ${monthLabel} (Day ${day})`;
+      if (e.interest > 0) lines.push({
+        id: Math.random().toString(36).slice(2,9),
+        contact: e.loan.name || `Loan ${e.loan.id}`,
+        expenseAccount: fcAcct ? (fcAcct.code || fcAcct.id) : '',
+        description: `Interest Payment \u2013 ${loanDesc}`,
+        amount: String(parseFloat(e.interest.toFixed(2))),
+        _type: 'interest',
+      });
+      if (e.principal > 0) lines.push({
+        id: Math.random().toString(36).slice(2,9),
+        contact: e.loan.name || `Loan ${e.loan.id}`,
+        expenseAccount: lpAcct ? (lpAcct.code || lpAcct.id) : '',
+        description: `Principal Payment \u2013 ${loanDesc}`,
+        amount: String(parseFloat(e.principal.toFixed(2))),
+        _type: 'principal',
+      });
+    });
+    return lines;
+  }, []);
+
+  const openCalVoucher = useCallback((day, month, year, dayEvts) => {
+    const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const monthLabel = MONTH_NAMES[month] + '-' + year;
+    setVForm({
+      voucherType: 'LOAN',
+      preparationDate: dateStr,
+      purposeCategory: 'Loan Payment',
+      paymentFrom: '',
+      notes: `Loan amortization for ${monthLabel}`,
+    });
+    setVLines(buildVoucherLines(day, month, year, dayEvts, calAccounts));
+    setCalVoucherModal({ day, month, year, events: dayEvts });
+  }, [calAccounts, buildVoucherLines]);
+
+  const saveCalVoucher = useCallback(async (status) => {
+    setVSaving(true);
+    try {
+      const user = auth.currentUser?.email || '';
+      const totalAmount = vLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
+      const contactSummary = [...new Set(vLines.map(l=>l.contact).filter(Boolean))].join(', ');
+      const d = new Date();
+      const periodKey = `LV${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`;
+      const voucherId = `${periodKey}-${String(Math.floor(Math.random()*9000)+1000)}`;
+      await addDoc(collection(db,'vouchers'), {
+        voucherId,
+        voucherType: vForm.voucherType || 'LOAN',
+        preparationDate: vForm.preparationDate,
+        purposeCategory: vForm.purposeCategory,
+        paymentFromAccountCode: vForm.paymentFrom,
+        contactSummary,
+        totalAmount,
+        status,
+        notes: vForm.notes || '',
+        lines: vLines.map((l,i) => ({
+          lineNo: i+1,
+          contact: l.contact,
+          expenseAccountCode: l.expenseAccount,
+          description: l.description,
+          amount: Number(l.amount)||0,
+          category: l._type === 'interest' ? 'Finance Cost' : l._type === 'principal' ? 'Loans Payable' : '',
+          taxType: 'N/A', taxRate: 0, taxAmt: 0, inclusive: false,
+        })),
+        createdAt: serverTimestamp(), createdBy: user,
+        updatedAt: serverTimestamp(), updatedBy: user,
+      });
+      showToast(`Voucher ${voucherId} ${status === 'Pending' ? 'saved as draft' : 'submitted for approval'}.`);
+      setCalVoucherModal(null);
+    } catch(e) { showToast('Error: ' + e.message); }
+    setVSaving(false);
+  }, [vForm, vLines]);
 
   const TABS = [
     { key: 'loans',    label: 'Loan Registry' },
@@ -373,8 +460,53 @@ export default function FinancialPage() {
     const schedMap = {};
     active.forEach(l => { schedMap[l.id] = {}; buildSchedule(l).forEach(r => { schedMap[l.id][r.label] = r; }); });
 
+    if (active.length === 0) return <div className="empty">No active loans with disbursement dates.</div>;
+
+    // Sticky column styles
+    const stickyName   = { position:'sticky', left:0,   minWidth:160, background:'inherit', zIndex:1, whiteSpace:'nowrap' };
+    const stickySeries = { position:'sticky', left:160, minWidth:100, background:'inherit', zIndex:1, whiteSpace:'nowrap' };
+    const stickyNameHd = { position:'sticky', left:0,   minWidth:160, background:'#f8fafc', zIndex:2, textAlign:'left' };
+    const stickySerHd  = { position:'sticky', left:160, minWidth:100, background:'#f8fafc', zIndex:2, textAlign:'left' };
+
+    // Dot indicator shared
+    const dot = (l) => (
+      <span style={{ display:'inline-block', width:8, height:8, borderRadius:'50%',
+        background: l.status==='Active' ? '#f97316' : '#cbd5e1', marginRight:6, flexShrink:0 }} />
+    );
+
+    // Section header row
+    const SectionHdr = ({ bg, border, label }) => (
+      <tr>
+        <td colSpan={2 + filtered.length}
+          style={{ background:bg, color:'#fff', fontWeight:900, padding:'7px 10px',
+            letterSpacing:'.05em', fontSize:12, borderTop:`2px solid ${border}` }}>
+          {label}
+        </td>
+      </tr>
+    );
+
+    // Subtotal row
+    const SubtotalRow = ({ bg, label, getValue }) => (
+      <tr>
+        <td colSpan={2}
+          style={{ fontWeight:900, background:bg, color:'#fff', padding:'8px 10px',
+            fontSize:11, letterSpacing:'.04em', ...stickyName }}>
+          {label}
+        </td>
+        {filtered.map(mo => {
+          const total = active.reduce((s, l) => { const r = schedMap[l.id]?.[mo]; return s + (r ? getValue(r) : 0); }, 0);
+          return (
+            <td key={mo} style={{ textAlign:'right', fontWeight:900, background:bg, color:'#fff', padding:'8px 8px' }}>
+              {total > 0 ? fmtPHP(total) : '—'}
+            </td>
+          );
+        })}
+      </tr>
+    );
+
     return (
       <div>
+        {/* Year filter buttons */}
         <div style={{ display:'flex', gap:8, marginBottom:14, flexWrap:'wrap' }}>
           {['all', ...years].map(y => (
             <button key={y} className={`btn btn-sm ${scheduleYear===String(y)?'btn-primary':'btn-ghost'}`}
@@ -383,89 +515,94 @@ export default function FinancialPage() {
             </button>
           ))}
         </div>
-        {active.length === 0 ? <div className="empty">No active loans with disbursement dates.</div> : (
-          <div style={{ overflowX:'auto' }}>
-            <table style={{ fontSize:11 }}>
-              <thead>
-                <tr>
-                  <th style={{minWidth:90}}>Month</th>
-                  {active.map(l => (
-                    <th key={l.id} colSpan={3} style={{ textAlign:'center', borderLeft:'2px solid #e5e7eb', minWidth:180 }}>
-                      {l.name || `Loan ${l.id}`}
-                    </th>
-                  ))}
-                  <th colSpan={2} style={{ textAlign:'center', borderLeft:'2px solid #e5e7eb', background:'#fef9c3', minWidth:120 }}>Grand Total</th>
-                </tr>
-                <tr>
-                  <th></th>
-                  {active.map(l => (
-                    <th key={l.id + 'hdr'} colSpan={3} style={{ borderLeft:'2px solid #e5e7eb' }}>
-                      <span style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', fontSize:9 }}>
-                        <span style={{textAlign:'right'}}>Principal</span>
-                        <span style={{textAlign:'right'}}>Interest</span>
-                        <span style={{textAlign:'right'}}>Total</span>
-                      </span>
-                    </th>
-                  ))}
-                  <th style={{ textAlign:'right', borderLeft:'2px solid #e5e7eb', background:'#fef9c3', fontSize:9 }}>Principal</th>
-                  <th style={{ textAlign:'right', background:'#fef9c3', fontSize:9 }}>Interest</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(mo => {
-                  let gP = 0, gI = 0;
-                  return (
-                    <tr key={mo}>
-                      <td style={{ fontWeight:600, whiteSpace:'nowrap' }}>{mo}</td>
-                      {active.map(l => {
-                        const r = schedMap[l.id]?.[mo];
-                        if (!r) return (
-                          <td key={l.id} colSpan={3} style={{ borderLeft:'2px solid #e5e7eb' }}></td>
-                        );
-                        gP += r.principal; gI += r.interest;
-                        return (
-                          <td key={l.id} colSpan={3} style={{ borderLeft:'2px solid #e5e7eb', padding:0 }}>
-                            <span style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr' }}>
-                              <span style={{textAlign:'right',padding:'8px 6px'}}>{fmtPHP(r.principal)}</span>
-                              <span style={{textAlign:'right',padding:'8px 6px',color:'#dc2626'}}>{fmtPHP(r.interest)}</span>
-                              <span style={{textAlign:'right',padding:'8px 6px',fontWeight:700}}>{fmtPHP(r.principal+r.interest)}</span>
-                            </span>
-                          </td>
-                        );
-                      })}
-                      <td style={{ textAlign:'right', borderLeft:'2px solid #e5e7eb', background:'#fefce8', fontWeight:700 }}>{fmtPHP(gP)}</td>
-                      <td style={{ textAlign:'right', background:'#fefce8', color:'#dc2626', fontWeight:700 }}>{fmtPHP(gI)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td>TOTAL</td>
-                  {active.map(l => {
-                    const sched = buildSchedule(l).filter(r => scheduleYear==='all' || r.label.endsWith('-'+scheduleYear));
-                    const tP = sched.reduce((s,r)=>s+r.principal,0), tI = sched.reduce((s,r)=>s+r.interest,0);
+
+        <div style={{ overflowX:'auto' }}>
+          <table style={{ fontSize:11, borderCollapse:'collapse', width:'100%' }}>
+            <thead>
+              <tr>
+                <th style={stickyNameHd}>LOAN / FACILITY</th>
+                <th style={stickySerHd}>SERIES</th>
+                {filtered.map(mo => (
+                  <th key={mo} style={{ textAlign:'right', minWidth:96, whiteSpace:'nowrap' }}>{mo}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+
+              {/* ── Section 1: FINANCE COST — INTEREST ── */}
+              <SectionHdr bg="#7f1d1d" border="#450a0a" label="FINANCE COST — INTEREST" />
+              {active.map(l => (
+                <tr key={'int-' + l.id} style={{ background:'#fff' }}>
+                  <td style={{ ...stickyName, fontWeight:700, background:'#fff' }}>{dot(l)}{l.name || `Loan ${l.id}`}</td>
+                  <td style={{ ...stickySeries, color:'#94a3b8', background:'#fff' }}>Finance Cost</td>
+                  {filtered.map(mo => {
+                    const r = schedMap[l.id]?.[mo];
                     return (
-                      <td key={l.id} colSpan={3} style={{ borderLeft:'2px solid #e5e7eb', padding:0 }}>
-                        <span style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr' }}>
-                          <span style={{textAlign:'right',padding:'8px 6px'}}>{fmtPHP(tP)}</span>
-                          <span style={{textAlign:'right',padding:'8px 6px',color:'#dc2626'}}>{fmtPHP(tI)}</span>
-                          <span style={{textAlign:'right',padding:'8px 6px'}}>{fmtPHP(tP+tI)}</span>
-                        </span>
+                      <td key={mo} style={{ textAlign:'right', color: r ? '#dc2626' : '#d1d5db', padding:'7px 8px' }}>
+                        {r ? fmtPHP(r.interest) : '—'}
                       </td>
                     );
                   })}
-                  <td style={{ textAlign:'right', borderLeft:'2px solid #e5e7eb' }}>
-                    {fmtPHP(active.reduce((s,l)=>{const sc=buildSchedule(l).filter(r=>scheduleYear==='all'||r.label.endsWith('-'+scheduleYear));return s+sc.reduce((ss,r)=>ss+r.principal,0);},0))}
-                  </td>
-                  <td style={{ textAlign:'right', color:'#dc2626' }}>
-                    {fmtPHP(active.reduce((s,l)=>{const sc=buildSchedule(l).filter(r=>scheduleYear==='all'||r.label.endsWith('-'+scheduleYear));return s+sc.reduce((ss,r)=>ss+r.interest,0);},0))}
-                  </td>
                 </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
+              ))}
+              <SubtotalRow bg="#991b1b" label="TOTAL FINANCE COST" getValue={r => r.interest} />
+
+              {/* ── Section 2: PRINCIPAL PAYMENT ── */}
+              <SectionHdr bg="#1e3a8a" border="#172554" label="PRINCIPAL PAYMENT" />
+              {active.map(l => (
+                <tr key={'pri-' + l.id} style={{ background:'#fff' }}>
+                  <td style={{ ...stickyName, fontWeight:700, background:'#fff' }}>{dot(l)}{l.name || `Loan ${l.id}`}</td>
+                  <td style={{ ...stickySeries, color:'#94a3b8', background:'#fff' }}>Principal</td>
+                  {filtered.map(mo => {
+                    const r = schedMap[l.id]?.[mo];
+                    return (
+                      <td key={mo} style={{ textAlign:'right', color: r ? '#2563eb' : '#d1d5db', padding:'7px 8px' }}>
+                        {r ? fmtPHP(r.principal) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <SubtotalRow bg="#1e3a8a" label="TOTAL PRINCIPAL PAYMENT" getValue={r => r.principal} />
+
+              {/* ── Section 3: TOTAL PAYMENT — INTEREST + PRINCIPAL ── */}
+              <SectionHdr bg="#1e293b" border="#0f172a" label="TOTAL PAYMENT — INTEREST + PRINCIPAL" />
+              {active.map(l => (
+                <tr key={'tot-' + l.id} style={{ background:'#fff' }}>
+                  <td style={{ ...stickyName, fontWeight:700, background:'#fff' }}>{dot(l)}{l.name || `Loan ${l.id}`}</td>
+                  <td style={{ ...stickySeries, color:'#94a3b8', background:'#fff' }}>Total Pmt</td>
+                  {filtered.map(mo => {
+                    const r = schedMap[l.id]?.[mo];
+                    return (
+                      <td key={mo} style={{ textAlign:'right', color: r ? '#0f172a' : '#d1d5db', fontWeight: r ? 700 : 400, padding:'7px 8px' }}>
+                        {r ? fmtPHP(r.principal + r.interest) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+
+            </tbody>
+            <tfoot>
+              {/* Grand Total Payment */}
+              <tr>
+                <td colSpan={2}
+                  style={{ fontWeight:900, background:'#0f172a', color:'#fff', padding:'9px 10px',
+                    fontSize:11, letterSpacing:'.04em', ...stickyName }}>
+                  GRAND TOTAL PAYMENT
+                </td>
+                {filtered.map(mo => {
+                  const total = active.reduce((s, l) => { const r = schedMap[l.id]?.[mo]; return s + (r ? r.principal + r.interest : 0); }, 0);
+                  return (
+                    <td key={mo} style={{ textAlign:'right', fontWeight:900, background:'#0f172a', color:'#fff', padding:'9px 8px' }}>
+                      {total > 0 ? fmtPHP(total) : '—'}
+                    </td>
+                  );
+                })}
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       </div>
     );
   }
@@ -546,18 +683,36 @@ export default function FinancialPage() {
       const label = MONTH_NAMES[calMonth] + '-' + calYear;
       const row   = sched.find(r => r.label === label);
       if (!row) return;
-      const add = (day, amt) => {
+      const add = (day, principal, interest) => {
         if (!events[day]) events[day] = [];
-        events[day].push({ loan: l, amount: amt });
+        events[day].push({ loan: l, principal, interest });
       };
       if (l.paymentFrequency === 'Semi-Monthly') {
-        const key  = calYear + '-' + String(calMonth+1).padStart(2,'0');
-        const dayStr = (l.payDayMode==='Custom' && l.payDaysPerMonth?.[key]) ? l.payDaysPerMonth[key] : (l.payDays||'15,30');
-        const half = (row.principal + row.interest) / 2;
-        String(dayStr).split(',').forEach(d => { const n=parseInt(d); if (n>=1&&n<=31) add(n, half); });
+        const key   = calYear + '-' + String(calMonth+1).padStart(2,'0');
+        const halfP = row.principal / 2, halfI = row.interest / 2;
+        const days  = [];
+        if (l.payDayMode === 'Variable per Month') {
+          const perMonth = l.payDaysPerMonth?.[key] || {};
+          const d1 = parseInt(perMonth.d1), d2 = parseInt(perMonth.d2);
+          if (d1 >= 1 && d1 <= 31) days.push(d1);
+          if (d2 >= 1 && d2 <= 31) days.push(d2);
+          // fall back to fixed days if this month has no entries yet
+          if (days.length === 0) {
+            const f1 = parseInt(l.payDay1), f2 = parseInt(l.payDay2);
+            if (f1 >= 1 && f1 <= 31) days.push(f1);
+            if (f2 >= 1 && f2 <= 31) days.push(f2);
+          }
+        } else {
+          // Fixed mode — use payDay1 / payDay2
+          const d1 = parseInt(l.payDay1), d2 = parseInt(l.payDay2);
+          if (d1 >= 1 && d1 <= 31) days.push(d1);
+          if (d2 >= 1 && d2 <= 31) days.push(d2);
+          if (days.length === 0) { days.push(15); days.push(30); } // default fallback
+        }
+        days.forEach(d => add(d, halfP, halfI));
       } else {
         const day = l.disbursementDate ? new Date(l.disbursementDate).getDate() : 1;
-        add(day, row.principal + row.interest);
+        add(day, row.principal, row.interest);
       }
     });
 
@@ -566,43 +721,103 @@ export default function FinancialPage() {
     const cells = [...Array(firstDow).fill(null), ...Array.from({length:daysInMonth},(_,i)=>i+1)];
     while (cells.length % 7) cells.push(null);
     const weeks = Array.from({length:cells.length/7},(_,i)=>cells.slice(i*7,i*7+7));
-    const today = new Date();
-    const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const todayD = new Date();
+    const DOW = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+
+    // Month totals
+    const monthInt = Object.values(events).flat().reduce((s,e)=>s+e.interest,0);
+    const monthPri = Object.values(events).flat().reduce((s,e)=>s+e.principal,0);
 
     return (
-      <div>
-        <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:14 }}>
-          <button className="btn btn-ghost btn-sm" onClick={prevM}>◀</button>
-          <span style={{ fontWeight:900, fontSize:16, minWidth:120 }}>{MONTH_NAMES[calMonth]} {calYear}</span>
-          <button className="btn btn-ghost btn-sm" onClick={nextM}>▶</button>
+      <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+        {/* Navigation */}
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
+          <button className="btn btn-ghost btn-sm" onClick={prevM}>‹</button>
+          <span style={{ fontWeight:900, fontSize:18, minWidth:130 }}>{MONTH_NAMES[calMonth]} {calYear}</span>
+          <button className="btn btn-ghost btn-sm" onClick={nextM}>›</button>
           <span style={{ marginLeft:'auto', fontSize:12, color:'#64748b' }}>
             {Object.values(events).flat().length} payment{Object.values(events).flat().length!==1?'s':''} this month
           </span>
         </div>
-        <div className="cal-grid">
+
+        {/* Day-of-week header */}
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:2, marginBottom:2 }}>
           {DOW.map(d => (
-            <div key={d} style={{ textAlign:'center', fontWeight:800, fontSize:10, color:'#94a3b8', padding:'6px 0', textTransform:'uppercase', letterSpacing:'.06em' }}>{d}</div>
+            <div key={d} style={{ textAlign:'center', fontWeight:800, fontSize:10, color:'#94a3b8',
+              padding:'5px 0', textTransform:'uppercase', letterSpacing:'.06em' }}>{d}</div>
           ))}
-          {weeks.map((week, wi) => week.map((day, di) => (
-            <div key={`${wi}-${di}`} className={day ? 'cal-cell' : 'cal-cell-empty'}>
-              {day && (
-                <>
-                  <div className="cal-day" style={{ color: day===today.getDate()&&calMonth===today.getMonth()&&calYear===today.getFullYear()?'#f97316':'#0b1220' }}>
-                    {day}
-                  </div>
-                  {(events[day]||[]).map((ev, i) => (
-                    <div key={i} className="cal-event">
-                      <div style={{ fontWeight:800, color:'#9a3412', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                        {ev.loan.name || `Loan ${ev.loan.id}`}
-                      </div>
-                      <div style={{ color:'#ea580c' }}>{fmtCur(ev.amount)}</div>
-                    </div>
-                  ))}
-                </>
-              )}
-            </div>
-          )))}
         </div>
+
+        {/* Weeks */}
+        {weeks.map((week, wi) => {
+          // Week summary
+          const weekEvts = week.filter(Boolean).flatMap(d => events[d]||[]);
+          const wInt = weekEvts.reduce((s,e)=>s+e.interest,0);
+          const wPri = weekEvts.reduce((s,e)=>s+e.principal,0);
+          const wTot = wInt + wPri;
+          const weekNum = wi + 1;
+          return (
+            <div key={wi}>
+              {/* Week summary bar */}
+              <div style={{ display:'flex', alignItems:'center', background:'#f0f9ff',
+                border:'1px solid #e0f2fe', borderRadius:8, padding:'5px 12px', marginBottom:2,
+                fontSize:11, fontWeight:700, gap:16, flexWrap:'wrap' }}>
+                <span style={{ color:'#0369a1', fontWeight:900 }}>WEEK {weekNum}</span>
+                {wInt > 0 && <span style={{ color:'#dc2626' }}>Int {fmtCur(wInt)}</span>}
+                {wPri > 0 && <span style={{ color:'#2563eb' }}>Pri {fmtCur(wPri)}</span>}
+                {wTot > 0 && <span style={{ marginLeft:'auto', color:'#0f172a' }}>Total {fmtCur(wTot)}</span>}
+              </div>
+
+              {/* Day cells */}
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:2, marginBottom:4 }}>
+                {week.map((day, di) => {
+                  if (!day) return <div key={di} style={{ minHeight:72 }} />;
+                  const dayEvts  = events[day] || [];
+                  const dayInt   = dayEvts.reduce((s,e)=>s+e.interest,0);
+                  const dayPri   = dayEvts.reduce((s,e)=>s+e.principal,0);
+                  const isToday  = day===todayD.getDate()&&calMonth===todayD.getMonth()&&calYear===todayD.getFullYear();
+                  const hasEvts  = dayEvts.length > 0;
+                  return (
+                    <div key={di}
+                      onClick={() => hasEvts && openCalVoucher(day, calMonth, calYear, dayEvts)}
+                      style={{
+                        minHeight:72, background:'#fff', border:`1px solid ${isToday?'#f97316':'#e5e7eb'}`,
+                        borderRadius:8, padding:'6px 7px', cursor: hasEvts ? 'pointer' : 'default',
+                        transition:'box-shadow .15s',
+                        boxShadow: hasEvts ? '0 1px 4px rgba(0,0,0,.06)' : 'none',
+                      }}
+                      onMouseEnter={e => { if(hasEvts) e.currentTarget.style.boxShadow='0 3px 10px rgba(249,115,22,.18)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.boxShadow= hasEvts ? '0 1px 4px rgba(0,0,0,.06)' : 'none'; }}
+                    >
+                      <div style={{ fontWeight:700, fontSize:12, marginBottom:3,
+                        color: isToday ? '#f97316' : '#0b1220' }}>{day}</div>
+                      {hasEvts && (
+                        <>
+                          {dayInt > 0 && <div style={{ fontSize:10, color:'#dc2626', fontWeight:700 }}>Int {fmtCur(dayInt)}</div>}
+                          {dayPri > 0 && <div style={{ fontSize:10, color:'#2563eb', fontWeight:700 }}>Pri {fmtCur(dayPri)}</div>}
+                          <div style={{ fontSize:10, color:'#64748b', marginTop:2 }}>
+                            {dayEvts.length} loan{dayEvts.length!==1?'s':''}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Month Total footer */}
+        {(monthInt > 0 || monthPri > 0) && (
+          <div style={{ display:'flex', gap:24, alignItems:'center', background:'#0f172a', color:'#fff',
+            borderRadius:10, padding:'12px 20px', marginTop:8, flexWrap:'wrap', fontSize:13 }}>
+            <span style={{ fontWeight:800, color:'#94a3b8', letterSpacing:'.05em', fontSize:11 }}>MONTH TOTAL</span>
+            <span>Interest <strong style={{ color:'#fca5a5' }}>{fmtCur(monthInt)}</strong></span>
+            <span>Principal <strong style={{ color:'#93c5fd' }}>{fmtCur(monthPri)}</strong></span>
+            <span style={{ marginLeft:'auto' }}>Total <strong>{fmtCur(monthInt+monthPri)}</strong></span>
+          </div>
+        )}
       </div>
     );
   }
@@ -672,10 +887,6 @@ export default function FinancialPage() {
       <div className="fp-topbar">
         <div>
           <h1 style={{ margin:0, fontSize:18, fontWeight:900 }}>Financial Management</h1>
-          <p style={{ margin:0, fontSize:12, color:'#64748b' }}>
-            {loans.length} loan{loans.length!==1?'s':''} · {activeLoans.length} active
-            {totalPrincipal > 0 && ` · Principal: ${fmtCur(totalPrincipal)}`}
-          </p>
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           {saveStatus && (
@@ -904,6 +1115,201 @@ export default function FinancialPage() {
           </div>
         </div>
       )}
+
+      {/* ── Create Voucher from Calendar (full form) ───────────────── */}
+      {calVoucherModal && (() => {
+        const { day, month, year, events: dayEvts } = calVoucherModal;
+        const monthLabel = MONTH_NAMES[month] + '-' + year;
+
+        const bankAccounts = calAccounts.filter(a =>
+          ['Bank','Cash','Cash Equivalents','Cash and Cash Equivalents'].includes(a.subType) ||
+          (a.name||'').toLowerCase().includes('cash in bank')
+        );
+
+        const reloadLines = () =>
+          setVLines(buildVoucherLines(day, month, year, dayEvts, calAccounts));
+
+        const setLine = (idx, key, val) =>
+          setVLines(p => p.map((l,i) => i===idx ? {...l,[key]:val} : l));
+
+        const totalAmt = vLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
+        const intTotal = vLines.filter(l => l._type==='interest').reduce((s,l)=>s+(Number(l.amount)||0),0);
+        const priTotal = vLines.filter(l => l._type==='principal').reduce((s,l)=>s+(Number(l.amount)||0),0);
+        const bankAcct = calAccounts.find(a => a.code===vForm.paymentFrom || a.id===vForm.paymentFrom);
+        const fcAcctName  = (() => { const a = calAccounts.find(a => a.code===vLines.find(l=>l._type==='interest')?.expenseAccount); return a ? `${a.code} — ${a.name}` : 'Finance Cost'; })();
+        const lpAcctName  = (() => { const a = calAccounts.find(a => a.code===vLines.find(l=>l._type==='principal')?.expenseAccount); return a ? `${a.code} — ${a.name}` : 'Loans Payable'; })();
+        const bankAcctName = bankAcct ? `${bankAcct.code} — ${bankAcct.name}` : (vForm.paymentFrom || 'Cash / Bank');
+
+        const thS = { padding:'8px 10px', textAlign:'left', fontWeight:800, color:'#64748b',
+          fontSize:10, letterSpacing:'.05em', textTransform:'uppercase', background:'#f8fafc' };
+        const inpS = { border:'1px solid #e5e7eb', borderRadius:8, padding:'6px 8px', fontSize:12,
+          width:'100%', boxSizing:'border-box', fontFamily:'inherit' };
+
+        return (
+          <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setCalVoucherModal(null)}>
+            <div className="modal" style={{width:'min(960px,98vw)'}}>
+
+              {/* Header */}
+              <div className="modal-h">
+                <strong style={{fontSize:15,fontWeight:900}}>Create Voucher</strong>
+                <button className="btn btn-ghost btn-sm" onClick={()=>setCalVoucherModal(null)}>✕</button>
+              </div>
+
+              {/* Body */}
+              <div className="modal-b" style={{padding:'20px'}}>
+
+                {/* ── Header fields ── */}
+                <div style={{display:'grid',gridTemplateColumns:'repeat(6,1fr)',gap:10,marginBottom:18}}>
+                  <div style={{gridColumn:'span 2',display:'flex',flexDirection:'column',gap:5}}>
+                    <label style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Voucher ID</label>
+                    <input readOnly value="Auto-generated on save" style={{...inpS,background:'#f8fafc',color:'#64748b',fontWeight:700}} />
+                  </div>
+                  <div style={{gridColumn:'span 2',display:'flex',flexDirection:'column',gap:5}}>
+                    <label style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Voucher Type</label>
+                    <select style={inpS} value={vForm.voucherType||'LOAN'} onChange={e=>setVForm(f=>({...f,voucherType:e.target.value}))}>
+                      <option value="PAYMENT">Payment Voucher</option>
+                      <option value="LOAN">Loan Voucher</option>
+                    </select>
+                  </div>
+                  <div style={{gridColumn:'span 2',display:'flex',flexDirection:'column',gap:5}}>
+                    <label style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Preparation Date</label>
+                    <input type="date" style={inpS} value={vForm.preparationDate||''} onChange={e=>setVForm(f=>({...f,preparationDate:e.target.value}))} />
+                  </div>
+                  <div style={{gridColumn:'span 2',display:'flex',flexDirection:'column',gap:5}}>
+                    <label style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Purpose Category</label>
+                    <input style={inpS} value={vForm.purposeCategory||''} onChange={e=>setVForm(f=>({...f,purposeCategory:e.target.value}))} placeholder="e.g. Loan Payment" />
+                  </div>
+                  <div style={{gridColumn:'span 2',display:'flex',flexDirection:'column',gap:5}}>
+                    <label style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Status</label>
+                    <div style={{padding:'7px 10px',borderRadius:8,border:'1px solid #fed7aa',background:'#fff7ed',fontSize:13,fontWeight:700,color:'#c2410c'}}>Pending</div>
+                  </div>
+                  <div style={{gridColumn:'span 2',display:'flex',flexDirection:'column',gap:5}}>
+                    <label style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Payment From (Bank)</label>
+                    <select style={inpS} value={vForm.paymentFrom||''} onChange={e=>setVForm(f=>({...f,paymentFrom:e.target.value}))}>
+                      <option value="">— Select Account —</option>
+                      {bankAccounts.map(a=>(
+                        <option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>
+                      ))}
+                      {bankAccounts.length===0 && calAccounts.map(a=>(
+                        <option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* ── Payment Details section ── */}
+                <div style={{fontSize:11,fontWeight:800,color:'#f97316',letterSpacing:'.07em',textTransform:'uppercase',marginBottom:10,paddingBottom:6,borderBottom:'2px solid #f1f5f9'}}>
+                  Payment Details
+                </div>
+                <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginBottom:8}}>
+                  <button className="btn btn-ghost btn-sm" onClick={reloadLines}>↺ Load Loan Payments</button>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>setVLines(p=>[...p,{id:Math.random().toString(36).slice(2,9),contact:'',expenseAccount:'',description:'',amount:'',_type:''}])}>+ Add New Row</button>
+                </div>
+
+                <div style={{border:'1px solid #e5e7eb',borderRadius:10,overflow:'hidden',marginBottom:4}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                    <thead>
+                      <tr>
+                        <th style={{...thS,minWidth:140}}>Contact</th>
+                        <th style={{...thS,minWidth:160}}>Account</th>
+                        <th style={{...thS,minWidth:220}}>Description</th>
+                        <th style={{...thS,textAlign:'right',width:120}}>Amount</th>
+                        <th style={{width:30,padding:'8px 6px',background:'#f8fafc'}}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {vLines.map((ln,i) => (
+                        <tr key={ln.id} style={{borderTop:'1px solid #f1f5f9'}}>
+                          <td style={{padding:'5px 8px'}}>
+                            <input style={inpS} value={ln.contact} onChange={e=>setLine(i,'contact',e.target.value)} placeholder="Contact name" />
+                          </td>
+                          <td style={{padding:'5px 8px'}}>
+                            <input style={inpS} value={ln.expenseAccount} onChange={e=>setLine(i,'expenseAccount',e.target.value)} placeholder="Account code" list={`cv-acct-${i}`} />
+                            <datalist id={`cv-acct-${i}`}>{calAccounts.map(a=><option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}</datalist>
+                          </td>
+                          <td style={{padding:'5px 8px'}}>
+                            <input style={inpS} value={ln.description} onChange={e=>setLine(i,'description',e.target.value)} placeholder="Description" />
+                          </td>
+                          <td style={{padding:'5px 8px'}}>
+                            <input type="number" style={{...inpS,textAlign:'right'}} value={ln.amount} onChange={e=>setLine(i,'amount',e.target.value)} />
+                          </td>
+                          <td style={{padding:'5px 4px',textAlign:'center'}}>
+                            <button onClick={()=>setVLines(p=>p.filter((_,idx)=>idx!==i))} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'4px'}}>✕</button>
+                          </td>
+                        </tr>
+                      ))}
+                      {vLines.length === 0 && (
+                        <tr><td colSpan={5} style={{padding:'20px',textAlign:'center',color:'#94a3b8',fontSize:12}}>No lines. Click "Load Loan Payments" or "+ Add New Row".</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Net Cash Disbursed */}
+                <div style={{textAlign:'right',padding:'8px 12px',fontSize:13,fontWeight:900,color:'#0f172a',letterSpacing:'.04em'}}>
+                  NET CASH DISBURSED &nbsp;
+                  <span style={{fontSize:16,color:'#0f172a'}}>{fmtCur(totalAmt)}</span>
+                </div>
+
+                {/* ── Journal Entry (auto-generated) ── */}
+                {totalAmt > 0 && (
+                  <div style={{marginTop:14}}>
+                    <div style={{fontSize:11,fontWeight:800,color:'#f97316',letterSpacing:'.07em',textTransform:'uppercase',marginBottom:8,paddingBottom:6,borderBottom:'2px solid #f1f5f9'}}>
+                      Journal Entry (Auto-Generated)
+                    </div>
+                    <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,border:'1px solid #e5e7eb',borderRadius:8,overflow:'hidden'}}>
+                      <thead>
+                        <tr>
+                          <th style={thS}>COA (Account Name)</th>
+                          <th style={{...thS,textAlign:'right',width:130}}>Debit</th>
+                          <th style={{...thS,textAlign:'right',width:130}}>Credit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {priTotal > 0 && (
+                          <tr style={{borderTop:'1px solid #f1f5f9'}}>
+                            <td style={{padding:'9px 12px',fontWeight:700}}>{lpAcctName}</td>
+                            <td style={{padding:'9px 12px',textAlign:'right'}}>{fmtPHP(priTotal)}</td>
+                            <td style={{padding:'9px 12px',textAlign:'right',color:'#94a3b8'}}>—</td>
+                          </tr>
+                        )}
+                        {intTotal > 0 && (
+                          <tr style={{borderTop:'1px solid #f1f5f9'}}>
+                            <td style={{padding:'9px 12px',fontWeight:700}}>{fcAcctName}</td>
+                            <td style={{padding:'9px 12px',textAlign:'right'}}>{fmtPHP(intTotal)}</td>
+                            <td style={{padding:'9px 12px',textAlign:'right',color:'#94a3b8'}}>—</td>
+                          </tr>
+                        )}
+                        <tr style={{borderTop:'1px solid #f1f5f9'}}>
+                          <td style={{padding:'9px 12px',fontWeight:700}}>{bankAcctName}</td>
+                          <td style={{padding:'9px 12px',textAlign:'right',color:'#94a3b8'}}>—</td>
+                          <td style={{padding:'9px 12px',textAlign:'right'}}>{fmtPHP(totalAmt)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,padding:'14px 20px',borderTop:'1px solid #e5e7eb',background:'#f8fafc',flexShrink:0}}>
+                <button className="btn btn-ghost" style={{color:'#dc2626'}} onClick={()=>setCalVoucherModal(null)} disabled={vSaving}>
+                  Discard Voucher
+                </button>
+                <div style={{display:'flex',gap:8}}>
+                  <button className="btn btn-primary" style={{background:'#0b1220'}} onClick={()=>saveCalVoucher('Pending Review')} disabled={vSaving}>
+                    Submit for Approval
+                  </button>
+                  <button className="btn btn-primary" onClick={()=>saveCalVoucher('Pending')} disabled={vSaving}>
+                    ✓ Save to Draft
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

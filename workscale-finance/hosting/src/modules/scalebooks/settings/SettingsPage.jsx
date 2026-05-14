@@ -1,14 +1,65 @@
 import { useState, useEffect } from 'react';
 import {
   doc, getDoc, setDoc, serverTimestamp,
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, orderBy,
+  collection, onSnapshot, addDoc, updateDoc, deleteDoc, getDocs, writeBatch, query, orderBy,
 } from 'firebase/firestore';
 import { db, auth, storage } from '../../../firebase.js';
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
-const ROLES         = ['VIEWER', 'REVIEWER', 'APPROVER', 'ADMIN'];
+const GLOBAL_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
+const MODULE_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
+// Roles that Admin implicitly includes (all of them)
+const ADMIN_INHERITS = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
+const MODULE_GROUPS = [
+  { group: 'Disbursement', modules: ['Vouchers', 'Approvals', 'Weekly Projections', 'Payment Schedule', 'Disbursements', 'Check Registry'] },
+  { group: 'Accountant',  modules: ['Journal', 'Bank', 'Chart of Accounts', 'Tax', 'Financial Management', 'Fixed Assets'] },
+  { group: 'Billing & AR', modules: ['Billing Book', 'Service Invoices', 'Collections'] },
+];
 const VOUCHER_TYPES = ['PAYMENT', 'PAYROLL', 'FINAL_PAY', 'LOAN'];
 const MONTHS        = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+const MODULE_BACKUP_GROUPS = [
+  { group: 'Disbursement', modules: [
+    { label: 'Vouchers',           collections: ['vouchers'] },
+    { label: 'Weekly Projections', collections: ['weeklyProjections'] },
+    { label: 'Payment Schedule',   collections: ['paymentSchedules'] },
+    { label: 'Disbursements',      collections: ['disbursementReports'] },
+    { label: 'Check Registry',     collections: ['checkRegister', 'checkbookMaster'] },
+  ]},
+  { group: 'Accountant', modules: [
+    { label: 'Journal',              collections: ['journalEntries'] },
+    { label: 'Bank',                 collections: ['dailyBankBalances', 'bankTransactions', 'creditLines', 'bankReconciliations'] },
+    { label: 'Chart of Accounts',    collections: ['accounts'] },
+    { label: 'Tax',                  collections: ['taxEntries', 'taxRates'] },
+    { label: 'Financial Management', collections: [], singleDocs: [{ coll: 'finc', id: 'profile' }] },
+    { label: 'Fixed Assets',         collections: [], singleDocs: [{ coll: 'fixedAssets', id: 'profile' }] },
+  ]},
+  { group: 'Billing & AR', modules: [
+    { label: 'Billing Book',     collections: ['billingStatements'] },
+    { label: 'Service Invoices', collections: ['serviceInvoices'] },
+    { label: 'Collections',      collections: ['collections'] },
+  ]},
+  { group: 'System', modules: [
+    { label: 'Contacts',          collections: ['contacts'] },
+    { label: 'Users & Reference', collections: ['appUsers', 'purposeCategories', 'paymentTerms'] },
+    { label: 'Settings (Config)', collections: [], includeSettings: true },
+  ]},
+];
+const ALL_MODULES_FLAT  = MODULE_BACKUP_GROUPS.flatMap(g => g.modules);
+const ALL_MODULE_LABELS = ALL_MODULES_FLAT.map(m => m.label);
+
+function serializeData(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (obj && typeof obj === 'object' && typeof obj.toDate === 'function') return obj.toDate().toISOString();
+  if (Array.isArray(obj)) return obj.map(serializeData);
+  if (typeof obj === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) out[k] = serializeData(v);
+    return out;
+  }
+  return obj;
+}
 
 const NAV = [
   { group: 'ORGANIZATION SETTINGS', items: [
@@ -24,12 +75,18 @@ const NAV = [
     { id: 'ref-categories',    icon: '🗂️', label: 'Purpose Categories' },
     { id: 'ref-payment-terms', icon: '📅', label: 'Payment Terms' },
   ]},
+  { group: 'DATA MANAGEMENT', items: [
+    { id: 'data-settings', icon: '🗄️', label: 'Data Settings', adminOnly: true },
+  ]},
 ];
 
 const ROLE_STYLE = {
-  ADMIN:    { background:'#fef2f2', borderColor:'#fecaca', color:'#991b1b' },
-  APPROVER: { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
-  REVIEWER: { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
+  Maker:    { background:'#f0f9ff', borderColor:'#bae6fd', color:'#0369a1' },
+  Verifier: { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
+  Approver: { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
+  Poster:   { background:'#fdf4ff', borderColor:'#e9d5ff', color:'#7e22ce' },
+  Admin:    { background:'#fef2f2', borderColor:'#fecaca', color:'#991b1b' },
+  HRBP:     { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
   VIEWER:   { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
 };
 
@@ -38,7 +95,7 @@ const CSS = `
   .sp-sidebar { width:220px; flex-shrink:0; background:#fff; border-right:1px solid #e5e7eb; overflow-y:auto; display:flex; flex-direction:column; }
   .sp-sb-hdr  { padding:18px 16px 14px; border-bottom:1px solid #f1f5f9; }
   .sp-sb-hdr h2 { margin:0; font-size:15px; font-weight:900; color:#0b1220; }
-  .sp-sb-hdr p  { margin:3px 0 0; font-size:11px; color:#94a3b8; }
+  .sp-sb-hdr p  { margin:3px 0 0; font-size:11px; color:#f97316; font-weight:600; }
   .sp-grp-lbl { font-size:9px; font-weight:900; color:#94a3b8; letter-spacing:.1em; text-transform:uppercase; padding:14px 16px 5px; }
   .sp-nav { display:flex; align-items:center; gap:9px; padding:9px 16px; cursor:pointer; font-size:13px; font-weight:500; color:#374151; border-left:3px solid transparent; transition:background .12s; user-select:none; }
   .sp-nav:hover { background:#f8fafc; color:#0b1220; }
@@ -86,6 +143,7 @@ const CSS = `
   .save-bar { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
   .info-box { background:#eff6ff; border:1px solid #bfdbfe; border-radius:10px; padding:10px 14px; font-size:12px; color:#1d4ed8; margin-bottom:16px; }
   .backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
+  .backdrop-fs { padding:0 !important; align-items:stretch !important; }
   .modal    { width:min(480px,98vw); background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
   .modal-h  { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid #e5e7eb; background:#f8fafc; }
   .modal-h strong { font-size:14px; font-weight:900; }
@@ -93,6 +151,12 @@ const CSS = `
   .modal-f  { display:flex; justify-content:flex-end; gap:10px; padding:12px 18px; border-top:1px solid #e5e7eb; }
   .sp-toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; animation:sp-fade .2s; }
   @keyframes sp-fade { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+  .modal-wide { width:min(740px,98vw) !important; }
+  .modal-fs { width:100vw !important; max-width:100vw !important; height:100vh !important; border-radius:0 !important; margin:0 !important; }
+  .modal-fs .modal-b-scroll { flex:1; overflow-y:auto; padding:24px 28px; display:flex; flex-direction:column; gap:16px; }
+  .you-badge  { display:inline-block; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:800; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; flex-shrink:0; }
+  .mod-chip   { display:inline-block; padding:2px 8px; border-radius:6px; font-size:10px; font-weight:600; background:#f1f5f9; color:#374151; border:1px solid #e2e8f0; white-space:nowrap; }
+  .mod-sec-hdr td { background:#f8fafc; font-weight:900; font-size:10px; color:#64748b; letter-spacing:.08em; text-transform:uppercase; padding:8px 12px; border-bottom:1px solid #e5e7eb; }
 `;
 
 function Toggle({ checked, onChange }) {
@@ -118,7 +182,12 @@ export default function SettingsPage() {
   const [saving,        setSaving]        = useState(false);
   const [logoUploading,  setLogoUploading]  = useState(false);
   const [toast,          setToast]          = useState('');
+  const [backupModal,   setBackupModal]   = useState(null);
+  const [restoreModal,  setRestoreModal]  = useState(null);
+  const [resetModal,    setResetModal]    = useState(null);
+  const [dataWorking,   setDataWorking]   = useState(false);
 
+  const { isAdmin } = usePermissions();
   const showToast  = msg => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (msg, fn) => setConfirmModal({ msg, fn });
   const me = auth.currentUser?.email || '';
@@ -185,12 +254,22 @@ export default function SettingsPage() {
 
   const saveUser = async () => {
     if (!userModal?.email?.trim()) return showToast('Email required.');
+    if (!userModal?.fullName?.trim()) return showToast('Full Name required.');
     setSaving(true);
     try {
-      const { isNew, id, ...rest } = userModal;
-      if (isNew) await addDoc(collection(db, 'appUsers'), { ...rest, createdAt:serverTimestamp(), createdBy:me });
-      else       await updateDoc(doc(db, 'appUsers', id),  { ...rest, updatedAt:serverTimestamp(), updatedBy:me });
-      showToast('User saved.'); setUserModal(null);
+      const { isNew, id, _isMeNotSaved, ...rest } = userModal;
+      const treatAsNew = isNew || _isMeNotSaved;
+      const data = {
+        email:        rest.email.trim().toLowerCase(),
+        fullName:     rest.fullName.trim(),
+        workEmail:    (rest.workEmail || '').trim(),
+        roles:        Array.isArray(rest.roles) ? rest.roles : [],
+        moduleAccess: (rest.moduleAccess && typeof rest.moduleAccess === 'object') ? rest.moduleAccess : {},
+        signatureUrl: rest.signatureUrl || '',
+      };
+      if (treatAsNew) await addDoc(collection(db, 'appUsers'), { ...data, createdAt:serverTimestamp(), createdBy:me });
+      else            await updateDoc(doc(db, 'appUsers', id),  { ...data, updatedAt:serverTimestamp(), updatedBy:me });
+      showToast(treatAsNew ? 'User saved.' : 'User saved.'); setUserModal(null);
     } catch(e) { showToast('Error: ' + e.message); }
     setSaving(false);
   };
@@ -296,37 +375,130 @@ export default function SettingsPage() {
   }
 
   function UsersRoles() {
+    const meEmail = (auth.currentUser?.email || '').toLowerCase();
+    const meInList = users.some(u => (u.email || '').toLowerCase() === meEmail);
+    const displayUsers = meInList ? users : [
+      {
+        id: '__me__',
+        email: auth.currentUser?.email || '',
+        fullName: auth.currentUser?.displayName || '',
+        workEmail: '',
+        roles: ['Admin'],
+        moduleAccess: {},
+        signatureUrl: '',
+        _isMeNotSaved: true,
+      },
+      ...users,
+    ];
+
+    const openInvite = () => setUserModal({
+      isNew: true, id: null,
+      email: '', fullName: '', workEmail: '',
+      roles: [], moduleAccess: {}, signatureUrl: '',
+    });
+
     return (
       <>
-        <div className="sp-ch"><h1>Users & Roles</h1><p>Control who can access the Finance Portal and what they can do.</p></div>
-        <div className="sp-card">
-          <div className="info-box"><strong>Role guide:</strong>&nbsp; VIEWER = read-only &nbsp;·&nbsp; REVIEWER = can comment &nbsp;·&nbsp; APPROVER = can approve / reject vouchers &nbsp;·&nbsp; ADMIN = full access</div>
-          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
-            <span style={{fontSize:12,color:'#64748b'}}>{users.length} user{users.length!==1?'s':''} configured</span>
-            <button className="btn btn-primary btn-sm" onClick={()=>setUserModal({isNew:true,id:null,email:'',role:'VIEWER',displayName:''})}>+ Add User</button>
+        <div className="sp-ch">
+          <h1>Users &amp; Roles</h1>
+          <p>Control who can access the Finance Portal and what they can do. Only invited users can log in.</p>
+        </div>
+        <div className="sp-card" style={{overflow:'hidden'}}>
+          <div className="info-box">
+            <strong>Role guide:</strong>&nbsp;
+            <strong style={{color:'#0369a1'}}>Maker</strong> = create/edit drafts &nbsp;·&nbsp;
+            <strong style={{color:'#065f46'}}>Verifier</strong> = review documents &nbsp;·&nbsp;
+            <strong style={{color:'#1d4ed8'}}>Approver</strong> = approve / reject &nbsp;·&nbsp;
+            <strong style={{color:'#7e22ce'}}>Poster</strong> = post to ledger &nbsp;·&nbsp;
+            <strong style={{color:'#991b1b'}}>Admin</strong> = full access (inherits Maker + Verifier + Approver + Poster for <em>all</em> modules)
           </div>
-          <table>
-            <thead><tr><th>EMAIL</th><th>DISPLAY NAME</th><th>ROLE</th><th style={{textAlign:'center'}}>ACTIONS</th></tr></thead>
-            <tbody>
-              {users.length===0&&<tr><td colSpan={4} style={{padding:28,textAlign:'center',color:'#94a3b8'}}>No users configured.</td></tr>}
-              {users.map(u=>{
-                const rs=ROLE_STYLE[u.role]||ROLE_STYLE.VIEWER;
-                return (
-                  <tr key={u.id}>
-                    <td style={{fontWeight:600}}>{u.email}</td>
-                    <td style={{color:'#64748b'}}>{u.displayName||'—'}</td>
-                    <td><span className="pill" style={rs}>{u.role||'VIEWER'}</span></td>
-                    <td style={{textAlign:'center'}}>
-                      <div style={{display:'flex',gap:4,justifyContent:'center'}}>
-                        <button className="btn btn-ghost btn-xs" onClick={()=>setUserModal({isNew:false,...u})}>Edit</button>
-                        <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}} onClick={()=>del('appUsers',u.id,u.email)}>Remove</button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+            <span style={{fontSize:12,color:'#64748b'}}>{displayUsers.length} user{displayUsers.length!==1?'s':''} configured</span>
+            <button className="btn btn-primary btn-sm" onClick={openInvite}>+ Invite User</button>
+          </div>
+          <div style={{overflowX:'auto'}}>
+            <table style={{minWidth:900}}>
+              <thead>
+                <tr>
+                  <th>GOOGLE ACCOUNT EMAIL</th>
+                  <th>FULL NAME</th>
+                  <th>WORK EMAIL</th>
+                  <th>ROLES</th>
+                  <th>MODULE ACCESS</th>
+                  <th>SIGNATURE</th>
+                  <th style={{textAlign:'center'}}>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayUsers.length === 0 && (
+                  <tr><td colSpan={7} style={{padding:28,textAlign:'center',color:'#94a3b8'}}>No users configured.</td></tr>
+                )}
+                {displayUsers.map(u => {
+                  const isMe = (u.email || '').toLowerCase() === meEmail;
+                  const userRoles = Array.isArray(u.roles) ? u.roles : u.role ? [u.role] : [];
+                  const modAccess = (u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {};
+                  const accessedModules = Object.entries(modAccess).filter(([, roles]) => Array.isArray(roles) && roles.length > 0);
+                  return (
+                    <tr key={u.id}>
+                      <td>
+                        <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                          <span style={{fontWeight:600}}>{u.email}</span>
+                          {isMe && <span className="you-badge">You</span>}
+                          {u._isMeNotSaved && <span style={{fontSize:10,color:'#f97316',fontWeight:700}}>(unsaved)</span>}
+                        </div>
+                      </td>
+                      <td style={{fontWeight:500}}>{u.fullName || u.displayName || '—'}</td>
+                      <td style={{color:'#64748b',fontSize:12}}>{u.workEmail || '—'}</td>
+                      <td>
+                        <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                          {userRoles.length === 0
+                            ? <span style={{color:'#94a3b8',fontSize:12}}>—</span>
+                            : userRoles.map(r => {
+                                const rs = ROLE_STYLE[r] || ROLE_STYLE.VIEWER;
+                                return <span key={r} className="pill" style={rs}>{r}</span>;
+                              })
+                          }
+                        </div>
+                      </td>
+                      <td>
+                        {accessedModules.length === 0
+                          ? <span style={{color:'#94a3b8',fontSize:12}}>—</span>
+                          : userRoles.includes('Admin')
+                            ? <span style={{fontSize:12,fontWeight:700,color:'#991b1b'}}>All modules</span>
+                            : <span style={{fontSize:12,color:'#374151',fontWeight:600}}>{accessedModules.length} module{accessedModules.length !== 1 ? 's' : ''}
+                                <span style={{display:'block',fontSize:11,color:'#94a3b8',fontWeight:400,marginTop:2,maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+                                  title={accessedModules.map(([m]) => m).join(', ')}>
+                                  {accessedModules.map(([m]) => m).join(', ')}
+                                </span>
+                              </span>
+                        }
+                      </td>
+                      <td>
+                        {u.signatureUrl
+                          ? <a href={u.signatureUrl} target="_blank" rel="noreferrer" style={{color:'#f97316',fontSize:12,fontWeight:600}}>View ↗</a>
+                          : <span style={{color:'#94a3b8',fontSize:12}}>None</span>
+                        }
+                      </td>
+                      <td style={{textAlign:'center'}}>
+                        <div style={{display:'flex',gap:4,justifyContent:'center'}}>
+                          <button className="btn btn-ghost btn-xs" onClick={() => setUserModal({
+                            isNew: false, ...u,
+                            roles:        Array.isArray(u.roles) ? u.roles : u.role ? [u.role] : [],
+                            moduleAccess: (u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {},
+                            fullName:     u.fullName || u.displayName || '',
+                          })}>✏️ Edit</button>
+                          {!isMe && (
+                            <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}}
+                              onClick={() => del('appUsers', u.id, u.email)}>🗑</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       </>
     );
@@ -502,6 +674,184 @@ export default function SettingsPage() {
     );
   }
 
+  // ── Data helpers ─────────────────────────────────────────────────────────
+  const doBackup = async (selected) => {
+    setDataWorking(true);
+    try {
+      const selectedModules = ALL_MODULES_FLAT.filter(m => selected.has(m.label));
+      const backupCollections = {};
+      const backupSingleDocs = {};
+      for (const mod of selectedModules) {
+        for (const collName of mod.collections) {
+          const snap = await getDocs(collection(db, collName));
+          backupCollections[collName] = snap.docs.map(d => ({ id: d.id, ...serializeData(d.data()) }));
+        }
+        for (const { coll, id } of (mod.singleDocs || [])) {
+          const snap = await getDoc(doc(db, coll, id));
+          if (snap.exists()) backupSingleDocs[`${coll}/${id}`] = serializeData(snap.data());
+        }
+      }
+      const settingsData = {};
+      if (selected.has('Settings (Config)')) {
+        const profSnap = await getDoc(doc(db, 'settings', 'profile'));
+        const modSnap  = await getDoc(doc(db, 'settings', 'modules'));
+        if (profSnap.exists()) settingsData.profile = serializeData(profSnap.data());
+        if (modSnap.exists())  settingsData.modules  = serializeData(modSnap.data());
+      }
+      const backup = {
+        version: '1.0',
+        app: 'workscale-finance',
+        exportedAt: new Date().toISOString(),
+        exportedBy: me,
+        modules: [...selected],
+        collections: backupCollections,
+        singleDocs: backupSingleDocs,
+        settings: settingsData,
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url;
+      a.download = `workscale-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('Backup downloaded successfully.');
+      setBackupModal(null);
+    } catch (e) { showToast('Backup failed: ' + e.message); }
+    setDataWorking(false);
+  };
+
+  const doRestore = async (parsed) => {
+    setDataWorking(true);
+    try {
+      for (const [collName, docs] of Object.entries(parsed.collections || {})) {
+        for (let i = 0; i < docs.length; i += 499) {
+          const batch = writeBatch(db);
+          docs.slice(i, i + 499).forEach(({ id, ...data }) => {
+            batch.set(doc(db, collName, id), data);
+          });
+          await batch.commit();
+        }
+      }
+      for (const [path, data] of Object.entries(parsed.singleDocs || {})) {
+        const [coll, id] = path.split('/');
+        await setDoc(doc(db, coll, id), data, { merge: true });
+      }
+      if (parsed.settings?.profile) await setDoc(doc(db, 'settings', 'profile'), parsed.settings.profile, { merge: true });
+      if (parsed.settings?.modules)  await setDoc(doc(db, 'settings', 'modules'),  parsed.settings.modules,  { merge: true });
+      showToast('Data restored successfully.');
+      setRestoreModal(null);
+    } catch (e) { showToast('Restore failed: ' + e.message); }
+    setDataWorking(false);
+  };
+
+  const doReset = async () => {
+    setDataWorking(true);
+    try {
+      for (const mod of ALL_MODULES_FLAT) {
+        for (const collName of mod.collections) {
+          const snap = await getDocs(collection(db, collName));
+          const refs = snap.docs.map(d => d.ref);
+          for (let i = 0; i < refs.length; i += 499) {
+            const batch = writeBatch(db);
+            refs.slice(i, i + 499).forEach(ref => batch.delete(ref));
+            await batch.commit();
+          }
+        }
+        for (const { coll, id } of (mod.singleDocs || [])) {
+          try { await deleteDoc(doc(db, coll, id)); } catch (_) {}
+        }
+      }
+      try { await deleteDoc(doc(db, 'settings', 'profile')); } catch (_) {}
+      try { await deleteDoc(doc(db, 'settings', 'modules')); } catch (_) {}
+      showToast('All data has been permanently deleted.');
+      setResetModal(null);
+    } catch (e) { showToast('Reset failed: ' + e.message); }
+    setDataWorking(false);
+  };
+
+  // ── DataSettings section ──────────────────────────────────────────────────
+  function DataSettings() {
+    if (!isAdmin) {
+      return (
+        <>
+          <div className="sp-ch"><h1>Data Settings</h1><p>Backup, restore, or permanently reset all data across the portal.</p></div>
+          <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:12,padding:'20px 22px',display:'flex',alignItems:'flex-start',gap:14}}>
+            <span style={{fontSize:22,flexShrink:0}}>🔒</span>
+            <div>
+              <strong style={{fontSize:14,color:'#991b1b',display:'block',marginBottom:4}}>Admin Only</strong>
+              <span style={{fontSize:13,color:'#b91c1c'}}>Only Admins can access Data Settings.</span>
+            </div>
+          </div>
+        </>
+      );
+    }
+    return (
+      <>
+        <div className="sp-ch">
+          <h1>Data Settings</h1>
+          <p>Backup, restore, or permanently reset all data across the portal. Accessible to Admins only.</p>
+        </div>
+
+        {/* Backup */}
+        <div className="sp-card">
+          <div className="sp-card-title">Backup Data</div>
+          <p style={{margin:'0 0 14px',fontSize:13,color:'#374151',lineHeight:1.6}}>
+            Download a full or selective backup of your data as a JSON file. The backup is compatible with the Restore Data feature.
+          </p>
+          <button className="btn btn-primary btn-sm" onClick={() => setBackupModal({ selected: new Set(ALL_MODULE_LABELS) })}>
+            📥 Backup Data
+          </button>
+        </div>
+
+        {/* Restore */}
+        <div className="sp-card">
+          <div className="sp-card-title">Restore Data</div>
+          <p style={{margin:'0 0 14px',fontSize:13,color:'#374151',lineHeight:1.6}}>
+            Restore data from a previously exported backup file. Existing records with the same ID will be overwritten; new records will be added.
+          </p>
+          <label className="btn btn-ghost btn-sm" style={{cursor:'pointer',display:'inline-flex',alignItems:'center',gap:6}}>
+            📤 Select Backup File
+            <input type="file" accept=".json" style={{display:'none'}} onChange={e => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = ev => {
+                try {
+                  const parsed = JSON.parse(ev.target.result);
+                  if (!parsed.version || parsed.app !== 'workscale-finance') {
+                    showToast('Invalid backup file. Only Workscale Finance backups are accepted.');
+                    return;
+                  }
+                  setRestoreModal({ file, parsed });
+                } catch { showToast('Could not parse the file. Ensure it is a valid JSON backup.'); }
+              };
+              reader.readAsText(file);
+              e.target.value = '';
+            }} />
+          </label>
+        </div>
+
+        {/* Complete Reset */}
+        <div className="sp-card" style={{borderColor:'#fecaca'}}>
+          <div className="sp-card-title" style={{color:'#ef4444'}}>⚠️ Complete Reset Data</div>
+          <p style={{margin:'0 0 12px',fontSize:13,color:'#374151',lineHeight:1.6}}>
+            Permanently delete <strong>all data</strong> across every module — vouchers, journal entries, bank records, billing, invoices, collections, contacts, and settings.{' '}
+            <strong style={{color:'#dc2626'}}>This action cannot be undone.</strong>
+          </p>
+          <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:'10px 14px',fontSize:12,color:'#991b1b',marginBottom:14}}>
+            We strongly recommend downloading a backup before performing a reset.
+          </div>
+          <button className="btn btn-danger btn-sm" onClick={() => setResetModal({ confirmText: '' })}>
+            🗑️ Complete Reset Data
+          </button>
+        </div>
+      </>
+    );
+  }
+
   const SECTIONS = {
     'org-profile':       OrgProfile,
     'users-roles':       UsersRoles,
@@ -510,6 +860,7 @@ export default function SettingsPage() {
     'mod-checks':        ModChecks,
     'ref-categories':    RefCategories,
     'ref-payment-terms': RefPaymentTerms,
+    'data-settings':     DataSettings,
   };
 
   return (
@@ -524,7 +875,9 @@ export default function SettingsPage() {
         {NAV.map(group => (
           <div key={group.group}>
             <div className="sp-grp-lbl">{group.group}</div>
-            {group.items.map(item => (
+            {group.items
+              .filter(item => !item.adminOnly || isAdmin)
+              .map(item => (
               <div key={item.id}
                 className={`sp-nav${activeSection===item.id?' sp-nav-on':''}`}
                 onClick={()=>setActiveSection(item.id)}>
@@ -541,24 +894,174 @@ export default function SettingsPage() {
       </div>
 
       {userModal && (
-        <div className="backdrop" onClick={()=>setUserModal(null)}>
-          <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="backdrop backdrop-fs" onClick={()=>setUserModal(null)}>
+          <div className="modal modal-fs" onClick={e=>e.stopPropagation()}>
             <div className="modal-h">
-              <strong>{userModal.isNew?'Add User':'Edit User'}</strong>
+              <strong>{userModal.isNew ? '✉️ Invite User' : '✏️ Edit User'}</strong>
               <button className="btn btn-ghost btn-sm" onClick={()=>setUserModal(null)}>✕</button>
             </div>
-            <div className="modal-b">
-              <div className="field"><label>Email *</label><input type="email" value={userModal.email} onChange={e=>setUserModal(m=>({...m,email:e.target.value}))} autoFocus /></div>
-              <div className="field"><label>Display Name</label><input value={userModal.displayName||''} onChange={e=>setUserModal(m=>({...m,displayName:e.target.value}))} /></div>
-              <div className="field"><label>Role</label>
-                <select value={userModal.role} onChange={e=>setUserModal(m=>({...m,role:e.target.value}))}>
-                  {ROLES.map(r=><option key={r}>{r}</option>)}
-                </select>
+            <div className="modal-b-scroll">
+
+              {/* ── Basic Information ── */}
+              <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.08em',textTransform:'uppercase',paddingBottom:6,borderBottom:'1px solid #f1f5f9'}}>
+                Basic Information
               </div>
+              <div className="grid2">
+                <div className="field col2">
+                  <label>Google Account Email *</label>
+                  <input type="email" value={userModal.email}
+                    disabled={!userModal.isNew}
+                    onChange={e=>setUserModal(m=>({...m,email:e.target.value}))}
+                    placeholder="user@gmail.com" autoFocus={userModal.isNew} />
+                  {userModal.isNew && <span style={{fontSize:11,color:'#94a3b8'}}>Must be a valid Google / Gmail account. The user will log in with this email.</span>}
+                </div>
+                <div className="field">
+                  <label>Full Name *</label>
+                  <input value={userModal.fullName||''} onChange={e=>setUserModal(m=>({...m,fullName:e.target.value}))}
+                    placeholder="First M. Last" autoFocus={!userModal.isNew} />
+                </div>
+                <div className="field">
+                  <label>Work Email</label>
+                  <input type="email" value={userModal.workEmail||''} onChange={e=>setUserModal(m=>({...m,workEmail:e.target.value}))}
+                    placeholder="user@company.com" />
+                </div>
+              </div>
+
+              {/* ── Roles ── */}
+              <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.08em',textTransform:'uppercase',paddingBottom:6,borderBottom:'1px solid #f1f5f9',marginTop:4}}>
+                Roles
+              </div>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                {GLOBAL_ROLES.map(r => {
+                  const active = (userModal.roles||[]).includes(r);
+                  const rs = ROLE_STYLE[r] || ROLE_STYLE.VIEWER;
+                  return (
+                    <button key={r} type="button"
+                      onClick={()=>setUserModal(m=>{
+                        const adding = !active;
+                        const newRoles = adding ? [...(m.roles||[]),r] : (m.roles||[]).filter(x=>x!==r);
+                        const allMods = MODULE_GROUPS.flatMap(g => g.modules);
+                        let newModuleAccess;
+                        if (r === 'Admin') {
+                          // Admin on  → grant every role to every module
+                          // Admin off → clear every module access (clean slate)
+                          newModuleAccess = Object.fromEntries(
+                            allMods.map(mod => [mod, adding ? [...ADMIN_INHERITS] : []])
+                          );
+                        } else {
+                          // Non-admin role: add/remove only that specific role per module
+                          newModuleAccess = Object.fromEntries(allMods.map(mod => {
+                            const cur = ((m.moduleAccess||{})[mod]) || [];
+                            return [mod, adding ? (cur.includes(r) ? cur : [...cur, r]) : cur.filter(x=>x!==r)];
+                          }));
+                        }
+                        return { ...m, roles: newRoles, moduleAccess: newModuleAccess };
+                      })}
+                      style={{
+                        ...rs,
+                        cursor:'pointer',
+                        border: `2px solid ${active ? rs.borderColor : '#e5e7eb'}`,
+                        background: active ? rs.background : '#f8fafc',
+                        color: active ? rs.color : '#94a3b8',
+                        fontWeight: active ? 800 : 500,
+                        padding:'5px 14px', fontSize:12, borderRadius:999,
+                        transition:'all .12s',
+                      }}>
+                      {active ? '✓ ' : ''}{r}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* ── Module Access ── */}
+              <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.08em',textTransform:'uppercase',paddingBottom:6,borderBottom:'1px solid #f1f5f9',marginTop:4}}>
+                Module Access &amp; Permissions
+              </div>
+
+              {/* Admin full-access banner */}
+              {(userModal.roles||[]).includes('Admin') && (
+                <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:'10px 14px',fontSize:12,color:'#991b1b',display:'flex',alignItems:'center',gap:8}}>
+                  <span style={{fontSize:16}}>🛡️</span>
+                  <div>
+                    <strong>Admin — Full Access</strong>
+                    <div style={{fontSize:11,color:'#b91c1c',marginTop:1}}>
+                      Admin inherits Maker, Verifier, Approver, and Poster for all modules. All permissions are automatically granted.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div style={{overflowX:'auto',border:'1px solid #e5e7eb',borderRadius:10}}>
+                <table style={{minWidth:520,fontSize:12,margin:0}}>
+                  <thead>
+                    <tr>
+                      <th style={{width:160,fontSize:10,background:'#f8fafc'}}>MODULE</th>
+                      {MODULE_ROLES.map(r=>(
+                        <th key={r} style={{textAlign:'center',width:76,fontSize:10,background:'#f8fafc'}}>{r.toUpperCase()}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {MODULE_GROUPS.flatMap(({group, modules}) => [
+                      <tr key={`grp-${group}`} className="mod-sec-hdr">
+                        <td colSpan={MODULE_ROLES.length + 1}>{group}</td>
+                      </tr>,
+                      ...modules.map(mod => {
+                        const isAdminUser = (userModal.roles||[]).includes('Admin');
+                        const modRoles = isAdminUser ? [...ADMIN_INHERITS] : (((userModal.moduleAccess||{})[mod]) || []);
+                        return (
+                          <tr key={mod} style={isAdminUser?{opacity:.75}:{}}>
+                            <td style={{paddingLeft:20,fontWeight:500,color:'#374151'}}>{mod}</td>
+                            {MODULE_ROLES.map(r => {
+                              const checked = modRoles.includes(r);
+                              return (
+                                <td key={r} style={{textAlign:'center'}}>
+                                  <input type="checkbox" checked={checked}
+                                    disabled={isAdminUser}
+                                    title={isAdminUser ? 'Granted via Admin role' : undefined}
+                                    onChange={()=>{
+                                      if (isAdminUser) return;
+                                      const cur = ((userModal.moduleAccess||{})[mod]) || [];
+                                      const next = checked ? cur.filter(x=>x!==r) : [...cur,r];
+                                      setUserModal(m=>({
+                                        ...m,
+                                        moduleAccess:{...(m.moduleAccess||{}),[mod]:next},
+                                      }));
+                                    }}
+                                    style={{width:15,height:15,cursor:isAdminUser?'not-allowed':'pointer',accentColor:'#f97316'}}
+                                  />
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      }),
+                    ])}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* ── Signature ── */}
+              <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.08em',textTransform:'uppercase',paddingBottom:6,borderBottom:'1px solid #f1f5f9',marginTop:4}}>
+                Signature
+              </div>
+              <div className="field">
+                <label>Signature Image URL</label>
+                <input value={userModal.signatureUrl||''} onChange={e=>setUserModal(m=>({...m,signatureUrl:e.target.value}))}
+                  placeholder="https://…" />
+                {userModal.signatureUrl && (
+                  <img src={userModal.signatureUrl} alt="signature preview"
+                    style={{maxHeight:56,marginTop:6,border:'1px solid #e5e7eb',borderRadius:8,padding:4,objectFit:'contain'}}
+                    onError={e=>{e.target.style.display='none';}} />
+                )}
+              </div>
+
             </div>
             <div className="modal-f">
               <button className="btn btn-ghost" onClick={()=>setUserModal(null)}>Cancel</button>
-              <button className="btn btn-primary" disabled={saving} onClick={saveUser}>{saving?'Saving…':'Save User'}</button>
+              <button className="btn btn-primary" disabled={saving} onClick={saveUser}>
+                {saving ? 'Saving…' : userModal.isNew ? 'Send Invite' : 'Save Changes'}
+              </button>
             </div>
           </div>
         </div>
@@ -619,6 +1122,134 @@ export default function SettingsPage() {
       )}
 
       {toast && <div className="sp-toast">{toast}</div>}
+
+      {/* ── Backup Modal ── */}
+      {backupModal && (
+        <div className="backdrop" onClick={() => !dataWorking && setBackupModal(null)}>
+          <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
+            <div className="modal-h">
+              <strong>📥 Backup Data</strong>
+              <button className="btn btn-ghost btn-sm" disabled={dataWorking} onClick={() => setBackupModal(null)}>✕</button>
+            </div>
+            <div className="modal-b" style={{maxHeight:'55vh',overflowY:'auto'}}>
+              <p style={{margin:0,fontSize:13,color:'#374151',lineHeight:1.5}}>
+                Select the modules to include in the backup. The file can be used with <strong>Restore Data</strong>.
+              </p>
+              <div style={{display:'flex',gap:8}}>
+                <button className="btn btn-ghost btn-xs" onClick={() => setBackupModal(m => ({ ...m, selected: new Set(ALL_MODULE_LABELS) }))}>Select All</button>
+                <button className="btn btn-ghost btn-xs" onClick={() => setBackupModal(m => ({ ...m, selected: new Set() }))}>Deselect All</button>
+              </div>
+              {MODULE_BACKUP_GROUPS.map(grp => (
+                <div key={grp.group}>
+                  <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.08em',textTransform:'uppercase',marginBottom:8,paddingBottom:4,borderBottom:'1px solid #f1f5f9'}}>{grp.group}</div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px 20px',marginBottom:12}}>
+                    {grp.modules.map(mod => (
+                      <label key={mod.label} style={{display:'flex',alignItems:'center',gap:7,cursor:'pointer',fontSize:13,color:'#374151',padding:'2px 0'}}>
+                        <input type="checkbox"
+                          checked={backupModal.selected.has(mod.label)}
+                          onChange={e => {
+                            const next = new Set(backupModal.selected);
+                            if (e.target.checked) next.add(mod.label); else next.delete(mod.label);
+                            setBackupModal(m => ({ ...m, selected: next }));
+                          }}
+                          style={{width:14,height:14,accentColor:'#f97316',cursor:'pointer'}}
+                        />
+                        {mod.label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="modal-f">
+              <button className="btn btn-ghost" disabled={dataWorking} onClick={() => setBackupModal(null)}>Cancel</button>
+              <button className="btn btn-primary" disabled={dataWorking || backupModal.selected.size === 0} onClick={() => doBackup(backupModal.selected)}>
+                {dataWorking ? 'Preparing…' : `📥 Download Backup (${backupModal.selected.size} module${backupModal.selected.size !== 1 ? 's' : ''})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Restore Modal ── */}
+      {restoreModal && (() => {
+        const { parsed } = restoreModal;
+        const totalRecords = Object.values(parsed.collections || {}).reduce((s, docs) => s + docs.length, 0);
+        const settingsKeys = Object.keys(parsed.settings || {});
+        return (
+          <div className="backdrop" onClick={() => !dataWorking && setRestoreModal(null)}>
+            <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
+              <div className="modal-h">
+                <strong>📤 Restore Data</strong>
+                <button className="btn btn-ghost btn-sm" disabled={dataWorking} onClick={() => setRestoreModal(null)}>✕</button>
+              </div>
+              <div className="modal-b">
+                <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:10,padding:'12px 14px',fontSize:12,color:'#92400e',lineHeight:1.6}}>
+                  ⚠️ <strong>Merge restore:</strong> Existing records with the same ID will be overwritten. Records not in the backup will not be removed.
+                </div>
+                <div style={{background:'#f8fafc',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 16px',fontSize:13}}>
+                  <div style={{fontWeight:800,color:'#0b1220',marginBottom:6}}>Backup Summary</div>
+                  <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:'5px 14px',color:'#374151'}}>
+                    <span style={{color:'#94a3b8',fontSize:12}}>File</span><span style={{fontWeight:600}}>{restoreModal.file.name}</span>
+                    <span style={{color:'#94a3b8',fontSize:12}}>Exported</span><span>{parsed.exportedAt ? new Date(parsed.exportedAt).toLocaleString() : '—'}</span>
+                    <span style={{color:'#94a3b8',fontSize:12}}>Exported By</span><span>{parsed.exportedBy || '—'}</span>
+                    <span style={{color:'#94a3b8',fontSize:12}}>Modules</span><span>{(parsed.modules || []).join(', ') || '—'}</span>
+                    <span style={{color:'#94a3b8',fontSize:12}}>Total Records</span><span style={{fontWeight:700,color:'#f97316'}}>{totalRecords.toLocaleString()}</span>
+                    {settingsKeys.length > 0 && <><span style={{color:'#94a3b8',fontSize:12}}>Settings</span><span>{settingsKeys.join(', ')}</span></>}
+                  </div>
+                </div>
+              </div>
+              <div className="modal-f">
+                <button className="btn btn-ghost" disabled={dataWorking} onClick={() => setRestoreModal(null)}>Cancel</button>
+                <button className="btn btn-primary" disabled={dataWorking} onClick={() => doRestore(parsed)}>
+                  {dataWorking ? 'Restoring…' : '📤 Restore Now'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Reset Modal ── */}
+      {resetModal && (
+        <div className="backdrop" onClick={() => !dataWorking && setResetModal(null)}>
+          <div style={{width:'min(500px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e => e.stopPropagation()}>
+            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#fef2f2',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <strong style={{fontSize:14,fontWeight:900,color:'#991b1b'}}>⚠️ Complete Reset Data</strong>
+              <button className="btn btn-ghost btn-sm" disabled={dataWorking} onClick={() => setResetModal(null)}>✕</button>
+            </div>
+            <div style={{padding:'20px 20px 14px'}}>
+              <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:'12px 14px',marginBottom:16,fontSize:13,color:'#991b1b',lineHeight:1.6}}>
+                <strong>This will permanently delete ALL data across every module:</strong>
+                <ul style={{margin:'8px 0 0',paddingLeft:18,fontSize:12,color:'#b91c1c',lineHeight:1.8}}>
+                  <li>All vouchers, approvals, projections, payment schedules, disbursements, checks</li>
+                  <li>All journal entries, bank records, reconciliations, accounts (COA), tax entries, financial management (loans), fixed assets</li>
+                  <li>All billing statements, service invoices, collections</li>
+                  <li>All contacts, users, purpose categories, payment terms, and settings</li>
+                </ul>
+              </div>
+              <div className="field">
+                <label>Type <strong>RESET</strong> to confirm</label>
+                <input
+                  value={resetModal.confirmText}
+                  onChange={e => setResetModal(m => ({ ...m, confirmText: e.target.value }))}
+                  placeholder="Type RESET here"
+                  autoFocus
+                  style={{borderColor: resetModal.confirmText === 'RESET' ? '#ef4444' : undefined}}
+                />
+              </div>
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
+              <button className="btn btn-ghost" disabled={dataWorking} onClick={() => setResetModal(null)}>Cancel</button>
+              <button className="btn btn-danger"
+                disabled={resetModal.confirmText !== 'RESET' || dataWorking}
+                onClick={doReset}>
+                {dataWorking ? 'Deleting all data…' : '🗑️ Delete All Data'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

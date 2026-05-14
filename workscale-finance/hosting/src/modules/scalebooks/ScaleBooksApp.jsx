@@ -23,6 +23,9 @@ import ServiceInvoicesPage from './invoices/ServiceInvoicesPage.jsx';
 import CollectionsPage     from './collections/CollectionsPage.jsx';
 import SettingsPage        from './settings/SettingsPage.jsx';
 
+import { PermissionsProvider, usePermissions } from '../../contexts/PermissionsContext.jsx';
+import AccessDenied from '../../components/AccessDenied.jsx';
+
 // ── Minimal SVG icon set (Lucide-style stroke icons) ─────
 const ICONS = {
   dashboard: <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
@@ -64,48 +67,50 @@ function Ico({ name, size = 15 }) {
 }
 
 // ── Navigation groups ─────────────────────────────────────
+// `module` maps to the canonical module name in Firestore moduleAccess.
+// null means always accessible (Dashboard).
 const NAV_GROUPS = [
   {
     key: 'home', label: null,
     items: [
-      { label: 'Dashboard', icon: 'dashboard', path: '' },
+      { label: 'Dashboard', icon: 'dashboard', path: '', module: null },
     ],
   },
   {
     key: 'disbursement', label: 'Disbursement',
     items: [
-      { label: 'Vouchers',           icon: 'voucher',  path: 'vouchers' },
-      { label: 'Approvals',          icon: 'approval', path: 'approvals' },
-      { label: 'Weekly Projections', icon: 'calendar', path: 'projections' },
-      { label: 'Payment Schedule',   icon: 'schedule', path: 'pay-schedule' },
-      { label: 'Disbursements',      icon: 'send',     path: 'disbursements' },
-      { label: 'Check Registry',     icon: 'pen',      path: 'checks' },
+      { label: 'Vouchers',           icon: 'voucher',  path: 'vouchers',       module: 'Vouchers' },
+      { label: 'Approvals',          icon: 'approval', path: 'approvals',       module: 'Approvals' },
+      { label: 'Weekly Projections', icon: 'calendar', path: 'projections',     module: 'Weekly Projections' },
+      { label: 'Payment Schedule',   icon: 'schedule', path: 'pay-schedule',    module: 'Payment Schedule' },
+      { label: 'Disbursements',      icon: 'send',     path: 'disbursements',   module: 'Disbursements' },
+      { label: 'Check Registry',     icon: 'pen',      path: 'checks',          module: 'Check Registry' },
     ],
   },
   {
     key: 'accountant', label: 'Accountant',
     items: [
-      { label: 'Journal',           icon: 'journal', path: 'journal' },
-      { label: 'Bank',              icon: 'bank',    path: 'bank' },
-      { label: 'Chart of Accounts', icon: 'coa',     path: 'coa' },
-      { label: 'Tax',               icon: 'tax',     path: 'tax' },
-      { label: 'Financial Mgmt',    icon: 'chart',   path: 'financial' },
-      { label: 'Fixed Assets',      icon: 'assets',  path: 'assets' },
+      { label: 'Journal',           icon: 'journal', path: 'journal',   module: 'Journal' },
+      { label: 'Bank',              icon: 'bank',    path: 'bank',      module: 'Bank' },
+      { label: 'Chart of Accounts', icon: 'coa',     path: 'coa',       module: 'Chart of Accounts' },
+      { label: 'Tax',               icon: 'tax',     path: 'tax',       module: 'Tax' },
+      { label: 'Financial Mgmt',    icon: 'chart',   path: 'financial', module: 'Financial Management' },
+      { label: 'Fixed Assets',      icon: 'assets',  path: 'assets',    module: 'Fixed Assets' },
     ],
   },
   {
     key: 'billing', label: 'Billing & AR',
     items: [
-      { label: 'Billing Book',     icon: 'billing', path: 'billing' },
-      { label: 'Service Invoices', icon: 'invoice', path: 'invoices' },
-      { label: 'Collections',      icon: 'wallet',  path: 'collections' },
+      { label: 'Billing Book',     icon: 'billing', path: 'billing',     module: 'Billing Book' },
+      { label: 'Service Invoices', icon: 'invoice', path: 'invoices',    module: 'Service Invoices' },
+      { label: 'Collections',      icon: 'wallet',  path: 'collections', module: 'Collections' },
     ],
   },
   {
     key: 'system', label: 'System',
     items: [
-      { label: 'Contacts', icon: 'users',    path: 'contacts' },
-      { label: 'Settings', icon: 'settings', path: 'settings' },
+      { label: 'Contacts', icon: 'users',    path: 'contacts', module: 'Contacts' },
+      { label: 'Settings', icon: 'settings', path: 'settings', module: 'Settings' },
     ],
   },
 ];
@@ -144,7 +149,7 @@ const CSS = `
   .sb-logo img { width:100%; height:100%; object-fit:contain; background:#fff; padding:2px; box-sizing:border-box; }
   .sb-brand-txt { flex:1; overflow:hidden; }
   .sb-title { display:block; font-size:12px; font-weight:900; letter-spacing:.04em; color:#f1f5f9; white-space:nowrap; }
-  .sb-sub   { display:block; font-size:9.5px; color:#475569; white-space:nowrap; margin-top:1px; letter-spacing:.02em; }
+  .sb-sub   { display:block; font-size:9.5px; color:#f97316; font-weight:600; white-space:nowrap; margin-top:1px; letter-spacing:.02em; }
   .sb-tog {
     background:none; border:none; color:#64748b; cursor:pointer;
     display:flex; align-items:center; justify-content:center;
@@ -265,6 +270,30 @@ const CSS = `
 
 // ── Component ─────────────────────────────────────────────
 export default function ScaleBooksApp() {
+  return (
+    <PermissionsProvider>
+      <ScaleBooksAppInner />
+    </PermissionsProvider>
+  );
+}
+
+// ── Route-level permission guard ──────────────────────────
+function ModuleGuard({ module: moduleName, children }) {
+  const { hasAccess, loading } = usePermissions();
+  if (loading) {
+    return (
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%', color:'#94a3b8', fontFamily:'Inter,sans-serif', fontSize:13 }}>
+        Checking permissions…
+      </div>
+    );
+  }
+  if (!hasAccess(moduleName)) return <AccessDenied module={moduleName} />;
+  return children;
+}
+
+// ── Inner app (needs PermissionsProvider in tree) ─────────
+function ScaleBooksAppInner() {
+  const { hasAccess, loading: permsLoading } = usePermissions();
   const [collapsed,  setCollapsed]  = useState(false);
   const [openGroups, setOpenGroups] = useState(() => new Set(NAV_GROUPS.map(g => g.key)));
   const [profile,    setProfile]    = useState({ companyName: '', logoUrl: '' });
@@ -330,6 +359,13 @@ export default function ScaleBooksApp() {
               const isOpen    = openGroups.has(group.key);
               const showItems = collapsed || !group.label || isOpen;
 
+              // Filter items by permission (skip if loading — show all during load)
+              const visibleItems = permsLoading
+                ? group.items
+                : group.items.filter(item => hasAccess(item.module));
+
+              if (visibleItems.length === 0) return null;
+
               return (
                 <div key={group.key}>
                   {/* Divider between groups (expanded only) */}
@@ -347,7 +383,7 @@ export default function ScaleBooksApp() {
 
                   {/* Items — animated accordion */}
                   <div className={`sb-items${!showItems ? ' closed' : ''}`}>
-                    {group.items.map(item => {
+                    {visibleItems.map(item => {
                       const to = `/scalebooks${item.path ? '/' + item.path : ''}`;
                       return (
                         <NavLink
@@ -394,26 +430,36 @@ export default function ScaleBooksApp() {
             <Ico name="menu" size={18} />
           </button>
           <Routes>
-            <Route index                   element={<DashboardPage />} />
-            <Route path="vouchers/*"       element={<VouchersPage />} />
-            <Route path="journal"          element={<JournalPage />} />
-            <Route path="coa"              element={<COAPage />} />
-            <Route path="bank"             element={<BankPage />} />
-            <Route path="billing"          element={<BillingPage />} />
-            <Route path="billing/:clientId" element={<BillingClientPage />} />
-            <Route path="contacts"         element={<ContactsPage />} />
-            <Route path="approvals"        element={<ApprovalsPage />} />
-            <Route path="projections"      element={<ProjectionsPage />} />
-            <Route path="pay-schedule"     element={<PaymentSchedulePage />} />
-            <Route path="disbursements"    element={<DisbursementsPage />} />
-            <Route path="checks"           element={<CheckRegistryPage />} />
-            <Route path="tax"              element={<TaxPage />} />
-            <Route path="financial"        element={<FinancialPage />} />
-            <Route path="assets"           element={<FixedAssetsPage />} />
-            <Route path="invoices"         element={<ServiceInvoicesPage />} />
-            <Route path="collections"      element={<CollectionsPage />} />
-            <Route path="settings"         element={<SettingsPage />} />
-            <Route path="*"                element={<Navigate to="/scalebooks" replace />} />
+            {/* Dashboard — always accessible */}
+            <Route index element={<DashboardPage />} />
+
+            {/* Disbursement */}
+            <Route path="vouchers/*"    element={<ModuleGuard module="Vouchers"><VouchersPage /></ModuleGuard>} />
+            <Route path="approvals"     element={<ModuleGuard module="Approvals"><ApprovalsPage /></ModuleGuard>} />
+            <Route path="projections"   element={<ModuleGuard module="Weekly Projections"><ProjectionsPage /></ModuleGuard>} />
+            <Route path="pay-schedule"  element={<ModuleGuard module="Payment Schedule"><PaymentSchedulePage /></ModuleGuard>} />
+            <Route path="disbursements" element={<ModuleGuard module="Disbursements"><DisbursementsPage /></ModuleGuard>} />
+            <Route path="checks"        element={<ModuleGuard module="Check Registry"><CheckRegistryPage /></ModuleGuard>} />
+
+            {/* Accountant */}
+            <Route path="journal"   element={<ModuleGuard module="Journal"><JournalPage /></ModuleGuard>} />
+            <Route path="bank"      element={<ModuleGuard module="Bank"><BankPage /></ModuleGuard>} />
+            <Route path="coa"       element={<ModuleGuard module="Chart of Accounts"><COAPage /></ModuleGuard>} />
+            <Route path="tax"       element={<ModuleGuard module="Tax"><TaxPage /></ModuleGuard>} />
+            <Route path="financial" element={<ModuleGuard module="Financial Management"><FinancialPage /></ModuleGuard>} />
+            <Route path="assets"    element={<ModuleGuard module="Fixed Assets"><FixedAssetsPage /></ModuleGuard>} />
+
+            {/* Billing & AR */}
+            <Route path="billing"           element={<ModuleGuard module="Billing Book"><BillingPage /></ModuleGuard>} />
+            <Route path="billing/:clientId" element={<ModuleGuard module="Billing Book"><BillingClientPage /></ModuleGuard>} />
+            <Route path="invoices"          element={<ModuleGuard module="Service Invoices"><ServiceInvoicesPage /></ModuleGuard>} />
+            <Route path="collections"       element={<ModuleGuard module="Collections"><CollectionsPage /></ModuleGuard>} />
+
+            {/* System */}
+            <Route path="contacts" element={<ModuleGuard module="Contacts"><ContactsPage /></ModuleGuard>} />
+            <Route path="settings" element={<ModuleGuard module="Settings"><SettingsPage /></ModuleGuard>} />
+
+            <Route path="*" element={<Navigate to="/scalebooks" replace />} />
           </Routes>
         </main>
 

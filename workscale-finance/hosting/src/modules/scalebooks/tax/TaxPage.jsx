@@ -1,12 +1,10 @@
 import { useState, useEffect } from 'react';
-import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 
 const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
 const fmtP = (n) => `${(parseFloat(n)||0).toFixed(2)}%`;
 const uid  = () => Math.random().toString(36).slice(2, 10).toUpperCase();
-
-const TAX_TYPES = ['VAT','EWT','Percentage Tax','Documentary Stamp','Others'];
 
 const CSS = `
   .tp-wrap   { display:flex; flex-direction:column; height:100%; overflow:hidden; font-family:Inter,system-ui,sans-serif; }
@@ -43,20 +41,30 @@ const CSS = `
   .scard-label { font-size:9px; font-weight:800; color:#94a3b8; letter-spacing:.07em; text-transform:uppercase; margin-bottom:4px; }
   .scard-value { font-size:20px; font-weight:900; }
   .toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; }
+  .hint  { font-size:11px; color:#94a3b8; margin-top:2px; }
+  .check-list { display:flex; flex-direction:column; gap:6px; max-height:220px; overflow-y:auto; border:1px solid #e5e7eb; border-radius:10px; padding:10px 12px; }
+  .check-item { display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; }
+  .check-item input[type=checkbox] { width:15px; height:15px; accent-color:#f97316; cursor:pointer; }
+  .rate-pill  { display:inline-flex; align-items:center; gap:4px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700; color:#1d4ed8; }
 `;
 
 export default function TaxPage() {
   const [tab, setTab]       = useState('entries');
   const [entries, setEntries] = useState([]);
   const [rates, setRates]   = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [accounts, setAccounts] = useState([]);
   const [filter, setFilter] = useState('All');
   const [period, setPeriod] = useState('');
-  const [showModal, setShowModal] = useState(false);
-  const [showRateModal, setShowRateModal] = useState(false);
+  const [showModal, setShowModal]           = useState(false);
+  const [showRateModal, setShowRateModal]   = useState(false);
+  const [showGroupModal, setShowGroupModal] = useState(false);
   const [editingE, setEditingE] = useState(null);
   const [editingR, setEditingR] = useState(null);
+  const [editingG, setEditingG] = useState(null);
   const [form, setForm]     = useState({});
   const [rForm, setRForm]   = useState({});
+  const [gForm, setGForm]   = useState({});
   const [saving, setSaving] = useState(false);
   const [toast, setToast]   = useState('');
 
@@ -64,8 +72,12 @@ export default function TaxPage() {
 
   useEffect(() => {
     const unsubE = onSnapshot(query(collection(db,'taxEntries'), orderBy('period','desc')), snap=>setEntries(snap.docs.map(d=>({id:d.id,...d.data()}))));
-    const unsubR = onSnapshot(query(collection(db,'taxRates'),   orderBy('taxType')),      snap=>setRates(snap.docs.map(d=>({id:d.id,...d.data()}))));
-    return () => { unsubE(); unsubR(); };
+    const unsubR = onSnapshot(query(collection(db,'taxRates'),   orderBy('name')),          snap=>setRates(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    const unsubG = onSnapshot(query(collection(db,'taxGroups'),  orderBy('name')),          snap=>setGroups(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    getDocs(collection(db,'accounts')).then(s =>
+      setAccounts(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.code||'').localeCompare(b.code||'')))
+    );
+    return () => { unsubE(); unsubR(); unsubG(); };
   }, []);
 
   async function saveEntry() {
@@ -81,16 +93,39 @@ export default function TaxPage() {
   }
 
   async function saveRate() {
-    if (!rForm.taxType || !rForm.name) return alert('Tax type and name are required.');
+    if (!rForm.name?.trim()) return alert('Tax name is required.');
     setSaving(true);
     try {
-      const payload = { ...rForm, rate:parseFloat(rForm.rate)||0, updatedAt:serverTimestamp() };
+      const payload = { name:rForm.name.trim(), rate:parseFloat(rForm.rate)||0, taxAccount:rForm.taxAccount||'', isActive:rForm.isActive!==false, updatedAt:serverTimestamp() };
       if (editingR) { await updateDoc(doc(db,'taxRates',editingR), payload); showToast('Rate updated.'); }
       else { await addDoc(collection(db,'taxRates'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email}); showToast('Rate added.'); }
       setShowRateModal(false);
     } catch(e) { alert(e.message); }
     setSaving(false);
   }
+
+  async function saveGroup() {
+    if (!gForm.name?.trim()) return alert('Group name is required.');
+    if (!gForm.rateNames?.length) return alert('Select at least one tax rate.');
+    setSaving(true);
+    try {
+      const payload = { name:gForm.name.trim(), rateNames:gForm.rateNames, isActive:gForm.isActive!==false, updatedAt:serverTimestamp() };
+      if (editingG) { await updateDoc(doc(db,'taxGroups',editingG), payload); showToast('Group updated.'); }
+      else { await addDoc(collection(db,'taxGroups'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email}); showToast('Group added.'); }
+      setShowGroupModal(false);
+    } catch(e) { alert(e.message); }
+    setSaving(false);
+  }
+
+  function toggleGroupRate(rateName) {
+    setGForm(f => {
+      const prev = f.rateNames || [];
+      return { ...f, rateNames: prev.includes(rateName) ? prev.filter(n=>n!==rateName) : [...prev, rateName] };
+    });
+  }
+
+  // All available tax names (rates + groups) for Entry type filter/select
+  const allTaxNames = [...rates.map(r=>r.name), ...groups.map(g=>g.name)].filter(Boolean);
 
   const filtered = entries.filter(e => {
     const mType   = filter==='All' || e.taxType===filter;
@@ -107,9 +142,10 @@ export default function TaxPage() {
       <div className="tp-topbar">
         <div>
           <h1 style={{ margin:0, fontSize:18, fontWeight:900 }}>Tax</h1>
-          <p style={{ margin:0, fontSize:12, color:'#64748b' }}>{entries.length} entries · {rates.length} rates</p>
+          <p style={{ margin:0, fontSize:12, color:'#64748b' }}>{entries.length} entries · {rates.length} rates · {groups.length} groups</p>
         </div>
         <div style={{ display:'flex', gap:8 }}>
+          <button className="btn btn-ghost" onClick={()=>{setEditingG(null);setGForm({isActive:true,rateNames:[]});setShowGroupModal(true);}}>+ Tax Group</button>
           <button className="btn btn-ghost" onClick={()=>{setEditingR(null);setRForm({isActive:true});setShowRateModal(true);}}>+ Tax Rate</button>
           <button className="btn btn-primary" onClick={()=>{setEditingE(null);setForm({period:new Date().toISOString().slice(0,7)});setShowModal(true);}}>+ Tax Entry</button>
         </div>
@@ -119,6 +155,7 @@ export default function TaxPage() {
         <div className="tabs">
           <button className={`tab ${tab==='entries'?'active':''}`} onClick={()=>setTab('entries')}>Tax Entries</button>
           <button className={`tab ${tab==='rates'?'active':''}`} onClick={()=>setTab('rates')}>Tax Rates ({rates.length})</button>
+          <button className={`tab ${tab==='groups'?'active':''}`} onClick={()=>setTab('groups')}>Tax Groups ({groups.length})</button>
           <button className={`tab ${tab==='summary'?'active':''}`} onClick={()=>setTab('summary')}>Tax Summary</button>
         </div>
 
@@ -129,7 +166,7 @@ export default function TaxPage() {
             <div className="scard"><div className="scard-label">Balance Due</div><div className="scard-value" style={{color:(totalTax-totalPaid)>0?'#dc2626':'#15803d',fontSize:16}}>{fmt(totalTax-totalPaid)}</div></div>
           </div>
           <div className="toolbar">
-            <select className="input" value={filter} onChange={e=>setFilter(e.target.value)}><option value="All">All Types</option>{TAX_TYPES.map(t=><option key={t}>{t}</option>)}</select>
+            <select className="input" value={filter} onChange={e=>setFilter(e.target.value)}><option value="All">All Types</option>{allTaxNames.map(t=><option key={t}>{t}</option>)}</select>
             <input className="input" type="month" value={period} onChange={e=>setPeriod(e.target.value)} style={{width:160}} />
           </div>
           <div className="card">
@@ -158,15 +195,34 @@ export default function TaxPage() {
           <div className="card">
             {rates.length===0 ? <div className="empty">No tax rates. <span style={{color:'#f97316',cursor:'pointer',fontWeight:700}} onClick={()=>{setEditingR(null);setRForm({isActive:true});setShowRateModal(true);}}>Add one →</span></div> : (
               <table>
-                <thead><tr><th>Name</th><th>Tax Type</th><th>Rate</th><th>Description</th><th>Active</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Tax Name</th><th>Rate %</th><th>Tax Account</th><th>Active</th><th>Actions</th></tr></thead>
                 <tbody>{rates.map(r=>(
                   <tr key={r.id}>
                     <td style={{fontWeight:700}}>{r.name}</td>
-                    <td><span style={{fontWeight:800,fontSize:12,color:'#7c3aed'}}>{r.taxType}</span></td>
-                    <td style={{fontFamily:'monospace',fontWeight:800,fontSize:13}}>{fmtP(r.rate)}</td>
-                    <td style={{color:'#94a3b8',fontSize:12}}>{r.description}</td>
+                    <td style={{fontFamily:'monospace',fontWeight:800,fontSize:13,color:(r.rate||0)<0?'#dc2626':'#0b1220'}}>{fmtP(r.rate)}</td>
+                    <td style={{color:'#64748b',fontSize:12}}>{r.taxAccount||<span style={{color:'#cbd5e1'}}>—</span>}</td>
                     <td style={{fontWeight:700,color:r.isActive!==false?'#15803d':'#94a3b8'}}>{r.isActive!==false?'Yes':'No'}</td>
                     <td><button className="btn btn-ghost btn-sm" onClick={()=>{setEditingR(r.id);setRForm({...r});setShowRateModal(true);}}>Edit</button></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {tab === 'groups' && (
+          <div className="card">
+            {groups.length===0 ? <div className="empty">No tax groups. <span style={{color:'#f97316',cursor:'pointer',fontWeight:700}} onClick={()=>{setEditingG(null);setGForm({isActive:true,rateNames:[]});setShowGroupModal(true);}}>Add one →</span></div> : (
+              <table>
+                <thead><tr><th>Group Name</th><th>Included Rates</th><th>Active</th><th>Actions</th></tr></thead>
+                <tbody>{groups.map(g=>(
+                  <tr key={g.id}>
+                    <td style={{fontWeight:700}}>{g.name}</td>
+                    <td style={{display:'flex',flexWrap:'wrap',gap:4,padding:'11px 12px'}}>
+                      {(g.rateNames||[]).map(rn=><span key={rn} className="rate-pill">{rn}</span>)}
+                    </td>
+                    <td style={{fontWeight:700,color:g.isActive!==false?'#15803d':'#94a3b8'}}>{g.isActive!==false?'Yes':'No'}</td>
+                    <td><button className="btn btn-ghost btn-sm" onClick={()=>{setEditingG(g.id);setGForm({...g,rateNames:[...(g.rateNames||[])]});setShowGroupModal(true);}}>Edit</button></td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -221,7 +277,7 @@ export default function TaxPage() {
           <div className="modal">
             <div className="modal-h"><strong>{editingE?'Edit Tax Entry':'New Tax Entry'}</strong><button className="btn btn-ghost btn-sm" onClick={()=>setShowModal(false)}>✕</button></div>
             <div className="modal-b">
-              <div className="field"><label>Tax Type *</label><select value={form.taxType||''} onChange={e=>setForm(f=>({...f,taxType:e.target.value}))}><option value="">Select</option>{TAX_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
+              <div className="field"><label>Tax Type *</label><select value={form.taxType||''} onChange={e=>setForm(f=>({...f,taxType:e.target.value}))}><option value="">Select</option>{allTaxNames.map(t=><option key={t}>{t}</option>)}</select></div>
               <div className="field"><label>Period (YYYY-MM) *</label><input type="month" value={form.period||''} onChange={e=>setForm(f=>({...f,period:e.target.value}))} /></div>
               <div className="field"><label>Tax Base</label><input type="number" value={form.taxBase||''} onChange={e=>setForm(f=>({...f,taxBase:e.target.value}))} /></div>
               <div className="field"><label>Tax Amount</label><input type="number" value={form.taxAmount||''} onChange={e=>setForm(f=>({...f,taxAmount:e.target.value}))} /></div>
@@ -242,15 +298,75 @@ export default function TaxPage() {
           <div className="modal">
             <div className="modal-h"><strong>{editingR?'Edit Tax Rate':'New Tax Rate'}</strong><button className="btn btn-ghost btn-sm" onClick={()=>setShowRateModal(false)}>✕</button></div>
             <div className="modal-b">
-              <div className="field"><label>Name *</label><input value={rForm.name||''} onChange={e=>setRForm(f=>({...f,name:e.target.value}))} placeholder="e.g. EWT — Professional Services" /></div>
-              <div className="field"><label>Tax Type *</label><select value={rForm.taxType||''} onChange={e=>setRForm(f=>({...f,taxType:e.target.value}))}><option value="">Select</option>{TAX_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
-              <div className="field"><label>Rate (%)</label><input type="number" step="0.01" value={rForm.rate||''} onChange={e=>setRForm(f=>({...f,rate:e.target.value}))} placeholder="e.g. 10" /></div>
-              <div className="field"><label>Active</label><select value={rForm.isActive===false?'false':'true'} onChange={e=>setRForm(f=>({...f,isActive:e.target.value==='true'}))}><option value="true">Yes</option><option value="false">No</option></select></div>
-              <div className="field full"><label>Description</label><textarea rows={2} value={rForm.description||''} onChange={e=>setRForm(f=>({...f,description:e.target.value}))} /></div>
+              <div className="field full">
+                <label>Tax Name *</label>
+                <input value={rForm.name||''} onChange={e=>setRForm(f=>({...f,name:e.target.value}))} placeholder="e.g. VAT, EWT 2%, Sales Tax" />
+                <span className="hint">Appears in the Tax Type dropdown on voucher lines.</span>
+              </div>
+              <div className="field">
+                <label>Rate (%) *</label>
+                <input type="number" step="0.01" value={rForm.rate||''} onChange={e=>setRForm(f=>({...f,rate:e.target.value}))} placeholder="e.g. 12, -2, -5" />
+                <span className="hint">Negative = deducted from cash payment (EWT-style).</span>
+              </div>
+              <div className="field">
+                <label>Tax Account</label>
+                <select value={rForm.taxAccount||''} onChange={e=>setRForm(f=>({...f,taxAccount:e.target.value}))}>
+                  <option value="">(none)</option>
+                  {accounts.map(a=><option key={a.id} value={`${a.code} — ${a.name}`}>{a.code} — {a.name}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Active</label>
+                <select value={rForm.isActive===false?'false':'true'} onChange={e=>setRForm(f=>({...f,isActive:e.target.value==='true'}))}>
+                  <option value="true">Yes</option>
+                  <option value="false">No</option>
+                </select>
+              </div>
             </div>
             <div className="modal-f">
               <button className="btn btn-ghost" onClick={()=>setShowRateModal(false)}>Cancel</button>
               <button className="btn btn-primary" onClick={saveRate} disabled={saving}>{saving?'Saving…':editingR?'Save Changes':'Add Rate'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGroupModal && (
+        <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setShowGroupModal(false)}>
+          <div className="modal">
+            <div className="modal-h"><strong>{editingG?'Edit Tax Group':'New Tax Group'}</strong><button className="btn btn-ghost btn-sm" onClick={()=>setShowGroupModal(false)}>✕</button></div>
+            <div className="modal-b">
+              <div className="field">
+                <label>Group Name *</label>
+                <input value={gForm.name||''} onChange={e=>setGForm(f=>({...f,name:e.target.value}))} placeholder="e.g. VAT+EWT 2%" />
+                <span className="hint">Appears alongside individual rates in the Tax Type dropdown.</span>
+              </div>
+              <div className="field">
+                <label>Active</label>
+                <select value={gForm.isActive===false?'false':'true'} onChange={e=>setGForm(f=>({...f,isActive:e.target.value==='true'}))}>
+                  <option value="true">Yes</option>
+                  <option value="false">No</option>
+                </select>
+              </div>
+              <div className="field full">
+                <label>Include Rates (select all that apply)</label>
+                {rates.length===0
+                  ? <p style={{fontSize:12,color:'#94a3b8',margin:0}}>No tax rates yet. Add rates first.</p>
+                  : <div className="check-list">
+                      {rates.map(r=>(
+                        <label key={r.id} className="check-item">
+                          <input type="checkbox" checked={(gForm.rateNames||[]).includes(r.name)} onChange={()=>toggleGroupRate(r.name)} />
+                          <span style={{fontWeight:700}}>{r.name}</span>
+                          <span style={{color:'#94a3b8',fontSize:12,marginLeft:'auto'}}>{fmtP(r.rate)}</span>
+                        </label>
+                      ))}
+                    </div>
+                }
+              </div>
+            </div>
+            <div className="modal-f">
+              <button className="btn btn-ghost" onClick={()=>setShowGroupModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={saveGroup} disabled={saving}>{saving?'Saving…':editingG?'Save Changes':'Add Group'}</button>
             </div>
           </div>
         </div>
