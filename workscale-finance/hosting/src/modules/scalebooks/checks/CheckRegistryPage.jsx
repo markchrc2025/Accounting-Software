@@ -4,6 +4,8 @@ import {
   doc, serverTimestamp, writeBatch, getDocs,
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import AccountCombobox from '../../../components/AccountCombobox.jsx';
+import ContactPicker from '../../../components/ContactPicker.jsx';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CHECKBOOK_TYPES = ['Regular', 'Business', 'Payroll', 'Manager'];
@@ -29,7 +31,7 @@ const fmtN  = n => new Intl.NumberFormat('en-PH', { minimumFractionDigits:2, max
 
 const EMPTY_LINE = () => ({
   id: uid(),
-  contact:'', expenseAccount:'', description:'',
+  contactId:'', contact:'', expenseAccount:'', description:'',
   amount:'', taxRateId:'', taxType:'N/A', taxRate:0, taxAmt:0, inclusive:false,
   lineCheckNo:'', lineCheckDate:'',
 });
@@ -101,6 +103,7 @@ export default function CheckRegistryPage() {
   const [accounts,   setAccounts]   = useState([]);
   const [contacts,   setContacts]   = useState([]);
   const [taxRates,   setTaxRates]   = useState([]);
+  const [taxGroups,  setTaxGroups]  = useState([]);
   const [vouchers,   setVouchers]   = useState([]);
 
   const [activeTab,    setActiveTab]    = useState('register');
@@ -128,13 +131,27 @@ export default function CheckRegistryPage() {
     const u1 = onSnapshot(query(collection(db,'checkRegister'),   orderBy('issueDate','desc')), snap => setChecks(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
     const u2 = onSnapshot(query(collection(db,'checkbookMaster'), orderBy('bankCode','asc')),   snap => setCheckbooks(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
     const u3 = onSnapshot(query(collection(db,'vouchers'),         orderBy('createdAt','desc')), snap => setVouchers(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const u4 = onSnapshot(query(collection(db,'taxRates'),         orderBy('taxType')),          snap => setTaxRates(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(r => r.isActive !== false)));
+    const u4 = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap => setTaxRates(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(r => r.isActive !== false)));
+    const u5 = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap => setTaxGroups(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(g => g.isActive !== false)));
     getDocs(collection(db,'accounts')).then(s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    getDocs(collection(db,'contacts')).then(s => setContacts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    return () => { u1(); u2(); u3(); u4(); };
+    const u6 = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
+    return () => { u1(); u2(); u3(); u4(); u5(); u6(); };
   }, []);
 
   // ── Derived ────────────────────────────────────────────────────────────────
+  // Unified tax registry: individual rates + groups (with effective aggregate rate)
+  const taxRegistry = useMemo(() => {
+    const rateItems = taxRates.map(r => ({ id: r.id, name: r.name, rate: r.rate || 0, kind: 'rate' }));
+    const groupItems = taxGroups.map(g => {
+      const effRate = (g.rateNames || []).reduce((sum, rn) => {
+        const r = taxRates.find(r2 => r2.name.toLowerCase() === rn.toLowerCase());
+        return sum + (r?.rate || 0);
+      }, 0);
+      return { id: g.id, name: g.name, rate: effRate, kind: 'group' };
+    });
+    return [...rateItems, ...groupItems].sort((a,b) => a.name.localeCompare(b.name));
+  }, [taxRates, taxGroups]);
+
   const bankAccounts = useMemo(() =>
     accounts.filter(a =>
       ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) ||
@@ -182,8 +199,8 @@ export default function CheckRegistryPage() {
     if (idx !== i) return l;
     const updated = { ...l, [key]: val };
     if (key === 'taxRateId') {
-      const rate = taxRates.find(r => r.id === val);
-      if (rate) { updated.taxType = rate.taxType; updated.taxRate = rate.rate || 0; }
+      const item = taxRegistry.find(r => r.id === val);
+      if (item) { updated.taxType = item.name; updated.taxRate = item.rate || 0; }
       else       { updated.taxType = 'N/A'; updated.taxRate = 0; }
     }
     const amt  = Number(updated.amount) || 0;
@@ -258,6 +275,7 @@ export default function CheckRegistryPage() {
 
       const linesPayload = cvLines.map((l, i) => ({
         lineNo:             i + 1,
+        contactId:          l.contactId || '',
         contact:            l.contact,
         expenseAccountCode: l.expenseAccount,
         description:        l.description,
@@ -410,10 +428,14 @@ export default function CheckRegistryPage() {
         </div>
         <div className="filters">
           <button className="btn btn-primary btn-sm" onClick={openNewCv}>+ New Check Voucher</button>
-          <select value={filterBank} onChange={e => setFilterBank(e.target.value)}>
-            <option value="">All Banks</option>
-            {bankAccounts.map(b => <option key={b.id} value={b.code||b.id}>{b.code} — {b.name}</option>)}
-          </select>
+          <AccountCombobox
+            options={bankAccounts.map(b=>({value:b.code||b.id,label:`${b.code} — ${b.name}`}))}
+            value={filterBank}
+            onChange={v => setFilterBank(v)}
+            placeholder="All Banks"
+            noneLabel="All Banks"
+            style={{width:220}}
+          />
           <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
             <option value="">All Statuses</option>
             {CHECK_STATUSES.map(s => <option key={s}>{s}</option>)}
@@ -569,10 +591,12 @@ export default function CheckRegistryPage() {
             <div className="grid6">
               <div className="field col3">
                 <label>Bank Account *</label>
-                <select value={cvForm.bankCode||''} onChange={e => upd('bankCode',e.target.value)}>
-                  <option value="">— Select Bank —</option>
-                  {bankAccounts.map(a => <option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}
-                </select>
+                <AccountCombobox
+                  options={bankAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`}))}
+                  value={cvForm.bankCode||''}
+                  onChange={v => upd('bankCode',v)}
+                  placeholder="— Select Bank —"
+                />
               </div>
               <div className="field col3">
                 <label>Issue Date *</label>
@@ -623,12 +647,22 @@ export default function CheckRegistryPage() {
                   <tr key={l.id}>
                     <td style={{ textAlign:'center', color:'#94a3b8', fontWeight:700 }}>{i+1}</td>
                     <td>
-                      <input value={l.contact} onChange={e => setLine(i,'contact',e.target.value)} placeholder="Contact" list={`clist-${i}`} />
-                      <datalist id={`clist-${i}`}>{contacts.map(c => <option key={c.id} value={c.name||c.id} />)}</datalist>
+                      <ContactPicker
+                        contacts={contacts}
+                        value={l.contactId}
+                        displayName={l.contact}
+                        defaultNewType="Supplier"
+                        onChange={({contactId, contactName})=>{ setLine(i,'contactId',contactId); setLine(i,'contact',contactName); }}
+                        compact
+                      />
                     </td>
                     <td>
-                      <input value={l.expenseAccount} onChange={e => setLine(i,'expenseAccount',e.target.value)} placeholder="Account code" list={`alist-${i}`} />
-                      <datalist id={`alist-${i}`}>{accounts.map(a => <option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}</datalist>
+                      <AccountCombobox
+                        options={accounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`}))}
+                        value={l.expenseAccount}
+                        onChange={v => setLine(i,'expenseAccount',v)}
+                        placeholder="Account code"
+                      />
                     </td>
                     <td><input value={l.description} onChange={e => setLine(i,'description',e.target.value)} placeholder="Description" /></td>
                     {cvForm.isMultipleChecks && <td><input value={l.lineCheckNo} onChange={e => setLine(i,'lineCheckNo',e.target.value)} placeholder="Check #" /></td>}
@@ -636,7 +670,8 @@ export default function CheckRegistryPage() {
                     <td style={{ minWidth:160 }}>
                       <select value={l.taxRateId||''} onChange={e => setLine(i,'taxRateId',e.target.value)} style={{ marginBottom:3 }}>
                         <option value="">N/A</option>
-                        {taxRates.map(r => <option key={r.id} value={r.id}>{r.name} ({r.rate}%)</option>)}
+                        {taxRates.length > 0 && <optgroup label="— Rates —">{taxRates.map(r => <option key={r.id} value={r.id}>{r.name} ({(r.rate||0).toFixed(2)}%)</option>)}</optgroup>}
+                        {taxGroups.length > 0 && <optgroup label="— Groups —">{taxGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</optgroup>}
                       </select>
                       {l.taxRateId && (
                         <label style={{ fontSize:10, display:'flex', alignItems:'center', gap:4, cursor:'pointer', marginTop:2 }}>
@@ -770,10 +805,12 @@ export default function CheckRegistryPage() {
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:12 }}>
               <div style={{ gridColumn:'span 2' }} className="field">
                 <label>Bank Account *</label>
-                <select value={form.bankCode||''} onChange={e => upd('bankCode',e.target.value)}>
-                  <option value="">— Select Bank —</option>
-                  {bankAccounts.map(a => <option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}
-                </select>
+                <AccountCombobox
+                  options={bankAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`}))}
+                  value={form.bankCode||''}
+                  onChange={v => upd('bankCode',v)}
+                  placeholder="— Select Bank —"
+                />
               </div>
               <div className="field"><label>Checkbook Type</label><select value={form.checkbookType||'Regular'} onChange={e=>upd('checkbookType',e.target.value)}>{CHECKBOOK_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
               <div className="field"><label>Status</label><select value={form.isActive?'yes':'no'} onChange={e=>upd('isActive',e.target.value==='yes')}><option value="yes">Active</option><option value="no">Inactive</option></select></div>

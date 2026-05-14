@@ -4,7 +4,7 @@ import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, getDocs, writeBatch, query, orderBy,
 } from 'firebase/firestore';
 import { db, auth, storage } from '../../../firebase.js';
-import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
 const GLOBAL_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
@@ -198,7 +198,10 @@ export default function SettingsPage() {
       setProfileForm({
         companyName:      d.companyName      || '',
         companyAddress:   d.companyAddress   || '',
+        city:             d.city             || '',
+        zipCode:          d.zipCode          || '',
         companyTin:       d.companyTin       || '',
+
         companyEmail:     d.companyEmail     || '',
         companyPhone:     d.companyPhone     || '',
         industry:         d.industry         || 'Services',
@@ -332,6 +335,8 @@ export default function SettingsPage() {
           <div className="grid2">
             <div className="field col2"><label>Company Name *</label><input value={profileForm.companyName} onChange={e=>up('companyName',e.target.value)} placeholder="Workscale Resources Inc." /></div>
             <div className="field col2"><label>Address</label><textarea rows={2} value={profileForm.companyAddress} onChange={e=>up('companyAddress',e.target.value)} /></div>
+            <div className="field"><label>City</label><input value={profileForm.city} onChange={e=>up('city',e.target.value)} placeholder="e.g. Makati City" /></div>
+            <div className="field"><label>Zip Code</label><input value={profileForm.zipCode} onChange={e=>up('zipCode',e.target.value)} placeholder="e.g. 1200" /></div>
             <div className="field"><label>TIN</label><input value={profileForm.companyTin} onChange={e=>up('companyTin',e.target.value)} placeholder="000-000-000-000" /></div>
             <div className="field"><label>Email</label><input type="email" value={profileForm.companyEmail} onChange={e=>up('companyEmail',e.target.value)} /></div>
             <div className="field"><label>Phone</label><input value={profileForm.companyPhone} onChange={e=>up('companyPhone',e.target.value)} /></div>
@@ -766,6 +771,7 @@ export default function SettingsPage() {
       }
       try { await deleteDoc(doc(db, 'settings', 'profile')); } catch (_) {}
       try { await deleteDoc(doc(db, 'settings', 'modules')); } catch (_) {}
+      try { await deleteObject(storageRef(storage, 'settings/company-logo')); } catch (_) {}
       showToast('All data has been permanently deleted.');
       setResetModal(null);
     } catch (e) { showToast('Reset failed: ' + e.message); }

@@ -3,6 +3,7 @@ import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import ContactPicker from '../../../components/ContactPicker.jsx';
 
 const COLL_STATUSES = ['Unposted','Posted','Voided'];
 const STATUS_STYLES = {
@@ -57,7 +58,7 @@ const CSS = `
 const fmt = (n) => new Intl.NumberFormat('en-PH',{style:'currency',currency:'PHP'}).format(Number(n||0));
 const today = () => new Date().toISOString().slice(0,10);
 
-const EMPTY = { isNew:true, collectionId:'', contactName:'', collectionDate:'', amountReceived:0, appliedAmount:0, unappliedAmount:0, method:'Cash', referenceNo:'', billingStatementId:'', siId:'', status:'Unposted', notes:'' };
+const EMPTY = { isNew:true, collectionId:'', contactId:'', contactName:'', collectionDate:'', amountReceived:0, appliedAmount:0, unappliedAmount:0, method:'Cash', referenceNo:'', billingStatementId:'', siId:'', status:'Unposted', notes:'' };
 
 export default function CollectionsPage() {
   const [collections, setCollections] = useState([]);
@@ -208,8 +209,14 @@ export default function CollectionsPage() {
                 </div>
                 <div className="field">
                   <label>Client / Contact</label>
-                  <input list="cl-contacts" value={modal.contactName||''} onChange={e=>setModal(m=>({...m,contactName:e.target.value}))} />
-                  <datalist id="cl-contacts">{contacts.map(c=><option key={c.id} value={c.name}/>)}</datalist>
+                  <ContactPicker
+                    typeFilter="Customer"
+                    defaultNewType="Customer"
+                    contacts={contacts}
+                    value={modal.contactId}
+                    displayName={modal.contactName}
+                    onChange={({contactId, contactName})=>setModal(m=>({...m, contactId, contactName}))}
+                  />
                 </div>
                 <div className="field">
                   <label>Collection Date</label>

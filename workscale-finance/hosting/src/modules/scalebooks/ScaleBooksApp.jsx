@@ -222,7 +222,7 @@ const CSS = `
   .sb-out:hover { background:rgba(249,115,22,.15); color:#fb923c; }
 
   /* ── Main area ── */
-  .sb-main { flex:1; min-width:0; overflow:hidden; display:flex; flex-direction:column; background:#f6f8fb; position:relative; }
+  .sb-main { flex:1; min-width:0; overflow:hidden; display:flex; flex-direction:column; background:#f6f8fb; }
 
   /* ── Mobile overlay: hidden on desktop, shown on mobile when open ── */
   .sb-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:199; }

@@ -3,6 +3,7 @@ import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import ContactPicker from '../../../components/ContactPicker.jsx';
 
 const SI_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Sent','Partial','Paid','Voided'];
 const STATUS_STYLES = {
@@ -65,7 +66,7 @@ const NEXT = {
   'Pending Approval':['Approved','Rejected','Voided'],'Approved':['Sent','Voided'],'Sent':['Partial','Paid','Voided'],'Partial':['Paid','Voided'],
 };
 
-const EMPTY = { isNew:true, siId:'', contactName:'', siDate:'', dueDate:'', amount:0, taxType:'N/A', ewtRate:0, incomeAccountCode:'', billingStatementId:'', notes:'', status:'Draft' };
+const EMPTY = { isNew:true, siId:'', contactId:'', contactName:'', siDate:'', dueDate:'', amount:0, taxType:'N/A', ewtRate:0, incomeAccountCode:'', billingStatementId:'', notes:'', status:'Draft' };
 
 export default function ServiceInvoicesPage() {
   const [invoices,  setInvoices]  = useState([]);
@@ -208,8 +209,14 @@ export default function ServiceInvoicesPage() {
                 </div>
                 <div className="field">
                   <label>Client / Contact</label>
-                  <input list="si-contacts" value={modal.contactName||''} onChange={e=>setModal(m=>({...m,contactName:e.target.value}))} />
-                  <datalist id="si-contacts">{contacts.map(c=><option key={c.id} value={c.name}/>)}</datalist>
+                  <ContactPicker
+                    typeFilter="Customer"
+                    defaultNewType="Customer"
+                    contacts={contacts}
+                    value={modal.contactId}
+                    displayName={modal.contactName}
+                    onChange={({contactId, contactName})=>setModal(m=>({...m, contactId, contactName}))}
+                  />
                 </div>
                 <div className="field">
                   <label>SI Date</label>

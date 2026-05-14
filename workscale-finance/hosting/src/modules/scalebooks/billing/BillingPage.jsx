@@ -3,6 +3,7 @@ import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy, getDocs, where
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import ContactPicker from '../../../components/ContactPicker.jsx';
 
 const BS_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Sent','Partial','Paid','Voided'];
 
@@ -275,8 +276,14 @@ export default function BillingPage() {
                 </div>
                 <div className="field">
                   <label>Client / Contact</label>
-                  <input list="bl-contacts" value={modal.contactName||''} onChange={e=>setModal(m=>({...m,contactName:e.target.value}))} />
-                  <datalist id="bl-contacts">{contacts.map(c=><option key={c.id} value={c.name}/>)}</datalist>
+                  <ContactPicker
+                    typeFilter="Customer"
+                    defaultNewType="Customer"
+                    contacts={contacts}
+                    value={modal.contactId}
+                    displayName={modal.contactName}
+                    onChange={({contactId, contactName})=>setModal(m=>({...m, contactId, contactName}))}
+                  />
                 </div>
                 <div className="field">
                   <label>Billing Date</label>

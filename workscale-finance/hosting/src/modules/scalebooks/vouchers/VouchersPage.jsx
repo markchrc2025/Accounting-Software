@@ -4,9 +4,12 @@ import {
   serverTimestamp, getDocs
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import AccountCombobox from '../../../components/AccountCombobox.jsx';
+import ContactPicker from '../../../components/ContactPicker.jsx';
 
-const fmt = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
-const uid = () => Math.random().toString(36).slice(2, 10).toUpperCase();
+const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
+const fmtP = (n) => new Intl.NumberFormat('en-PH', { minimumFractionDigits:0, maximumFractionDigits:4 }).format(n || 0) + '%';
+const uid  = () => Math.random().toString(36).slice(2, 10).toUpperCase();
 const today = () => new Date().toISOString().slice(0, 10);
 
 // Matches GAS acounting.js getAppConfig() voucherTypes.
@@ -39,7 +42,7 @@ const STATUS_STYLES = {
   'Voided':             { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
 };
 
-const EMPTY_LINE = () => ({ id: uid(), contact:'', expenseAccount:'', description:'', amount:'', category:'', taxRateId:'', taxType:'N/A', taxRate:0, taxAmt:0, inclusive:false });
+const EMPTY_LINE = () => ({ id: uid(), contactId:'', contact:'', expenseAccount:'', description:'', amount:'', category:'', taxRateId:'', taxType:'N/A', taxRate:0, taxAmt:0, inclusive:false });
 
 const CSS = `
   .vp-wrap   { display:flex; flex-direction:column; height:100%; overflow:hidden; font-family:Inter,system-ui,sans-serif; background:#f8fafc; }
@@ -106,6 +109,7 @@ export default function VouchersPage() {
   const [accounts,   setAccounts]  = useState([]);
   const [contacts,   setContacts]  = useState([]);
   const [taxRates,   setTaxRates]  = useState([]);
+  const [taxGroups,  setTaxGroups] = useState([]);
 
   // Filters
   const [search,        setSearch]       = useState('');
@@ -152,9 +156,10 @@ export default function VouchersPage() {
       snap => setVouchers(snap.docs.map(d => ({ id: d.id, ...d.data() })))
     );
     getDocs(collection(db, 'accounts')).then(s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    getDocs(collection(db, 'contacts')).then(s => setContacts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const unsubRates = onSnapshot(query(collection(db,'taxRates'), orderBy('taxType')), snap => setTaxRates(snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>r.isActive!==false)));
-    return () => { unsub(); unsubRates(); };
+    const unsubContacts = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
+    const unsubRates  = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap => setTaxRates(snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>r.isActive!==false)));
+    const unsubGroups = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap => setTaxGroups(snap.docs.map(d=>({id:d.id,...d.data()})).filter(g=>g.isActive!==false)));
+    return () => { unsub(); unsubContacts(); unsubRates(); unsubGroups(); };
   }, []);
 
   // Generate sequential voucher ID: PREFIX-YYYYMM-NNNN (based on existing count in DB)
@@ -246,15 +251,15 @@ export default function VouchersPage() {
   // Open create/edit modal
   const openNew = () => {
     setEditing(null);
-    setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'' });
+    setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'', inclusive:false });
     setLines([EMPTY_LINE()]);
     setShowModal(true);
   };
 
   const openEdit = (v) => {
     setEditing(v);
-    setForm({ voucherType:v.voucherType||'PAYMENT', preparationDate:v.preparationDate||today(), purposeCategory:v.purposeCategory||'', paymentFrom:v.paymentFromAccountCode||'', status:v.status||'Pending', notes:v.notes||'' });
-    setLines((v.lines||[]).map(l => ({ id:uid(), contact:l.contact||'', expenseAccount:l.expenseAccountCode||'', description:l.description||'', amount:String(l.amount||''), category:l.category||'', taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:l.taxRate||0, taxAmt:l.taxAmt||0, inclusive:l.inclusive||false })));
+    setForm({ voucherType:v.voucherType||'PAYMENT', preparationDate:v.preparationDate||today(), purposeCategory:v.purposeCategory||'', paymentFrom:v.paymentFromAccountCode||'', status:v.status||'Pending', notes:v.notes||'', inclusive: !!(v.lines||[]).find(l=>l.taxRateId)?.inclusive });
+    setLines((v.lines||[]).map(l => ({ id:uid(), contactId:l.contactId||'', contact:l.contact||'', expenseAccount:l.expenseAccountCode||'', description:l.description||'', amount:String(l.amount||''), category:l.category||'', taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:l.taxRate||0, taxAmt:l.taxAmt||0, inclusive:l.inclusive||false })));
     if ((v.lines||[]).length === 0) setLines([EMPTY_LINE()]);
     setShowModal(true);
   };
@@ -292,7 +297,7 @@ export default function VouchersPage() {
       totalAmount,
       status:                newStatus || form.status,
       notes:                 form.notes||'',
-      lines: lines.map((l,i) => ({ lineNo:i+1, contact:l.contact, expenseAccountCode:l.expenseAccount, description:l.description, amount:Number(l.amount)||0, category:l.category, taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:Number(l.taxRate)||0, taxAmt:Number(l.taxAmt)||0, inclusive:!!l.inclusive })),
+      lines: lines.map((l,i) => ({ lineNo:i+1, contactId:l.contactId||'', contact:l.contact, expenseAccountCode:l.expenseAccount, description:l.description, amount:Number(l.amount)||0, category:l.category, taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:Number(l.taxRate)||0, taxAmt:Number(l.taxAmt)||0, inclusive:!!l.inclusive })),
       updatedAt: serverTimestamp(), updatedBy: user
     };
     setSaving(true);
@@ -329,25 +334,49 @@ export default function VouchersPage() {
 
   const sortIcon = (col) => sortCol === col ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
 
+  // Unified tax registry: individual rates + groups (with effective aggregate rate)
+  const taxRegistry = useMemo(() => {
+    const rateItems = taxRates.map(r => ({ id: r.id, name: r.name, rate: r.rate || 0, kind: 'rate' }));
+    const groupItems = taxGroups.map(g => {
+      const effRate = (g.rateNames || []).reduce((sum, rn) => {
+        const r = taxRates.find(r2 => r2.name.toLowerCase() === rn.toLowerCase());
+        return sum + (r?.rate || 0);
+      }, 0);
+      return { id: g.id, name: g.name, rate: effRate, kind: 'group' };
+    });
+    return [...rateItems, ...groupItems].sort((a,b) => a.name.localeCompare(b.name));
+  }, [taxRates, taxGroups]);
+
   // Line helpers
   const setLine = (i, key, val) => setLines(prev => prev.map((l,idx) => {
     if (idx !== i) return l;
     const updated = {...l, [key]:val};
     // When taxRateId changes, auto-fill taxType & rate
     if (key === 'taxRateId') {
-      const rate = taxRates.find(r => r.id === val);
-      if (rate) { updated.taxType = rate.taxType; updated.taxRate = rate.rate||0; }
+      const item = taxRegistry.find(r => r.id === val);
+      if (item) { updated.taxType = item.name; updated.taxRate = item.rate || 0; }
       else { updated.taxType = 'N/A'; updated.taxRate = 0; }
     }
     // Recalc tax amount
     const amt = Number(updated.amount)||0;
     const rate = Number(updated.taxRate)||0;
-    updated.taxAmt = updated.taxRateId ? (updated.inclusive ? amt - amt/(1+rate/100) : amt*(rate/100)) : 0;
+    updated.taxAmt = updated.taxRateId ? (form.inclusive ? amt - amt/(1+rate/100) : amt*(rate/100)) : 0;
     updated.taxAmt = Math.round(updated.taxAmt*100)/100;
     return updated;
   }));
   const addLine = () => setLines(prev => [...prev, EMPTY_LINE()]);
   const removeLine = (i) => setLines(prev => prev.filter((_,idx) => idx !== i));
+
+  // Global inclusive toggle — recalculates taxAmt on all lines
+  const handleInclusiveToggle = (checked) => {
+    setForm(f => ({...f, inclusive: checked}));
+    setLines(prev => prev.map(l => {
+      const amt  = Number(l.amount) || 0;
+      const rate = Number(l.taxRate) || 0;
+      const taxAmt = l.taxRateId ? (checked ? amt - amt/(1+rate/100) : amt*(rate/100)) : 0;
+      return {...l, taxAmt: Math.round(taxAmt*100)/100};
+    }));
+  };
 
   // isAutoBank: hide Purpose/PaymentFrom for PAYROLL, FINAL_PAY (matches GAS toggleVoucherMode)
   const isAutoBank = AUTO_BANK_TYPES.includes(form.voucherType);
@@ -364,23 +393,80 @@ export default function VouchersPage() {
   // Auto-generate journal entry lines from voucher lines
   const journalLines = useMemo(() => {
     const jl = [];
-    lines.forEach(l => {
-      const amt = Number(l.amount)||0;
-      const tax = Number(l.taxAmt)||0;
-      if (!amt) return;
-      const expenseAmt = l.inclusive ? amt - tax : amt;
-      if (l.expenseAccount) jl.push({ account: l.expenseAccount, debit: expenseAmt, credit: 0 });
-      if (tax > 0 && l.taxType && l.taxType !== 'N/A') {
-        const taxAcct = l.taxType.includes('VAT') ? 'Input VAT' : `EWT Payable — ${l.taxType}`;
-        jl.push({ account: taxAcct, debit: l.inclusive ? 0 : tax, credit: l.inclusive ? 0 : 0 });
-        if (!l.inclusive) jl.push({ account: taxAcct + ' (payable)', debit: 0, credit: tax });
+
+    // Format account as "(code) Name"
+    const acctLabel = (codeOrFull, fallback = '—') => {
+      if (!codeOrFull) return fallback;
+      if (codeOrFull.includes(' — ')) {
+        const [c, ...rest] = codeOrFull.split(' — ');
+        return `(${c.trim()}) ${rest.join(' — ').trim()}`;
       }
+      const found = accounts.find(a => a.code === codeOrFull);
+      return found ? `(${found.code}) ${found.name}` : codeOrFull;
+    };
+
+    // Get display label for a taxRate doc
+    const taxRateLabel = (rateDoc) => {
+      const raw = rateDoc.trackingType === 'separate'
+        ? (rateDoc.taxAccountSales || rateDoc.taxAccountSingle || '')
+        : (rateDoc.taxAccountSingle || '');
+      return raw ? acctLabel(raw) : `Tax — ${rateDoc.name}`;
+    };
+
+    let bankCreditTotal = 0;
+
+    lines.forEach(l => {
+      const amt = Number(l.amount) || 0;
+      const tax = Number(l.taxAmt)  || 0;
+      if (!amt) return;
+
+      // 1. Expense debit (net of inclusive tax)
+      const expenseAmt = (tax > 0 && form.inclusive) ? amt - tax : amt;
+      if (l.expenseAccount) {
+        jl.push({ account: acctLabel(l.expenseAccount), debit: expenseAmt, credit: 0 });
+      }
+
+      // 2. Tax debit lines
+      if (tax > 0 && l.taxRateId) {
+        const rateDoc = taxRates.find(r => r.id === l.taxRateId);
+        if (rateDoc) {
+          // Single rate
+          jl.push({ account: taxRateLabel(rateDoc), debit: tax, credit: 0 });
+        } else {
+          // Tax group — split pro-rata across constituent rates
+          const groupDoc = taxGroups.find(g => g.id === l.taxRateId);
+          if (groupDoc?.rateNames?.length) {
+            const effectiveRate = groupDoc.rateNames.reduce((s, rn) => {
+              const r = taxRates.find(x => x.name === rn);
+              return s + (r?.rate || 0);
+            }, 0);
+            groupDoc.rateNames.forEach(rn => {
+              const r = taxRates.find(x => x.name === rn);
+              if (!r) return;
+              const share = effectiveRate > 0
+                ? Math.round((r.rate / effectiveRate) * tax * 100) / 100
+                : Math.round(tax / groupDoc.rateNames.length * 100) / 100;
+              jl.push({ account: taxRateLabel(r), debit: share, credit: 0 });
+            });
+          } else {
+            jl.push({ account: `Tax — ${l.taxType || 'Unknown'}`, debit: tax, credit: 0 });
+          }
+        }
+      }
+
+      // 3. Bank credit: gross amount paid (inclusive = full amt; exclusive = amt + tax)
+      bankCreditTotal += form.inclusive ? amt : amt + tax;
     });
-    const cashAmt = netCash;
+
+    // 4. Bank / Cash credit
     const bankAcct = bankAccounts.find(a => a.code === form.paymentFrom || a.id === form.paymentFrom);
-    if (cashAmt > 0) jl.push({ account: bankAcct ? `${bankAcct.code} — ${bankAcct.name}` : (form.paymentFrom||'Cash / Bank'), debit: 0, credit: cashAmt });
+    const bankLabel = bankAcct
+      ? acctLabel(`${bankAcct.code} — ${bankAcct.name}`)
+      : (form.paymentFrom || 'Cash / Bank');
+    if (bankCreditTotal > 0) jl.push({ account: bankLabel, debit: 0, credit: bankCreditTotal });
+
     return jl;
-  }, [lines, form.paymentFrom, bankAccounts, netCash]);
+  }, [lines, form.paymentFrom, form.inclusive, bankAccounts, taxRates, taxGroups, accounts]);
 
   const jDebit  = journalLines.reduce((s,j)=>s+j.debit,0);
   const jCredit = journalLines.reduce((s,j)=>s+j.credit,0);
@@ -613,11 +699,15 @@ export default function VouchersPage() {
                 {!isAutoBank && (
                   <div className="field col2">
                     <label>Payment From (Bank)</label>
-                    <select value={form.paymentFrom||''} onChange={e=>setForm(f=>({...f,paymentFrom:e.target.value}))}>
-                      <option value="">— Select Account —</option>
-                      {bankAccounts.map(a=><option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}
-                      {bankAccounts.length===0 && accounts.map(a=><option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}
-                    </select>
+                    <AccountCombobox
+                      options={[
+                        ...bankAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`})),
+                        ...(bankAccounts.length===0 ? accounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`})) : []),
+                      ]}
+                      value={form.paymentFrom||''}
+                      onChange={v=>setForm(f=>({...f,paymentFrom:v}))}
+                      placeholder="— Select Account —"
+                    />
                   </div>
                 )}
 
@@ -644,7 +734,16 @@ export default function VouchersPage() {
               </div>
 
               {/* Payment Details */}
-              <div className="section-title">Payment Details</div>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:20,marginBottom:0}}>
+                <div className="section-title" style={{margin:0}}>Payment Details</div>
+                {showTax && (
+                  <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:12,fontWeight:700,color:'#64748b',userSelect:'none'}}>
+                    <input type="checkbox" checked={!!form.inclusive} onChange={e=>handleInclusiveToggle(e.target.checked)}
+                      style={{width:'auto',accentColor:'#f97316',cursor:'pointer'}} />
+                    Tax amounts are inclusive
+                  </label>
+                )}
+              </div>
               <table className="lines-tbl" style={{fontSize:12,marginBottom:8}}>
                 <thead>
                   <tr>
@@ -664,14 +763,22 @@ export default function VouchersPage() {
                     <tr key={l.id}>
                       <td style={{textAlign:'center',color:'#94a3b8',fontWeight:700}}>{i+1}</td>
                       <td>
-                        <input value={l.contact} onChange={e=>setLine(i,'contact',e.target.value)} placeholder="Contact name" list={`clist-${i}`} />
-                        <datalist id={`clist-${i}`}>{contacts.map(c=><option key={c.id} value={c.name||c.id} />)}</datalist>
+                        <ContactPicker
+                          contacts={contacts}
+                          value={l.contactId}
+                          displayName={l.contact}
+                          defaultNewType={form.voucherType==='PAYROLL'||form.voucherType==='FINAL_PAY' ? 'Employee' : 'Supplier'}
+                          onChange={({contactId, contactName})=>{ setLine(i,'contactId',contactId); setLine(i,'contact',contactName); }}
+                          compact
+                        />
                       </td>
                       <td>
-                        <select value={l.expenseAccount} onChange={e=>setLine(i,'expenseAccount',e.target.value)}>
-                          <option value="">— Select Account —</option>
-                          {accounts.map(a=><option key={a.id} value={a.code||a.id}>{a.name} ({a.code||a.id})</option>)}
-                        </select>
+                        <AccountCombobox
+                          options={accounts.map(a=>({value:a.code||a.id,label:`${a.name} (${a.code||a.id})`}))}
+                          value={l.expenseAccount}
+                          onChange={v=>setLine(i,'expenseAccount',v)}
+                          placeholder="— Select Account —"
+                        />
                       </td>
                       <td><input value={l.description} onChange={e=>setLine(i,'description',e.target.value)} placeholder="Description" /></td>
                       {isAutoBank && (
@@ -687,14 +794,9 @@ export default function VouchersPage() {
                         <td style={{minWidth:160}}>
                           <select value={l.taxRateId||''} onChange={e=>setLine(i,'taxRateId',e.target.value)} style={{marginBottom:3}}>
                             <option value="">N/A</option>
-                            {taxRates.map(r=><option key={r.id} value={r.id}>{r.name} ({r.rate}%)</option>)}
+                            {taxRates.length > 0 && <optgroup label="— Rates —">{taxRates.map(r=><option key={r.id} value={r.id}>{r.name} ({fmtP(r.rate)})</option>)}</optgroup>}
+                            {taxGroups.length > 0 && <optgroup label="— Groups —">{taxGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}</optgroup>}
                           </select>
-                          {l.taxRateId && (
-                            <label style={{fontSize:10,display:'flex',alignItems:'center',gap:4,cursor:'pointer',marginTop:2}}>
-                              <input type="checkbox" checked={!!l.inclusive} onChange={e=>setLine(i,'inclusive',e.target.checked)} />
-                              Inclusive
-                            </label>
-                          )}
                         </td>
                       )}
                       <td><input type="number" style={{textAlign:'right'}} value={l.amount} onChange={e=>setLine(i,'amount',e.target.value)} placeholder="0.00" /></td>
@@ -727,7 +829,7 @@ export default function VouchersPage() {
                     <tr><td colSpan={3} style={{textAlign:'center',color:'#94a3b8',padding:'14px'}}>Fill out payment details to generate journal entry</td></tr>
                   ) : journalLines.map((j,i) => (
                     <tr key={i}>
-                      <td style={{fontWeight:600}}>{j.account}</td>
+                      <td style={{fontWeight:600, paddingLeft: j.credit > 0 ? 28 : 8}}>{j.account}</td>
                       <td style={{textAlign:'right',color:j.debit>0?'#15803d':'#94a3b8'}}>{j.debit>0?fmt(j.debit):'—'}</td>
                       <td style={{textAlign:'right',color:j.credit>0?'#dc2626':'#94a3b8'}}>{j.credit>0?fmt(j.credit):'—'}</td>
                     </tr>

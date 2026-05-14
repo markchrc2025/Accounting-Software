@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import AccountCombobox from '../../../components/AccountCombobox.jsx';
 
 const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
 const fmtP = (n) => `${(parseFloat(n)||0).toFixed(2)}%`;
@@ -49,54 +50,76 @@ const CSS = `
 `;
 
 export default function TaxPage() {
-  const [tab, setTab]       = useState('entries');
-  const [entries, setEntries] = useState([]);
-  const [rates, setRates]   = useState([]);
-  const [groups, setGroups] = useState([]);
-  const [accounts, setAccounts] = useState([]);
-  const [filter, setFilter] = useState('All');
-  const [period, setPeriod] = useState('');
-  const [showModal, setShowModal]           = useState(false);
+  const [tab, setTab]             = useState('entries');
+  const [vouchers, setVouchers]   = useState([]);
+  const [rates, setRates]         = useState([]);
+  const [groups, setGroups]       = useState([]);
+  const [accounts, setAccounts]   = useState([]);
+  const [filter, setFilter]       = useState('All');
+  const [period, setPeriod]       = useState('');
   const [showRateModal, setShowRateModal]   = useState(false);
   const [showGroupModal, setShowGroupModal] = useState(false);
-  const [editingE, setEditingE] = useState(null);
-  const [editingR, setEditingR] = useState(null);
-  const [editingG, setEditingG] = useState(null);
-  const [form, setForm]     = useState({});
-  const [rForm, setRForm]   = useState({});
-  const [gForm, setGForm]   = useState({});
-  const [saving, setSaving] = useState(false);
-  const [toast, setToast]   = useState('');
+  const [editingR, setEditingR]   = useState(null);
+  const [editingG, setEditingG]   = useState(null);
+  const [rForm, setRForm]         = useState({});
+  const [gForm, setGForm]         = useState({});
+  const [saving, setSaving]       = useState(false);
+  const [toast, setToast]         = useState('');
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
   useEffect(() => {
-    const unsubE = onSnapshot(query(collection(db,'taxEntries'), orderBy('period','desc')), snap=>setEntries(snap.docs.map(d=>({id:d.id,...d.data()}))));
-    const unsubR = onSnapshot(query(collection(db,'taxRates'),   orderBy('name')),          snap=>setRates(snap.docs.map(d=>({id:d.id,...d.data()}))));
-    const unsubG = onSnapshot(query(collection(db,'taxGroups'),  orderBy('name')),          snap=>setGroups(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    const unsubV = onSnapshot(query(collection(db,'vouchers'), orderBy('createdAt','desc')), snap=>setVouchers(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    const unsubR = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap=>setRates(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    const unsubG = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap=>setGroups(snap.docs.map(d=>({id:d.id,...d.data()}))));
     getDocs(collection(db,'accounts')).then(s =>
       setAccounts(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.code||'').localeCompare(b.code||'')))
     );
-    return () => { unsubE(); unsubR(); unsubG(); };
+    return () => { unsubV(); unsubR(); unsubG(); };
   }, []);
 
-  async function saveEntry() {
-    if (!form.taxType || !form.period) return alert('Tax type and period are required.');
-    setSaving(true);
-    try {
-      const payload = { ...form, taxBase:parseFloat(form.taxBase)||0, taxAmount:parseFloat(form.taxAmount)||0, amountPaid:parseFloat(form.amountPaid)||0, updatedAt:serverTimestamp() };
-      if (editingE) { await updateDoc(doc(db,'taxEntries',editingE), payload); showToast('Entry updated.'); }
-      else { await addDoc(collection(db,'taxEntries'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email}); showToast('Entry added.'); }
-      setShowModal(false);
-    } catch(e) { alert(e.message); }
-    setSaving(false);
-  }
+  // Derive tax lines from all Payment/Check vouchers that have taxAmt > 0
+  const taxLines = useMemo(() => {
+    const rows = [];
+    vouchers.forEach(v => {
+      if (!['PAYMENT','CHECK'].includes(v.voucherType)) return;
+      (v.lines || []).forEach(l => {
+        if (!(l.taxAmt > 0)) return;
+        const dateStr = v.preparationDate || '';
+        rows.push({
+          key:         `${v.id}-${l.lineNo}`,
+          date:        dateStr,
+          period:      dateStr.slice(0, 7),
+          voucherId:   v.voucherId || '',
+          source:      v.voucherType === 'CHECK' ? 'Check Voucher' : 'Payment Voucher',
+          payee:       l.contact || v.contactSummary || '',
+          description: l.description || v.purposeCategory || '',
+          taxName:     l.taxType || '',
+          taxRate:     l.taxRate || 0,
+          grossAmount: l.amount  || 0,
+          taxAmount:   l.taxAmt  || 0,
+          inclusive:   !!l.inclusive,
+          status:      v.status  || '',
+        });
+      });
+    });
+    return rows.sort((a, b) => b.date.localeCompare(a.date));
+  }, [vouchers]);
 
   async function saveRate() {
     if (!rForm.name?.trim()) return alert('Tax name is required.');
     setSaving(true);
     try {
-      const payload = { name:rForm.name.trim(), rate:parseFloat(rForm.rate)||0, taxAccount:rForm.taxAccount||'', isActive:rForm.isActive!==false, updatedAt:serverTimestamp() };
+      const payload = {
+        name:               rForm.name.trim(),
+        rate:               parseFloat(rForm.rate)||0,
+        trackingType:       rForm.trackingType||'single',
+        taxAccountSingle:   rForm.taxAccountSingle||'',
+        taxAccountSales:    rForm.taxAccountSales||'',
+        taxAccountPurchases:rForm.taxAccountPurchases||'',
+        isActive:           rForm.isActive!==false,
+        updatedAt:          serverTimestamp(),
+      };
       if (editingR) { await updateDoc(doc(db,'taxRates',editingR), payload); showToast('Rate updated.'); }
       else { await addDoc(collection(db,'taxRates'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email}); showToast('Rate added.'); }
       setShowRateModal(false);
@@ -124,17 +147,17 @@ export default function TaxPage() {
     });
   }
 
-  // All available tax names (rates + groups) for Entry type filter/select
+  // All tax names from registry for filter dropdown
   const allTaxNames = [...rates.map(r=>r.name), ...groups.map(g=>g.name)].filter(Boolean);
 
-  const filtered = entries.filter(e => {
-    const mType   = filter==='All' || e.taxType===filter;
-    const mPeriod = !period || e.period?.startsWith(period);
+  const filteredLines = taxLines.filter(l => {
+    const mType   = filter==='All' || l.taxName===filter;
+    const mPeriod = !period || l.period===period;
     return mType && mPeriod;
   });
 
-  const totalTax  = filtered.reduce((s,e)=>s+(e.taxAmount||0),0);
-  const totalPaid = filtered.reduce((s,e)=>s+(e.amountPaid||0),0);
+  const totalTax   = filteredLines.reduce((s,l)=>s+(l.taxAmount||0), 0);
+  const totalGross = filteredLines.reduce((s,l)=>s+(l.grossAmount||0), 0);
 
   return (
     <div className="tp-wrap">
@@ -142,48 +165,67 @@ export default function TaxPage() {
       <div className="tp-topbar">
         <div>
           <h1 style={{ margin:0, fontSize:18, fontWeight:900 }}>Tax</h1>
-          <p style={{ margin:0, fontSize:12, color:'#64748b' }}>{entries.length} entries · {rates.length} rates · {groups.length} groups</p>
+          <p style={{ margin:0, fontSize:12, color:'#64748b' }}>{taxLines.length} tax lines · {rates.length + groups.length} registry items</p>
         </div>
-        <div style={{ display:'flex', gap:8 }}>
-          <button className="btn btn-ghost" onClick={()=>{setEditingG(null);setGForm({isActive:true,rateNames:[]});setShowGroupModal(true);}}>+ Tax Group</button>
-          <button className="btn btn-ghost" onClick={()=>{setEditingR(null);setRForm({isActive:true});setShowRateModal(true);}}>+ Tax Rate</button>
-          <button className="btn btn-primary" onClick={()=>{setEditingE(null);setForm({period:new Date().toISOString().slice(0,7)});setShowModal(true);}}>+ Tax Entry</button>
-        </div>
+        <div />
       </div>
 
       <div className="tp-body">
         <div className="tabs">
           <button className={`tab ${tab==='entries'?'active':''}`} onClick={()=>setTab('entries')}>Tax Entries</button>
-          <button className={`tab ${tab==='rates'?'active':''}`} onClick={()=>setTab('rates')}>Tax Rates ({rates.length})</button>
-          <button className={`tab ${tab==='groups'?'active':''}`} onClick={()=>setTab('groups')}>Tax Groups ({groups.length})</button>
+          <button className={`tab ${tab==='registry'?'active':''}`} onClick={()=>setTab('registry')}>Tax Registry ({rates.length + groups.length})</button>
           <button className={`tab ${tab==='summary'?'active':''}`} onClick={()=>setTab('summary')}>Tax Summary</button>
         </div>
 
         {tab === 'entries' && <>
           <div className="summary-bar">
+            <div className="scard"><div className="scard-label">Total Tax Lines</div><div className="scard-value">{filteredLines.length}</div></div>
+            <div className="scard"><div className="scard-label">Total Gross Amount</div><div className="scard-value" style={{color:'#64748b',fontSize:16}}>{fmt(totalGross)}</div></div>
             <div className="scard"><div className="scard-label">Total Tax Amount</div><div className="scard-value" style={{color:'#dc2626',fontSize:16}}>{fmt(totalTax)}</div></div>
-            <div className="scard"><div className="scard-label">Total Paid</div><div className="scard-value" style={{color:'#15803d',fontSize:16}}>{fmt(totalPaid)}</div></div>
-            <div className="scard"><div className="scard-label">Balance Due</div><div className="scard-value" style={{color:(totalTax-totalPaid)>0?'#dc2626':'#15803d',fontSize:16}}>{fmt(totalTax-totalPaid)}</div></div>
           </div>
           <div className="toolbar">
-            <select className="input" value={filter} onChange={e=>setFilter(e.target.value)}><option value="All">All Types</option>{allTaxNames.map(t=><option key={t}>{t}</option>)}</select>
-            <input className="input" type="month" value={period} onChange={e=>setPeriod(e.target.value)} style={{width:160}} />
+            <select className="input" value={filter} onChange={e=>setFilter(e.target.value)}>
+              <option value="All">All Tax Types</option>
+              {allTaxNames.map(t=><option key={t}>{t}</option>)}
+            </select>
+            <input className="input" type="month" value={period} onChange={e=>setPeriod(e.target.value)} style={{width:160}} placeholder="Filter by month" />
+            {(filter!=='All'||period) && <button className="btn btn-ghost btn-sm" onClick={()=>{setFilter('All');setPeriod('');}}>Clear</button>}
           </div>
           <div className="card">
-            {filtered.length===0 ? <div className="empty">No tax entries.</div> : (
+            {filteredLines.length===0 ? (
+              <div className="empty">
+                {vouchers.length===0
+                  ? 'No vouchers yet. Tax entries will appear here once Payment or Check Vouchers with a tax rate are created.'
+                  : 'No tax lines match the current filter.'}
+              </div>
+            ) : (
               <table>
-                <thead><tr><th>Period</th><th>Type</th><th>Description</th><th style={{textAlign:'right'}}>Tax Base</th><th style={{textAlign:'right'}}>Tax Amount</th><th style={{textAlign:'right'}}>Amount Paid</th><th>Due Date</th><th>Status</th><th>Actions</th></tr></thead>
-                <tbody>{filtered.map(e=>(
-                  <tr key={e.id}>
-                    <td style={{fontWeight:700}}>{e.period}</td>
-                    <td><span style={{fontWeight:800,fontSize:12,color:'#7c3aed'}}>{e.taxType}</span></td>
-                    <td style={{color:'#64748b',fontSize:12}}>{e.description}</td>
-                    <td style={{textAlign:'right',color:'#64748b'}}>{fmt(e.taxBase)}</td>
-                    <td style={{textAlign:'right',fontWeight:800,color:'#dc2626'}}>{fmt(e.taxAmount)}</td>
-                    <td style={{textAlign:'right',fontWeight:800,color:'#15803d'}}>{fmt(e.amountPaid)}</td>
-                    <td style={{color:'#94a3b8',fontSize:12}}>{e.dueDate}</td>
-                    <td style={{fontSize:12,fontWeight:700,color:(e.amountPaid||0)>=(e.taxAmount||0)?'#15803d':'#dc2626'}}>{(e.amountPaid||0)>=(e.taxAmount||0)?'Paid':'Unpaid'}</td>
-                    <td><button className="btn btn-ghost btn-sm" onClick={()=>{setEditingE(e.id);setForm({...e});setShowModal(true);}}>Edit</button></td>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Voucher ID</th>
+                    <th>Source</th>
+                    <th>Payee</th>
+                    <th>Description</th>
+                    <th>Tax Name</th>
+                    <th style={{textAlign:'right'}}>Rate %</th>
+                    <th style={{textAlign:'right'}}>Gross Amt</th>
+                    <th style={{textAlign:'right'}}>Tax Amt</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>{filteredLines.map(l=>(
+                  <tr key={l.key}>
+                    <td style={{color:'#64748b',fontSize:12,whiteSpace:'nowrap'}}>{l.date}</td>
+                    <td style={{fontFamily:'monospace',fontWeight:700,fontSize:12}}>{l.voucherId}</td>
+                    <td style={{fontSize:11,fontWeight:700,color:'#7c3aed'}}>{l.source}</td>
+                    <td style={{fontSize:12}}>{l.payee||<span style={{color:'#cbd5e1'}}>—</span>}</td>
+                    <td style={{color:'#64748b',fontSize:12,maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.description||<span style={{color:'#cbd5e1'}}>—</span>}</td>
+                    <td><span style={{display:'inline-block',padding:'2px 8px',borderRadius:6,fontSize:11,fontWeight:700,background:'#fef3c7',color:'#92400e',border:'1px solid #fde68a'}}>{l.taxName}</span></td>
+                    <td style={{textAlign:'right',fontFamily:'monospace',fontSize:12}}>{fmtP(l.taxRate)}</td>
+                    <td style={{textAlign:'right',color:'#64748b'}}>{fmt(l.grossAmount)}</td>
+                    <td style={{textAlign:'right',fontWeight:800,color:'#dc2626'}}>{fmt(l.taxAmount)}</td>
+                    <td style={{fontSize:11,fontWeight:700,color:l.status==='Paid'?'#15803d':l.status==='Voided'?'#94a3b8':'#c2410c'}}>{l.status}</td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -191,77 +233,93 @@ export default function TaxPage() {
           </div>
         </>}
 
-        {tab === 'rates' && (
-          <div className="card">
-            {rates.length===0 ? <div className="empty">No tax rates. <span style={{color:'#f97316',cursor:'pointer',fontWeight:700}} onClick={()=>{setEditingR(null);setRForm({isActive:true});setShowRateModal(true);}}>Add one →</span></div> : (
-              <table>
-                <thead><tr><th>Tax Name</th><th>Rate %</th><th>Tax Account</th><th>Active</th><th>Actions</th></tr></thead>
-                <tbody>{rates.map(r=>(
-                  <tr key={r.id}>
-                    <td style={{fontWeight:700}}>{r.name}</td>
-                    <td style={{fontFamily:'monospace',fontWeight:800,fontSize:13,color:(r.rate||0)<0?'#dc2626':'#0b1220'}}>{fmtP(r.rate)}</td>
-                    <td style={{color:'#64748b',fontSize:12}}>{r.taxAccount||<span style={{color:'#cbd5e1'}}>—</span>}</td>
-                    <td style={{fontWeight:700,color:r.isActive!==false?'#15803d':'#94a3b8'}}>{r.isActive!==false?'Yes':'No'}</td>
-                    <td><button className="btn btn-ghost btn-sm" onClick={()=>{setEditingR(r.id);setRForm({...r});setShowRateModal(true);}}>Edit</button></td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {tab === 'groups' && (
-          <div className="card">
-            {groups.length===0 ? <div className="empty">No tax groups. <span style={{color:'#f97316',cursor:'pointer',fontWeight:700}} onClick={()=>{setEditingG(null);setGForm({isActive:true,rateNames:[]});setShowGroupModal(true);}}>Add one →</span></div> : (
-              <table>
-                <thead><tr><th>Group Name</th><th>Included Rates</th><th>Active</th><th>Actions</th></tr></thead>
-                <tbody>{groups.map(g=>(
-                  <tr key={g.id}>
-                    <td style={{fontWeight:700}}>{g.name}</td>
-                    <td style={{display:'flex',flexWrap:'wrap',gap:4,padding:'11px 12px'}}>
-                      {(g.rateNames||[]).map(rn=><span key={rn} className="rate-pill">{rn}</span>)}
-                    </td>
-                    <td style={{fontWeight:700,color:g.isActive!==false?'#15803d':'#94a3b8'}}>{g.isActive!==false?'Yes':'No'}</td>
-                    <td><button className="btn btn-ghost btn-sm" onClick={()=>{setEditingG(g.id);setGForm({...g,rateNames:[...(g.rateNames||[])]});setShowGroupModal(true);}}>Edit</button></td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {tab === 'summary' && (() => {
-          // Group entries by taxType and period for a summary view
-          const byType = {};
-          entries.forEach(e => {
-            const k = e.taxType||'Other';
-            if (!byType[k]) byType[k] = { taxType:k, taxBase:0, taxAmount:0, amountPaid:0, count:0 };
-            byType[k].taxBase    += e.taxBase||0;
-            byType[k].taxAmount  += e.taxAmount||0;
-            byType[k].amountPaid += e.amountPaid||0;
-            byType[k].count++;
-          });
-          const rows = Object.values(byType);
+        {tab === 'registry' && (() => {
+          const allItems = [
+            ...rates.map(r => ({ ...r, kind: 'Rate' })),
+            ...groups.map(g => {
+              const effRate = (g.rateNames||[]).reduce((sum, rn) => {
+                const r = rates.find(r2 => r2.name.toLowerCase() === rn.toLowerCase());
+                return sum + (r?.rate || 0);
+              }, 0);
+              return { ...g, kind: 'Group', rate: effRate };
+            }),
+          ].sort((a,b) => a.name.localeCompare(b.name));
           return (
             <div>
-              <div className="summary-bar" style={{gridTemplateColumns:'repeat(4,1fr)'}}>
-                <div className="scard"><div className="scard-label">Total Entries</div><div className="scard-value">{entries.length}</div></div>
-                <div className="scard"><div className="scard-label">Total Tax Base</div><div className="scard-value" style={{fontSize:15}}>{fmt(entries.reduce((s,e)=>s+(e.taxBase||0),0))}</div></div>
-                <div className="scard"><div className="scard-label">Total Tax Due</div><div className="scard-value" style={{color:'#dc2626',fontSize:15}}>{fmt(entries.reduce((s,e)=>s+(e.taxAmount||0),0))}</div></div>
-                <div className="scard"><div className="scard-label">Total Paid</div><div className="scard-value" style={{color:'#15803d',fontSize:15}}>{fmt(entries.reduce((s,e)=>s+(e.amountPaid||0),0))}</div></div>
+              <div style={{display:'flex',gap:8,marginBottom:12}}>
+                <button className="btn btn-ghost btn-sm" onClick={()=>{setEditingR(null);setRForm({isActive:true});setShowRateModal(true);}}>+ Add Rate</button>
+                <button className="btn btn-ghost btn-sm" onClick={()=>{setEditingG(null);setGForm({isActive:true,rateNames:[]});setShowGroupModal(true);}}>+ Add Group</button>
               </div>
               <div className="card">
-                {rows.length===0?<div className="empty">No data.</div>:(
+                {allItems.length===0 ? <div className="empty">No tax registry items yet.</div> : (
                   <table>
-                    <thead><tr><th>Tax Type</th><th style={{textAlign:'right'}}># Entries</th><th style={{textAlign:'right'}}>Tax Base</th><th style={{textAlign:'right'}}>Tax Due</th><th style={{textAlign:'right'}}>Paid</th><th style={{textAlign:'right'}}>Balance</th></tr></thead>
+                    <thead><tr><th>Name</th><th>Kind</th><th>Rate %</th><th>Details</th><th>Active</th><th>Actions</th></tr></thead>
+                    <tbody>{allItems.map(item => (
+                      <tr key={item.id}>
+                        <td style={{fontWeight:700}}>{item.name}</td>
+                        <td>
+                          <span style={{display:'inline-block',padding:'2px 8px',borderRadius:6,fontSize:11,fontWeight:700,
+                            background: item.kind==='Rate' ? '#f0fdf4' : '#eff6ff',
+                            color: item.kind==='Rate' ? '#15803d' : '#1d4ed8',
+                            border: `1px solid ${item.kind==='Rate' ? '#bbf7d0' : '#bfdbfe'}`
+                          }}>{item.kind}</span>
+                        </td>
+                        <td style={{fontFamily:'monospace',fontWeight:800,fontSize:13,color:(item.rate||0)<0?'#dc2626':'#0b1220'}}>{fmtP(item.rate)}</td>
+                        <td style={{color:'#64748b',fontSize:12}}>
+                          {item.kind==='Rate'
+                            ? (() => {
+                                if (item.trackingType==='separate') {
+                                  const parts = [item.taxAccountSales && `Sales: ${item.taxAccountSales}`, item.taxAccountPurchases && `Purchases: ${item.taxAccountPurchases}`].filter(Boolean);
+                                  return parts.length ? <span>{parts.join(' · ')}</span> : <span style={{color:'#cbd5e1'}}>—</span>;
+                                }
+                                return item.taxAccountSingle || <span style={{color:'#cbd5e1'}}>—</span>;
+                              })()
+                            : <span style={{display:'flex',flexWrap:'wrap',gap:4}}>{(item.rateNames||[]).map(rn=><span key={rn} className="rate-pill">{rn}</span>)}</span>
+                          }
+                        </td>
+                        <td style={{fontWeight:700,color:item.isActive!==false?'#15803d':'#94a3b8'}}>{item.isActive!==false?'Yes':'No'}</td>
+                        <td>
+                          {item.kind==='Rate'
+                            ? <button className="btn btn-ghost btn-sm" onClick={()=>{setEditingR(item.id);setRForm({...item});setShowRateModal(true);}}>Edit</button>
+                            : <button className="btn btn-ghost btn-sm" onClick={()=>{setEditingG(item.id);setGForm({...item,rateNames:[...(item.rateNames||[])]});setShowGroupModal(true);}}>Edit</button>
+                          }
+                        </td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {tab === 'summary' && (() => {
+          const byType = {};
+          taxLines.forEach(l => {
+            const k = l.taxName || 'Unknown';
+            if (!byType[k]) byType[k] = { taxName:k, lines:0, gross:0, tax:0 };
+            byType[k].lines++;
+            byType[k].gross += l.grossAmount||0;
+            byType[k].tax   += l.taxAmount||0;
+          });
+          const rows = Object.values(byType).sort((a,b)=>a.taxName.localeCompare(b.taxName));
+          return (
+            <div>
+              <div className="summary-bar" style={{gridTemplateColumns:'repeat(3,1fr)'}}>
+                <div className="scard"><div className="scard-label">Total Tax Lines</div><div className="scard-value">{taxLines.length}</div></div>
+                <div className="scard"><div className="scard-label">Total Gross Amount</div><div className="scard-value" style={{color:'#64748b',fontSize:15}}>{fmt(taxLines.reduce((s,l)=>s+(l.grossAmount||0),0))}</div></div>
+                <div className="scard"><div className="scard-label">Total Tax Amount</div><div className="scard-value" style={{color:'#dc2626',fontSize:15}}>{fmt(taxLines.reduce((s,l)=>s+(l.taxAmount||0),0))}</div></div>
+              </div>
+              <div className="card">
+                {rows.length===0?<div className="empty">No tax transactions yet.</div>:(
+                  <table>
+                    <thead><tr><th>Tax Name</th><th style={{textAlign:'right'}}># Lines</th><th style={{textAlign:'right'}}>Total Gross</th><th style={{textAlign:'right'}}>Total Tax</th></tr></thead>
                     <tbody>{rows.map(r=>(
-                      <tr key={r.taxType}>
-                        <td style={{fontWeight:800,color:'#7c3aed'}}>{r.taxType}</td>
-                        <td style={{textAlign:'right'}}>{r.count}</td>
-                        <td style={{textAlign:'right',color:'#64748b'}}>{fmt(r.taxBase)}</td>
-                        <td style={{textAlign:'right',fontWeight:700,color:'#dc2626'}}>{fmt(r.taxAmount)}</td>
-                        <td style={{textAlign:'right',fontWeight:700,color:'#15803d'}}>{fmt(r.amountPaid)}</td>
-                        <td style={{textAlign:'right',fontWeight:900,color:(r.taxAmount-r.amountPaid)>0?'#dc2626':'#15803d'}}>{fmt(r.taxAmount-r.amountPaid)}</td>
+                      <tr key={r.taxName}>
+                        <td style={{fontWeight:800,color:'#7c3aed'}}>{r.taxName}</td>
+                        <td style={{textAlign:'right'}}>{r.lines}</td>
+                        <td style={{textAlign:'right',color:'#64748b'}}>{fmt(r.gross)}</td>
+                        <td style={{textAlign:'right',fontWeight:700,color:'#dc2626'}}>{fmt(r.tax)}</td>
                       </tr>
                     ))}</tbody>
                   </table>
@@ -271,27 +329,6 @@ export default function TaxPage() {
           );
         })()}
       </div>
-
-      {showModal && (
-        <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setShowModal(false)}>
-          <div className="modal">
-            <div className="modal-h"><strong>{editingE?'Edit Tax Entry':'New Tax Entry'}</strong><button className="btn btn-ghost btn-sm" onClick={()=>setShowModal(false)}>✕</button></div>
-            <div className="modal-b">
-              <div className="field"><label>Tax Type *</label><select value={form.taxType||''} onChange={e=>setForm(f=>({...f,taxType:e.target.value}))}><option value="">Select</option>{allTaxNames.map(t=><option key={t}>{t}</option>)}</select></div>
-              <div className="field"><label>Period (YYYY-MM) *</label><input type="month" value={form.period||''} onChange={e=>setForm(f=>({...f,period:e.target.value}))} /></div>
-              <div className="field"><label>Tax Base</label><input type="number" value={form.taxBase||''} onChange={e=>setForm(f=>({...f,taxBase:e.target.value}))} /></div>
-              <div className="field"><label>Tax Amount</label><input type="number" value={form.taxAmount||''} onChange={e=>setForm(f=>({...f,taxAmount:e.target.value}))} /></div>
-              <div className="field"><label>Amount Paid</label><input type="number" value={form.amountPaid||''} onChange={e=>setForm(f=>({...f,amountPaid:e.target.value}))} /></div>
-              <div className="field"><label>Due Date</label><input type="date" value={form.dueDate||''} onChange={e=>setForm(f=>({...f,dueDate:e.target.value}))} /></div>
-              <div className="field full"><label>Description</label><textarea rows={2} value={form.description||''} onChange={e=>setForm(f=>({...f,description:e.target.value}))} /></div>
-            </div>
-            <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>setShowModal(false)}>Cancel</button>
-              <button className="btn btn-primary" onClick={saveEntry} disabled={saving}>{saving?'Saving…':editingE?'Save Changes':'Add Entry'}</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {showRateModal && (
         <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setShowRateModal(false)}>
@@ -309,18 +346,66 @@ export default function TaxPage() {
                 <span className="hint">Negative = deducted from cash payment (EWT-style).</span>
               </div>
               <div className="field">
-                <label>Tax Account</label>
-                <select value={rForm.taxAccount||''} onChange={e=>setRForm(f=>({...f,taxAccount:e.target.value}))}>
-                  <option value="">(none)</option>
-                  {accounts.map(a=><option key={a.id} value={`${a.code} — ${a.name}`}>{a.code} — {a.name}</option>)}
-                </select>
-              </div>
-              <div className="field">
                 <label>Active</label>
                 <select value={rForm.isActive===false?'false':'true'} onChange={e=>setRForm(f=>({...f,isActive:e.target.value==='true'}))}>
                   <option value="true">Yes</option>
                   <option value="false">No</option>
                 </select>
+              </div>
+              <div style={{gridColumn:'span 2',borderTop:'1px solid #e2e8f0',paddingTop:14,marginTop:4}}>
+                <div style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase',marginBottom:10}}>Tracking Preference</div>
+                <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                  {/* Single account option */}
+                  <div style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer'}}
+                       onClick={()=>setRForm(f=>({...f,trackingType:'single'}))}>
+                    <input type="radio" readOnly checked={(rForm.trackingType||'single')==='single'}
+                      style={{marginTop:3,flexShrink:0,accentColor:'#f97316',cursor:'pointer'}} />
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13,color:'#0b1220'}}>Track taxes under a single account</div>
+                      <div style={{fontSize:11,color:'#64748b',marginTop:2}}>All tax transactions will be posted to one account.</div>
+                    </div>
+                  </div>
+                  {(rForm.trackingType||'single')==='single' && (
+                    <div style={{marginLeft:26,display:'flex',flexDirection:'column',gap:4}}>
+                      <div style={{fontSize:11,fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'.05em'}}>Tax Account</div>
+                      <AccountCombobox
+                        options={accounts.map(a=>({value:`${a.code} — ${a.name}`,label:`${a.code} — ${a.name}`}))}
+                        value={rForm.taxAccountSingle||''}
+                        onChange={v=>setRForm(f=>({...f,taxAccountSingle:v}))}
+                      />
+                    </div>
+                  )}
+                  {/* Separate accounts option */}
+                  <div style={{display:'flex',alignItems:'flex-start',gap:10,cursor:'pointer'}}
+                       onClick={()=>setRForm(f=>({...f,trackingType:'separate'}))}>
+                    <input type="radio" readOnly checked={rForm.trackingType==='separate'}
+                      style={{marginTop:3,flexShrink:0,accentColor:'#f97316',cursor:'pointer'}} />
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13,color:'#0b1220'}}>Track taxes under separate accounts</div>
+                      <div style={{fontSize:11,color:'#64748b',marginTop:2}}>Use different accounts for sales and purchases.</div>
+                    </div>
+                  </div>
+                  {rForm.trackingType==='separate' && (
+                    <div style={{marginLeft:26,display:'flex',flexDirection:'column',gap:10}}>
+                      <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                        <div style={{fontSize:11,fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'.05em'}}>Account to Track Sales</div>
+                        <AccountCombobox
+                          options={accounts.map(a=>({value:`${a.code} — ${a.name}`,label:`${a.code} — ${a.name}`}))}
+                          value={rForm.taxAccountSales||''}
+                          onChange={v=>setRForm(f=>({...f,taxAccountSales:v}))}
+                        />
+                      </div>
+                      <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                        <div style={{fontSize:11,fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'.05em'}}>Account to Track Purchases</div>
+                        <AccountCombobox
+                          options={accounts.map(a=>({value:`${a.code} — ${a.name}`,label:`${a.code} — ${a.name}`}))}
+                          value={rForm.taxAccountPurchases||''}
+                          onChange={v=>setRForm(f=>({...f,taxAccountPurchases:v}))}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
             <div className="modal-f">

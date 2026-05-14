@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import AccountCombobox from '../../../components/AccountCombobox.jsx';
 
 /* ─── Constants ─────────────────────────────────────────────────── */
 const LOAN_TYPES = [
@@ -187,7 +188,8 @@ export default function FinancialPage() {
   const [confirmModal, setConfirmModal] = useState(null);
   const [pdFillD1, setPdFillD1]         = useState('');
   const [pdFillD2, setPdFillD2]         = useState('');
-  const [calVoucherModal, setCalVoucherModal] = useState(null); // { day, month, year, events }
+  const [calDayModal,     setCalDayModal]     = useState(null); // { day, month, year, events } — preview
+  const [calVoucherModal, setCalVoucherModal] = useState(null); // { day, month, year, events } — full form
   const [calAccounts, setCalAccounts]     = useState([]);
   const [vForm,        setVForm]          = useState({});
   const [vLines,       setVLines]         = useState([]);
@@ -779,7 +781,7 @@ export default function FinancialPage() {
                   const hasEvts  = dayEvts.length > 0;
                   return (
                     <div key={di}
-                      onClick={() => hasEvts && openCalVoucher(day, calMonth, calYear, dayEvts)}
+                      onClick={() => hasEvts && setCalDayModal({ day, month: calMonth, year: calYear, events: dayEvts })}
                       style={{
                         minHeight:72, background:'#fff', border:`1px solid ${isToday?'#f97316':'#e5e7eb'}`,
                         borderRadius:8, padding:'6px 7px', cursor: hasEvts ? 'pointer' : 'default',
@@ -1116,6 +1118,71 @@ export default function FinancialPage() {
         </div>
       )}
 
+      {/* ── Day Preview Modal ───────────────────────────────────────── */}
+      {calDayModal && (() => {
+        const { day, month, year, events: dayEvts } = calDayModal;
+        const monthLabel = MONTH_NAMES[month] + '-' + year;
+        const totalInt = dayEvts.reduce((s,e)=>s+e.interest,0);
+        const totalPri = dayEvts.reduce((s,e)=>s+e.principal,0);
+        const thS = { padding:'8px 12px', textAlign:'left', fontWeight:800, color:'#64748b',
+          fontSize:10, letterSpacing:'.05em', textTransform:'uppercase', background:'#f8fafc' };
+        return (
+          <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setCalDayModal(null)}>
+            <div style={{width:'min(520px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)',display:'flex',flexDirection:'column'}}>
+              {/* Header */}
+              <div style={{background:'#f97316',color:'#fff',padding:'16px 20px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                <div>
+                  <div style={{fontWeight:900,fontSize:16}}>📅 Payment Due</div>
+                  <div style={{fontSize:12,opacity:.85,marginTop:3}}>{MONTH_NAMES[month]} {day}, {year} &nbsp;·&nbsp; {dayEvts.length} loan{dayEvts.length!==1?'s':''}</div>
+                </div>
+                <button onClick={()=>setCalDayModal(null)}
+                  style={{background:'rgba(255,255,255,.25)',border:'none',color:'#fff',borderRadius:8,width:28,height:28,cursor:'pointer',fontSize:14,fontWeight:900,display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button>
+              </div>
+              {/* Loan breakdown */}
+              <div style={{padding:'16px 20px',overflowY:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                  <thead>
+                    <tr>
+                      <th style={thS}>Loan / Lender</th>
+                      <th style={{...thS,textAlign:'right'}}>Type</th>
+                      <th style={{...thS,textAlign:'right',color:'#dc2626'}}>Interest</th>
+                      <th style={{...thS,textAlign:'right',color:'#2563eb'}}>Principal</th>
+                      <th style={{...thS,textAlign:'right'}}>Total PMT</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dayEvts.map((e,i)=>(
+                      <tr key={i} style={{borderTop:'1px solid #f1f5f9'}}>
+                        <td style={{padding:'9px 12px',fontWeight:700}}>{e.loan.name||`Loan ${e.loan.id}`}</td>
+                        <td style={{padding:'9px 12px',color:'#64748b',fontSize:11}}>{e.loan.loanType||'—'}</td>
+                        <td style={{padding:'9px 12px',textAlign:'right',color:'#dc2626',fontWeight:700}}>{fmtCur(e.interest)}</td>
+                        <td style={{padding:'9px 12px',textAlign:'right',color:'#2563eb',fontWeight:700}}>{fmtCur(e.principal)}</td>
+                        <td style={{padding:'9px 12px',textAlign:'right',fontWeight:900}}>{fmtCur(e.interest+e.principal)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{borderTop:'2px solid #e5e7eb',background:'#f8fafc'}}>
+                      <td colSpan={2} style={{padding:'9px 12px',fontWeight:900}}>TOTAL</td>
+                      <td style={{padding:'9px 12px',textAlign:'right',fontWeight:900,color:'#dc2626'}}>{fmtCur(totalInt)}</td>
+                      <td style={{padding:'9px 12px',textAlign:'right',fontWeight:900,color:'#2563eb'}}>{fmtCur(totalPri)}</td>
+                      <td style={{padding:'9px 12px',textAlign:'right',fontWeight:900}}>{fmtCur(totalInt+totalPri)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              {/* Footer */}
+              <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'14px 20px',borderTop:'1px solid #e5e7eb'}}>
+                <button className="btn btn-ghost" onClick={()=>setCalDayModal(null)}>Close</button>
+                <button className="btn btn-primary" onClick={()=>{ setCalDayModal(null); openCalVoucher(day, month, year, dayEvts); }}>
+                  Create Voucher
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Create Voucher from Calendar (full form) ───────────────── */}
       {calVoucherModal && (() => {
         const { day, month, year, events: dayEvts } = calVoucherModal;
@@ -1185,15 +1252,15 @@ export default function FinancialPage() {
                   </div>
                   <div style={{gridColumn:'span 2',display:'flex',flexDirection:'column',gap:5}}>
                     <label style={{fontSize:10,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase'}}>Payment From (Bank)</label>
-                    <select style={inpS} value={vForm.paymentFrom||''} onChange={e=>setVForm(f=>({...f,paymentFrom:e.target.value}))}>
-                      <option value="">— Select Account —</option>
-                      {bankAccounts.map(a=>(
-                        <option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>
-                      ))}
-                      {bankAccounts.length===0 && calAccounts.map(a=>(
-                        <option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>
-                      ))}
-                    </select>
+                    <AccountCombobox
+                      options={[
+                        ...bankAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`})),
+                        ...(bankAccounts.length===0 ? calAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`})) : []),
+                      ]}
+                      value={vForm.paymentFrom||''}
+                      onChange={v=>setVForm(f=>({...f,paymentFrom:v}))}
+                      placeholder="— Select Account —"
+                    />
                   </div>
                 </div>
 
@@ -1224,8 +1291,12 @@ export default function FinancialPage() {
                             <input style={inpS} value={ln.contact} onChange={e=>setLine(i,'contact',e.target.value)} placeholder="Contact name" />
                           </td>
                           <td style={{padding:'5px 8px'}}>
-                            <input style={inpS} value={ln.expenseAccount} onChange={e=>setLine(i,'expenseAccount',e.target.value)} placeholder="Account code" list={`cv-acct-${i}`} />
-                            <datalist id={`cv-acct-${i}`}>{calAccounts.map(a=><option key={a.id} value={a.code||a.id}>{a.code} — {a.name}</option>)}</datalist>
+                            <AccountCombobox
+                              options={calAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`}))}
+                              value={ln.expenseAccount}
+                              onChange={v=>setLine(i,'expenseAccount',v)}
+                              placeholder="Account code"
+                            />
                           </td>
                           <td style={{padding:'5px 8px'}}>
                             <input style={inpS} value={ln.description} onChange={e=>setLine(i,'description',e.target.value)} placeholder="Description" />
