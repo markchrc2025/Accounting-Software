@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   collection, query, orderBy, onSnapshot,
-  addDoc, updateDoc, doc, serverTimestamp, deleteDoc
+  addDoc, updateDoc, doc, serverTimestamp, deleteDoc, getDocs,
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import { nextPaymentScheduleId } from '../../../utils/documentIds.js';
+import { issueCheck, getActiveCheckbook } from '../../../utils/issueCheck.js';
+import { nextVoucherId } from '../../../utils/documentIds.js';
 
 const CATEGORIES = ['Rent','Utilities','Insurance','Salaries','Loan Payment','Subscription','Tax','Other'];
 const FREQS = ['Monthly','Quarterly','Semi-Annual','Annual','One-Time'];
@@ -130,6 +132,8 @@ export default function PaymentSchedulePage() {
   const [toast, setToast] = useState('');
   const [confirmModal, setConfirmModal] = useState(null);
   const [calOffset, setCalOffset] = useState(0);
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [payModal, setPayModal] = useState(null); // { schedule, dueDate }
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); }
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });;
@@ -137,6 +141,16 @@ export default function PaymentSchedulePage() {
   useEffect(() => {
     const q = query(collection(db,'paymentSchedules'), orderBy('createdAt','desc'));
     return onSnapshot(q, snap => setSchedules(snap.docs.map(d=>({id:d.id,...d.data()}))));
+  }, []);
+
+  // Load bank/cash accounts for the pay modal
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await getDocs(collection(db,'coaAccounts'));
+        setBankAccounts(s.docs.map(d=>({id:d.id,...d.data()})).filter(a => /cash|bank/i.test(a.parentName||a.category||a.name||'')));
+      } catch { /* ignore */ }
+    })();
   }, []);
 
   /* ── KPIs ────────────────────────────────────────────────────── */
@@ -472,7 +486,7 @@ export default function PaymentSchedulePage() {
           </div>
           <div style={{display:'flex',gap:6}}>
             <button className="btn btn-ghost btn-sm" onClick={()=>setModal({...s})}>Edit</button>
-            <button className="btn btn-primary btn-sm" onClick={()=>{/* create voucher */showToast('Create Voucher: coming soon');}}>+ Create Voucher</button>
+            <button className="btn btn-primary btn-sm" onClick={()=>setPayModal({schedule:s, dueDate:nxt||today.toISOString().slice(0,10)})}>+ Record Payment</button>
             <button onClick={()=>setDetailId(null)} style={{background:'none',border:'none',color:'#94a3b8',cursor:'pointer',fontSize:16,padding:'0 4px'}}>✕</button>
           </div>
         </div>
@@ -631,6 +645,7 @@ export default function PaymentSchedulePage() {
       </div>
       {modal!==null&&<ScheduleModal />}
       {pmModal!==null&&<PmModal />}
+      {payModal&&<RecordSchedulePaymentModal info={payModal} onClose={()=>setPayModal(null)} bankAccounts={bankAccounts} onSaved={()=>{setPayModal(null);showToast('Payment recorded.');}} />}
       {confirmModal && (
         <div className="backdrop" onClick={() => setConfirmModal(null)}>
           <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
@@ -649,6 +664,201 @@ export default function PaymentSchedulePage() {
         </div>
       )}
       {toast&&<div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Modal: record an actual payment for a recurring schedule occurrence.
+// Uses the shared issueCheck helper when method === 'Check' so the
+// Check Register & Checkbook Inventory remain authoritative.
+// ──────────────────────────────────────────────────────────────────────────
+function RecordSchedulePaymentModal({ info, onClose, bankAccounts, onSaved }) {
+  const s = info.schedule;
+  const [form, setForm] = useState({
+    date:      info.dueDate || new Date().toISOString().slice(0,10),
+    amount:    Number(s.amount||0).toFixed(2),
+    method:    s.paymentMethod || 'Check',
+    bank:      s.bankCode || s.pmCheckBank || s.pmAdaBank || s.pmBtBank || '',
+    checkNo:   '',
+    autoVoucher: true,
+    notes:     `${s.title} — ${info.dueDate}`,
+  });
+  const [activeCb, setActiveCb] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err,  setErr]  = useState('');
+  const upd = (k,v) => setForm(f => ({...f,[k]:v}));
+
+  useEffect(() => {
+    if (form.method !== 'Check' || !form.bank) { setActiveCb(null); return; }
+    let cancel = false;
+    getActiveCheckbook(form.bank).then(cb => { if(!cancel) setActiveCb(cb); }).catch(()=>setActiveCb(null));
+    return () => { cancel = true; };
+  }, [form.bank, form.method]);
+
+  useEffect(() => {
+    if (form.method === 'Check' && activeCb && !form.checkNo) {
+      setForm(f => ({ ...f, checkNo: String(activeCb.nextCheckNumber||'') }));
+    }
+  }, [activeCb, form.method]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function save() {
+    const total = Number(form.amount) || 0;
+    if (!form.date) { setErr('Date required.'); return; }
+    if (total <= 0) { setErr('Amount must be > 0.'); return; }
+    if (form.method === 'Check' && !form.bank)  { setErr('Select a bank account.'); return; }
+    if (form.method === 'Check' && !activeCb)   { setErr('No active checkbook for this bank.'); return; }
+    setBusy(true); setErr('');
+    try {
+      const user = auth.currentUser?.email || '';
+
+      // Voucher
+      let voucherDocId = '', voucherIdStr = '';
+      if (form.autoVoucher) {
+        const lines = [{
+          lineNo: 1, description: s.title, amount: total,
+          category: s.category || 'Other', expenseAccountCode: '',
+          contactId: s.contactId || '', contact: s.contactId || s.title,
+          taxType: 'N/A', taxRate: 0, taxAmt: 0,
+        }];
+        voucherIdStr = await nextVoucherId('CV', form.date);
+        const ref = await addDoc(collection(db,'vouchers'), {
+          voucherId: voucherIdStr,
+          voucherType: 'CV',
+          preparationDate: form.date,
+          purposeCategory: s.category || 'Scheduled Payment',
+          paymentFromAccountCode: form.bank || '',
+          contactSummary: s.contactId || s.title,
+          totalAmount: total,
+          status: 'Pending',
+          notes: form.notes || '',
+          linkedScheduleId: s.id,
+          linkedScheduleDate: info.dueDate,
+          lines,
+          createdAt: serverTimestamp(), createdBy: user,
+          updatedAt: serverTimestamp(), updatedBy: user,
+        });
+        voucherDocId = ref.id;
+      }
+
+      // Issue check
+      let checkInfo = null;
+      if (form.method === 'Check' && activeCb) {
+        checkInfo = await issueCheck({
+          bankCode:      form.bank,
+          payeeName:     s.contactId || s.title,
+          amount:        total,
+          netAmount:     total,
+          issueDate:     form.date,
+          checkNumber:   form.checkNo || undefined,
+          referenceType: 'Scheduled Payment',
+          referenceId:   s.id,
+          voucherDocId,
+          notes:         form.notes,
+          user,
+        });
+      }
+
+      // Record schedule payment
+      await addDoc(collection(db,'schedulePayments'), {
+        scheduleId: s.id,
+        scheduleTitle: s.title || '',
+        dueDate: info.dueDate,
+        date: form.date,
+        amount: total,
+        method: form.method,
+        bank: form.bank || '',
+        checkId:         checkInfo?.checkId || '',
+        checkNumber:     checkInfo?.checkNumber || form.checkNo || '',
+        checkRegisterId: checkInfo?.checkRegisterId || '',
+        voucherId:    voucherIdStr,
+        voucherDocId,
+        notes: form.notes || '',
+        createdAt: serverTimestamp(), createdBy: user,
+      });
+
+      onSaved && onSaved();
+    } catch (e) {
+      console.error(e);
+      setErr(e.message || 'Failed to save.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="backdrop" onClick={e => e.target===e.currentTarget && onClose()}>
+      <div className="modal modal-sm">
+        <div className="modal-h">
+          <div>
+            <strong>Record Payment</strong>
+            <div style={{fontSize:11,color:'#64748b',marginTop:2}}>{s.title} · Due {info.dueDate}</div>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-b">
+          {form.method==='Check' && form.bank && (
+            activeCb ? (
+              <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderLeft:'4px solid #1d4ed8',borderRadius:8,padding:'8px 12px',marginBottom:12,fontSize:12,color:'#1e3a8a',display:'flex',flexWrap:'wrap',gap:10}}>
+                <span>📋 <strong>Active Checkbook</strong></span>
+                <span>{activeCb.checkbookType}</span>
+                <span>Range: <strong>{activeCb.startingNumber}–{activeCb.endingNumber}</strong></span>
+                <span>Next: <strong style={{color:'#f97316'}}>{activeCb.nextCheckNumber}</strong></span>
+              </div>
+            ) : (
+              <div style={{background:'#fff7ed',border:'1px solid #fed7aa',borderLeft:'4px solid #f97316',borderRadius:8,padding:'8px 12px',marginBottom:12,fontSize:12,color:'#9a3412'}}>
+                ⚠️ No active checkbook for this bank — open Check Registry → Checkbook Management.
+              </div>
+            )
+          )}
+          <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:10,marginBottom:12}}>
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Payment Date</label>
+              <input type="date" style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}} value={form.date} onChange={e=>upd('date',e.target.value)} />
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Method</label>
+              <select style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}} value={form.method} onChange={e=>upd('method',e.target.value)}>
+                {['Check','Bank Transfer','Auto-Debit','Cash','Online'].map(m => <option key={m}>{m}</option>)}
+              </select>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Amount ₱</label>
+              <input type="number" step="0.01" style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13,textAlign:'right'}} value={form.amount} onChange={e=>upd('amount',e.target.value)} />
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Bank Account</label>
+              {bankAccounts.length > 0 ? (
+                <select style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}} value={form.bank} onChange={e=>upd('bank',e.target.value)}>
+                  <option value="">— Select —</option>
+                  {bankAccounts.map(b => <option key={b.id} value={b.code||b.id}>{b.code} — {b.name}</option>)}
+                </select>
+              ) : (
+                <input style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}} value={form.bank} onChange={e=>upd('bank',e.target.value)} placeholder="Bank account code" />
+              )}
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>{form.method==='Check' ? 'Check #' : 'Reference No.'}</label>
+              <input style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}} value={form.checkNo} onChange={e=>upd('checkNo',e.target.value)} />
+            </div>
+            <div style={{display:'flex',alignItems:'flex-end',gap:8}}>
+              <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,fontWeight:600,cursor:'pointer'}}>
+                <input type="checkbox" checked={form.autoVoucher} onChange={e=>upd('autoVoucher',e.target.checked)} />
+                Auto-create CV
+              </label>
+            </div>
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:5,marginBottom:8}}>
+            <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Notes</label>
+            <input style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}} value={form.notes} onChange={e=>upd('notes',e.target.value)} />
+          </div>
+          {err && <div style={{marginTop:10,padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',color:'#b91c1c',borderRadius:8,fontSize:12,fontWeight:600}}>{err}</div>}
+        </div>
+        <div className="modal-f">
+          <button className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn btn-primary" onClick={save} disabled={busy}>{busy?'Saving…':'Record Payment'}</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc,
+  collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, writeBatch, getDocs,
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
@@ -9,7 +9,7 @@ import ContactPicker from '../../../components/ContactPicker.jsx';
 import { nextCheckVoucherId } from '../../../utils/documentIds.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const CHECKBOOK_TYPES = ['Regular', 'Business', 'Payroll', 'Manager'];
+const CHECKBOOK_TYPES = ['Loose', 'Bound'];
 const CHECK_STATUSES  = ['Issued', 'Cleared', 'Voided', 'Stopped', 'Stale'];
 
 const STATUS_STYLES = {
@@ -19,11 +19,6 @@ const STATUS_STYLES = {
   Stopped: { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
   Stale:   { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
 };
-
-const PURPOSE_SUGGESTIONS = [
-  'Bills Payment', 'Rent', 'Utilities', 'Professional Fees', 'Office Supplies',
-  'Transportation', 'Representation', 'Taxes & Licenses', 'Contractor Payment', 'Supplier Payment',
-];
 
 const uid   = () => Math.random().toString(36).slice(2, 10).toUpperCase();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -69,6 +64,7 @@ const CSS = `
   .empty      { padding:48px; text-align:center; color:#94a3b8; font-size:13px; }
   .backdrop   { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
   .modal      { width:min(1000px,98vw); max-height:92vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
+  .modal-fs   { width:100vw; height:100vh; max-height:100vh; border-radius:0; }
   .modal-sm   { width:min(480px,98vw); }
   .modal-h    { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid #e5e7eb; background:#f8fafc; flex-shrink:0; }
   .modal-h strong { font-size:15px; font-weight:900; }
@@ -106,6 +102,7 @@ export default function CheckRegistryPage() {
   const [taxRates,   setTaxRates]   = useState([]);
   const [taxGroups,  setTaxGroups]  = useState([]);
   const [vouchers,   setVouchers]   = useState([]);
+  const [purposeCategories, setPurposeCategories] = useState([]);
 
   const [activeTab,    setActiveTab]    = useState('register');
   const [cvModal,      setCvModal]      = useState(null);
@@ -141,7 +138,8 @@ export default function CheckRegistryPage() {
     const u5 = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap => setTaxGroups(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(g => g.isActive !== false)));
     getDocs(collection(db,'accounts')).then(s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
     const u6 = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    return () => { u1(); u2(); u3(); u4(); u5(); u6(); };
+    const u7 = onSnapshot(query(collection(db,'purposeCategories'), orderBy('name')), snap => setPurposeCategories(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
+    return () => { u1(); u2(); u3(); u4(); u5(); u6(); u7(); };
   }, []);
 
   // ── Derived ────────────────────────────────────────────────────────────────
@@ -388,6 +386,33 @@ export default function CheckRegistryPage() {
 
     if (assignedCheckNo > end) return alert(`Checkbook exhausted (all checks up to #${end} used). Create a new checkbook.`);
 
+    // ── Duplicate check-number safeguard ───────────────────────────────────
+    const numbersToValidate = cvForm.isMultipleChecks
+      ? cvLines.map(l => String(l.lineCheckNo||'').trim()).filter(Boolean)
+      : [String(assignedCheckNo)];
+
+    // 1. Intra-form duplicates (multiple checks only)
+    if (cvForm.isMultipleChecks) {
+      const seen = new Set();
+      for (const n of numbersToValidate) {
+        if (seen.has(n)) return alert(`Duplicate check number within this voucher: ${n}. Each line must use a unique check number.`);
+        seen.add(n);
+      }
+    }
+
+    // 2. Already-used in Firestore
+    try {
+      const snap = await getDocs(query(
+        collection(db,'checkRegister'),
+        where('bankCode','==',cvForm.bankCode),
+        where('checkNumber','in', numbersToValidate.slice(0,30)),
+      ));
+      if (!snap.empty) {
+        const dupes = snap.docs.map(d => d.data().checkNumber).join(', ');
+        return alert(`Check number(s) already used for this bank: ${dupes}. Please use a different check number.`);
+      }
+    } catch(e) { console.error('Duplicate check validation failed:', e); }
+
     setSaving(true);
     try {
       const voucherId    = await nextCheckVoucherId(cvForm.issueDate);
@@ -490,13 +515,24 @@ export default function CheckRegistryPage() {
   // ── Save checkbook (one-active-per-bank enforcement) ──────────────────────
   const saveCheckbook = async (form) => {
     if (!form.bankCode)       return alert('Select a bank.');
-    if (!form.startingNumber) return alert('Starting number required.');
-    if (!form.endingNumber)   return alert('Ending number required.');
+    if (!form.startingNumber) return alert('Starting series required.');
+    const isLoose = (form.checkbookType || 'Loose') === 'Loose';
+    let resolvedEnding = form.endingNumber;
+    if (isLoose) {
+      const cnt = parseInt(form.checksCount);
+      if (!cnt || cnt < 1) return alert('Checks Count required.');
+      const start = parseInt(form.startingNumber) || 0;
+      const width = form.startingNumber.length;
+      resolvedEnding = String(start + cnt - 1).padStart(width, '0');
+    } else {
+      if (!form.endingNumber) return alert('Ending number required.');
+    }
     setSaving(true);
     try {
       const payload = {
-        bankCode:form.bankCode, checkbookType:form.checkbookType||'Regular',
-        startingNumber:form.startingNumber, endingNumber:form.endingNumber,
+        bankCode:form.bankCode, checkbookType:form.checkbookType||'Loose',
+        startingNumber:form.startingNumber, endingNumber:resolvedEnding,
+        ...(isLoose ? { checksCount: parseInt(form.checksCount) } : {}),
         nextCheckNumber:form.nextCheckNumber||form.startingNumber,
         isActive:form.isActive!==false, notes:form.notes||'',
         updatedAt:serverTimestamp(), updatedBy:user,
@@ -606,8 +642,23 @@ export default function CheckRegistryPage() {
             {CHECK_STATUSES.map(s => <option key={s}>{s}</option>)}
           </select>
           <input placeholder="Search check #, payee, reference…" value={search} onChange={e => setSearch(e.target.value)} style={{ minWidth:200 }} />
-          {(filterBank||filterStatus||search) && (
-            <button className="btn btn-ghost btn-sm" onClick={() => { setFilterBank(''); setFilterStatus(''); setSearch(''); }}>Clear</button>
+          <span style={{ display:'flex', gap:4, alignItems:'center', borderLeft:'1px solid #e5e7eb', paddingLeft:8 }}>
+            {[
+              { k:'',      label:'All' },
+              { k:'week',  label:'This Week' },
+              { k:'month', label:'This Month' },
+              { k:'year',  label:'This Year' },
+            ].map(p => (
+              <button key={p.k||'all'} className={`btn btn-sm ${periodPreset===p.k?'btn-primary':'btn-ghost'}`}
+                onClick={() => { setPeriodPreset(p.k); if (!p.k) { setDateFrom(''); setDateTo(''); } }}>
+                {p.label}
+              </button>
+            ))}
+          </span>
+          <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setPeriodPreset(''); }} title="From date" />
+          <input type="date" value={dateTo}   onChange={e => { setDateTo(e.target.value);   setPeriodPreset(''); }} title="To date" />
+          {(filterBank||filterStatus||search||dateFrom||dateTo||periodPreset) && (
+            <button className="btn btn-ghost btn-sm" onClick={() => { setFilterBank(''); setFilterStatus(''); setSearch(''); setDateFrom(''); setDateTo(''); setPeriodPreset(''); }}>Clear</button>
           )}
           <button className="btn btn-ghost btn-sm" onClick={flagStaleChecks} style={{ marginLeft:'auto' }} title="Mark Issued checks older than 180 days as Stale">⚑ Flag Stale</button>
           <span style={{ fontSize:12, color:'#64748b' }}>
@@ -662,20 +713,193 @@ export default function CheckRegistryPage() {
     );
   }
 
+  // ══ Tab: Analytics & Aging ═════════════════════════════════════════════════
+  function AnalyticsTab() {
+    const totalIssuedCount = checks.filter(c => c.status === 'Issued').length;
+    const totalIssuedAmt   = checks.filter(c => c.status === 'Issued').reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+    const agingTotalAmt    = aging['0-30'].a + aging['31-60'].a + aging['61-90'].a + aging['90+'].a;
+
+    return (
+      <div>
+        <div style={{ fontSize:13, fontWeight:900, marginBottom:8, color:'#0b1220' }}>
+          Outstanding Check Aging
+          <span style={{ marginLeft:8, fontSize:11, color:'#64748b', fontWeight:600 }}>
+            {totalIssuedCount} outstanding · {fmt(totalIssuedAmt)}
+          </span>
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:10, marginBottom:18 }}>
+          {[
+            { k:'0-30',  label:'Current (0–30 days)', color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0' },
+            { k:'31-60', label:'31–60 days',          color:'#a16207', bg:'#fef9c3', border:'#fde68a' },
+            { k:'61-90', label:'61–90 days',          color:'#c2410c', bg:'#fff7ed', border:'#fed7aa' },
+            { k:'90+',   label:'Over 90 days',        color:'#b91c1c', bg:'#fef2f2', border:'#fecaca' },
+          ].map(b => {
+            const v = aging[b.k];
+            const pct = agingTotalAmt > 0 ? Math.round((v.a / agingTotalAmt) * 100) : 0;
+            return (
+              <div key={b.k} style={{ background:b.bg, border:`1px solid ${b.border}`, borderRadius:12, padding:'14px 16px' }}>
+                <div style={{ fontSize:9, fontWeight:800, color:'#64748b', letterSpacing:'.07em', textTransform:'uppercase', marginBottom:6 }}>{b.label}</div>
+                <div style={{ fontSize:18, fontWeight:900, color:b.color }}>{fmt(v.a)}</div>
+                <div style={{ fontSize:11, color:'#64748b', marginTop:3 }}>{v.n} check{v.n!==1?'s':''} · {pct}% of outstanding</div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap', marginBottom:10 }}>
+          <span style={{ fontSize:13, fontWeight:900 }}>Issued vs Cleared by Period</span>
+          <span style={{ display:'flex', gap:4 }}>
+            {['week','month','year'].map(b => (
+              <button key={b} className={`btn btn-sm ${analyticsBucket===b?'btn-primary':'btn-ghost'}`} onClick={() => setAnalyticsBucket(b)}>
+                {b[0].toUpperCase()+b.slice(1)}ly
+              </button>
+            ))}
+          </span>
+          <span style={{ marginLeft:'auto' }}>
+            <AccountCombobox
+              options={bankAccounts.map(b=>({value:b.code||b.id,label:`${b.code} — ${b.name}`}))}
+              value={analyticsBank}
+              onChange={v => setAnalyticsBank(v)}
+              placeholder="All Banks"
+              noneLabel="All Banks"
+              style={{ width:220 }}
+            />
+          </span>
+        </div>
+        {series.length === 0 ? (
+          <div className="empty">No checks to analyze yet.</div>
+        ) : (
+          <div style={{ overflowX:'auto', marginBottom:18 }}>
+            <table>
+              <thead><tr>
+                <th>Period</th>
+                <th style={{ textAlign:'right' }}>Issued #</th>
+                <th style={{ textAlign:'right' }}>Issued Amt</th>
+                <th style={{ textAlign:'right' }}>Cleared #</th>
+                <th style={{ textAlign:'right' }}>Cleared Amt</th>
+                <th style={{ textAlign:'right' }}>Voided #</th>
+                <th style={{ textAlign:'right' }}>Outstanding Amt</th>
+                <th>Clear Rate</th>
+              </tr></thead>
+              <tbody>
+                {series.map(r => {
+                  const out  = r.issuedA - r.clearedA - r.voidedA;
+                  const rate = r.issuedN > 0 ? Math.round((r.clearedN / r.issuedN) * 100) : 0;
+                  return (
+                    <tr key={r.key}>
+                      <td style={{ fontFamily:'monospace', fontWeight:700 }}>{r.key}</td>
+                      <td style={{ textAlign:'right' }}>{r.issuedN}</td>
+                      <td style={{ textAlign:'right', fontWeight:700, color:'#1d4ed8' }}>{fmt(r.issuedA)}</td>
+                      <td style={{ textAlign:'right' }}>{r.clearedN}</td>
+                      <td style={{ textAlign:'right', color:'#15803d' }}>{fmt(r.clearedA)}</td>
+                      <td style={{ textAlign:'right', color:'#b91c1c' }}>{r.voidedN || '—'}</td>
+                      <td style={{ textAlign:'right', fontWeight:700, color:out>0?'#c2410c':'#94a3b8' }}>{fmt(out)}</td>
+                      <td>
+                        <div style={{ background:'#f1f5f9', borderRadius:99, height:6, width:90, overflow:'hidden' }}>
+                          <div style={{ width:`${rate}%`, height:'100%', background:rate>=80?'#22c55e':rate>=50?'#f97316':'#ef4444' }} />
+                        </div>
+                        <div style={{ fontSize:10, color:'#64748b', marginTop:2 }}>{rate}%</div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div style={{ fontSize:13, fontWeight:900, marginBottom:8 }}>Outstanding by Bank</div>
+        <div style={{ overflowX:'auto' }}>
+          <table>
+            <thead><tr>
+              <th>Bank</th>
+              <th style={{ textAlign:'right' }}>Outstanding #</th>
+              <th style={{ textAlign:'right' }}>Outstanding Amount</th>
+              <th style={{ textAlign:'right' }}>Cleared (lifetime)</th>
+              <th style={{ textAlign:'right' }}>Voided (lifetime)</th>
+            </tr></thead>
+            <tbody>
+              {bankAccounts.map(b => {
+                const code = b.code || b.id;
+                const list = checks.filter(c => c.bankCode === code);
+                if (list.length === 0) return null;
+                const out  = list.filter(c => c.status === 'Issued');
+                const outAmt = out.reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+                const cl     = list.filter(c => c.status === 'Cleared').reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+                const vd     = list.filter(c => c.status === 'Voided') .reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+                return (
+                  <tr key={code}>
+                    <td style={{ fontWeight:600 }}>{b.code} — {b.name}</td>
+                    <td style={{ textAlign:'right' }}>{out.length}</td>
+                    <td style={{ textAlign:'right', fontWeight:700, color:'#c2410c' }}>{fmt(outAmt)}</td>
+                    <td style={{ textAlign:'right', color:'#15803d' }}>{fmt(cl)}</td>
+                    <td style={{ textAlign:'right', color:'#b91c1c' }}>{fmt(vd)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
   // ══ Tab: Checkbooks ════════════════════════════════════════════════════════
   function CheckbooksTab() {
+    // Detect missing sequential numbers in the register vs checkbook range (gaps)
+    const gapsByBook = {};
+    const lowAlerts  = [];
+    checkbooks.forEach(cb => {
+      const start = parseInt(cb.startingNumber) || 0;
+      const end   = parseInt(cb.endingNumber)   || 0;
+      const nxt   = parseInt(cb.nextCheckNumber) || start;
+      // low inventory alert if <=10 checks remain
+      const remaining = Math.max(0, end - nxt + 1);
+      if (cb.isActive !== false && end > 0 && remaining <= 10) {
+        lowAlerts.push({ cb, remaining });
+      }
+      // gap detect: numbers in [start, nxt-1] without a register entry
+      const used = new Set(
+        checks.filter(c => c.checkbookId === cb.id)
+              .map(c => parseInt(String(c.checkNumber||'').replace(/\D/g,'')))
+              .filter(n => !isNaN(n))
+      );
+      const missing = [];
+      for (let n = start; n < nxt; n++) if (!used.has(n)) missing.push(n);
+      if (missing.length) gapsByBook[cb.id] = missing;
+    });
+    const voidedByBook = {};
+    checks.forEach(c => {
+      if (c.status === 'Voided' && c.checkbookId) {
+        voidedByBook[c.checkbookId] = (voidedByBook[c.checkbookId] || 0) + 1;
+      }
+    });
+
     return (
       <div>
         <div style={{ display:'flex', gap:8, marginBottom:12, alignItems:'center' }}>
           <button className="btn btn-primary btn-sm" onClick={() => setCbModal({ isActive:true })}>+ New Checkbook</button>
           <span style={{ marginLeft:'auto', fontSize:12, color:'#64748b' }}>{checkbooks.length} checkbook{checkbooks.length !== 1 ? 's' : ''}</span>
         </div>
+
+        {lowAlerts.length > 0 && (
+          <div style={{ background:'#fef2f2', border:'1px solid #fecaca', borderLeft:'4px solid #ef4444', borderRadius:8, padding:'10px 14px', marginBottom:12 }}>
+            <div style={{ fontSize:12, fontWeight:800, color:'#b91c1c', marginBottom:4 }}>⚠ Low Checkbook Inventory</div>
+            <ul style={{ margin:0, paddingLeft:18, fontSize:12, color:'#7f1d1d' }}>
+              {lowAlerts.map(a => {
+                const bk = bankAccounts.find(x => x.code === a.cb.bankCode || x.id === a.cb.bankCode);
+                return <li key={a.cb.id}><b>{bk?.code || a.cb.bankCode}</b> · {a.cb.checkbookType} — only <b>{a.remaining}</b> check{a.remaining!==1?'s':''} left (next: {a.cb.nextCheckNumber} · ends: {a.cb.endingNumber})</li>;
+              })}
+            </ul>
+          </div>
+        )}
+
         {checkbooks.length === 0 ? <div className="empty">No checkbooks added yet.</div> : (
           <div style={{ overflowX:'auto' }}>
             <table>
               <thead><tr>
                 <th>Bank</th><th>Type</th><th>Starting #</th><th>Ending #</th>
-                <th>Next #</th><th>Progress</th><th>Status</th><th>Notes</th><th></th>
+                <th>Next #</th><th>Progress</th><th>Voided</th><th>Status</th><th>Notes</th><th></th>
               </tr></thead>
               <tbody>
                 {checkbooks.map(cb => {
@@ -700,6 +924,7 @@ export default function CheckRegistryPage() {
                         </div>
                         <div style={{ fontSize:10, color:'#94a3b8', marginTop:2 }}>{pct}% used ({used}/{total})</div>
                       </td>
+                      <td style={{ textAlign:'center', color:'#b91c1c', fontWeight:700 }}>{voidedByBook[cb.id] || '—'}</td>
                       <td>
                         <span className="pill" style={active ? { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' } : { background:'#f8fafc', borderColor:'#e2e8f0', color:'#94a3b8' }}>
                           {active ? 'Active' : 'Inactive'}
@@ -719,6 +944,26 @@ export default function CheckRegistryPage() {
             </table>
           </div>
         )}
+
+        {Object.keys(gapsByBook).length > 0 && (
+          <div style={{ marginTop:14, background:'#fff7ed', border:'1px solid #fed7aa', borderLeft:'4px solid #f97316', borderRadius:8, padding:'10px 14px' }}>
+            <div style={{ fontSize:12, fontWeight:800, color:'#9a3412', marginBottom:6 }}>
+              ⚠ Missing Check Numbers (Gap Detector)
+              <span style={{ fontWeight:500, color:'#7c2d12', marginLeft:6 }}>
+                — these check numbers were skipped (no register entry); record them as Voided if cancelled.
+              </span>
+            </div>
+            <ul style={{ margin:0, paddingLeft:18, fontSize:12, color:'#7c2d12' }}>
+              {Object.entries(gapsByBook).map(([cbid, list]) => {
+                const cb = checkbooks.find(x => x.id === cbid);
+                if (!cb) return null;
+                const bk = bankAccounts.find(x => x.code === cb.bankCode || x.id === cb.bankCode);
+                const preview = list.slice(0, 12).join(', ') + (list.length > 12 ? `, … (+${list.length-12} more)` : '');
+                return <li key={cbid}><b>{bk?.code || cb.bankCode}</b> · {cb.checkbookType} — {list.length} missing: <code>{preview}</code></li>;
+              })}
+            </ul>
+          </div>
+        )}
       </div>
     );
   }
@@ -729,8 +974,8 @@ export default function CheckRegistryPage() {
     const upd = (k, v) => setCvForm(f => ({ ...f, [k]:v }));
     const cb  = activeCheckbook(cvForm.bankCode);
     return (
-      <div className="backdrop" onClick={e => e.target === e.currentTarget && setCvModal(null)}>
-        <div className="modal">
+      <div className="backdrop" style={{padding:0}} onClick={e => e.target === e.currentTarget && setCvModal(null)}>
+        <div className="modal modal-fs">
           <div className="modal-h">
             <div>
               <strong>New Check Voucher</strong>
@@ -746,7 +991,24 @@ export default function CheckRegistryPage() {
                 <span style={{ color:'#1d4ed8' }}>{bankAccounts.find(a=>a.code===cb.bankCode||a.id===cb.bankCode)?.name||cb.bankCode}</span>
                 <span>Range: <strong>{cb.startingNumber}–{cb.endingNumber}</strong></span>
                 <span>Next: <strong style={{ color:'#f97316' }}>{cb.nextCheckNumber}</strong></span>
-                <button className="btn btn-ghost btn-sm" onClick={() => upd('globalCheckNo', cb.nextCheckNumber)}>Use Next #</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => {
+                  if (cvForm.isMultipleChecks) {
+                    const width = String(cb.nextCheckNumber).length;
+                    let cursor = parseInt(cb.nextCheckNumber) || 0;
+                    setCvLines(prev => prev.map(l => {
+                      const existing = l.lineCheckNo ? parseInt(l.lineCheckNo) : NaN;
+                      if (!isNaN(existing)) {
+                        cursor = Math.max(cursor, existing + 1);
+                        return l; // keep manually-entered numbers
+                      }
+                      const filled = { ...l, lineCheckNo: String(cursor).padStart(width, '0') };
+                      cursor++;
+                      return filled;
+                    }));
+                  } else {
+                    upd('globalCheckNo', cb.nextCheckNumber);
+                  }
+                }}>Use Next #</button>
               </div>
             ) : cvForm.bankCode ? (
               <div className="info-banner">⚠️ No active checkbook for this bank. Create one in the <strong>Checkbook Management</strong> tab first.</div>
@@ -770,7 +1032,7 @@ export default function CheckRegistryPage() {
               <div className="field col4">
                 <label>Purpose / Category</label>
                 <input value={cvForm.purposeCategory||''} onChange={e => upd('purposeCategory',e.target.value)} placeholder="e.g. Bills Payment, Rent…" list="cv-purpose-list" />
-                <datalist id="cv-purpose-list">{PURPOSE_SUGGESTIONS.map(s => <option key={s} value={s} />)}</datalist>
+                <datalist id="cv-purpose-list">{purposeCategories.map(c => <option key={c.id} value={c.name} />)}</datalist>
               </div>
               <div className="col2" style={{ display:'flex', alignItems:'center' }}>
                 <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:13, fontWeight:600, whiteSpace:'nowrap' }}>
@@ -796,12 +1058,12 @@ export default function CheckRegistryPage() {
               <thead>
                 <tr>
                   <th style={{ width:28 }}>#</th>
-                  <th>Contact / Payee</th>
+                  <th style={{ width:160 }}>Contact / Payee</th>
                   <th>Account (COA)</th>
                   <th>Description</th>
-                  {cvForm.isMultipleChecks && <th style={{ width:100 }}>Check #</th>}
+                  {cvForm.isMultipleChecks && <th style={{ width:130 }}>Check #</th>}
                   {cvForm.isMultipleChecks && <th style={{ width:110 }}>Check Date</th>}
-                  <th style={{ minWidth:160 }}>EWT / Tax Rate</th>
+                  <th style={{ width:130 }}>EWT / Tax Rate</th>
                   <th style={{ textAlign:'right', width:110 }}>Amount</th>
                   <th style={{ textAlign:'right', width:90 }}>Tax Amt</th>
                   <th style={{ width:32 }}></th>
@@ -823,10 +1085,10 @@ export default function CheckRegistryPage() {
                     </td>
                     <td>
                       <AccountCombobox
-                        options={accounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`}))}
+                        rawAccounts={accounts}
                         value={l.expenseAccount}
                         onChange={v => setLine(i,'expenseAccount',v)}
-                        placeholder="Account code"
+                        placeholder="— Select Account —"
                       />
                     </td>
                     <td><input value={l.description} onChange={e => setLine(i,'description',e.target.value)} placeholder="Description" /></td>
@@ -955,7 +1217,11 @@ export default function CheckRegistryPage() {
   // ══ Checkbook Modal ════════════════════════════════════════════════════════
   function CheckbookModal() {
     const isEdit = !!(cbModal && cbModal.id);
-    const [form, setF] = useState({ bankCode:'', checkbookType:'Regular', startingNumber:'', endingNumber:'', nextCheckNumber:'', isActive:true, notes:'', ...cbModal });
+    // Derive checksCount from existing endingNumber when editing
+    const initChecksCount = cbModal?.endingNumber && cbModal?.startingNumber
+      ? String(parseInt(cbModal.endingNumber) - parseInt(cbModal.startingNumber) + 1)
+      : '';
+    const [form, setF] = useState({ bankCode:'', checkbookType:'Loose', startingNumber:'', endingNumber:'', checksCount:'', nextCheckNumber:'', isActive:true, notes:'', checksCount: initChecksCount, ...cbModal });
     const upd = (k, v) => setF(f => ({ ...f, [k]:v }));
     return (
       <div className="backdrop" onClick={e => e.target === e.currentTarget && setCbModal(null)}>
@@ -977,10 +1243,13 @@ export default function CheckRegistryPage() {
                   placeholder="— Select Bank —"
                 />
               </div>
-              <div className="field"><label>Checkbook Type</label><select value={form.checkbookType||'Regular'} onChange={e=>upd('checkbookType',e.target.value)}>{CHECKBOOK_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
+              <div className="field"><label>Checkbook Type</label><select value={form.checkbookType||'Loose'} onChange={e=>upd('checkbookType',e.target.value)}>{CHECKBOOK_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
               <div className="field"><label>Status</label><select value={form.isActive?'yes':'no'} onChange={e=>upd('isActive',e.target.value==='yes')}><option value="yes">Active</option><option value="no">Inactive</option></select></div>
-              <div className="field"><label>Starting Number *</label><input value={form.startingNumber||''} onChange={e=>upd('startingNumber',e.target.value)} placeholder="e.g. 000001" /></div>
-              <div className="field"><label>Ending Number *</label><input value={form.endingNumber||''} onChange={e=>upd('endingNumber',e.target.value)} placeholder="e.g. 000100" /></div>
+              <div className="field"><label>Starting Series *</label><input value={form.startingNumber||''} onChange={e=>upd('startingNumber',e.target.value)} placeholder="e.g. 000001" /></div>
+              {form.checkbookType==='Loose'
+                ? <div className="field"><label>Checks Count *</label><input type="number" min="1" value={form.checksCount||''} onChange={e=>upd('checksCount',e.target.value)} placeholder="e.g. 100" /></div>
+                : <div className="field"><label>Ending Number *</label><input value={form.endingNumber||''} onChange={e=>upd('endingNumber',e.target.value)} placeholder="e.g. 000100" /></div>
+              }
               <div className="field" style={{ gridColumn:'span 2' }}>
                 <label>Next Check # (auto-advances on each issue)</label>
                 <input value={form.nextCheckNumber||form.startingNumber||''} onChange={e=>upd('nextCheckNumber',e.target.value)} />

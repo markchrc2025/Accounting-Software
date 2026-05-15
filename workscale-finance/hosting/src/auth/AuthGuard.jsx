@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 import { useNavigate } from 'react-router-dom';
 import { auth, db } from '../firebase.js';
 
@@ -17,9 +17,17 @@ export default function AuthGuard({ children }) {
         return;
       }
 
-      // Check if user exists in /users/{uid} collection
-      const snap = await getDoc(doc(db, 'users', user.uid));
-      if (snap.exists()) {
+      // Check if user exists in appUsers by email
+      const email = user.email?.toLowerCase();
+      if (!email) {
+        setStatus('denied');
+        setDenyReason('No email on this account.');
+        setDenyUid(user.uid);
+        return;
+      }
+      const q = query(collection(db, 'appUsers'), where('email', '==', email));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
         setStatus('allowed');
       } else {
         setStatus('denied');

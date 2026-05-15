@@ -1,32 +1,93 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * const {onCall} = require("firebase-functions/v2/https");
- * const {onDocumentWritten} = require("firebase-functions/v2/firestore");
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
-
 const {setGlobalOptions} = require("firebase-functions");
-const {onRequest} = require("firebase-functions/https");
-const logger = require("firebase-functions/logger");
+const {onCall, HttpsError} = require("firebase-functions/v2/https");
+const {defineSecret} = require("firebase-functions/params");
+const admin = require("firebase-admin");
+const {getFirestore} = require("firebase-admin/firestore");
+const nodemailer = require("nodemailer");
 
-// For cost control, you can set the maximum number of containers that can be
-// running at the same time. This helps mitigate the impact of unexpected
-// traffic spikes by instead downgrading performance. This limit is a
-// per-function limit. You can override the limit for each function using the
-// `maxInstances` option in the function's options, e.g.
-// `onRequest({ maxInstances: 5 }, (req, res) => { ... })`.
-// NOTE: setGlobalOptions does not apply to functions using the v1 API. V1
-// functions should each use functions.runWith({ maxInstances: 10 }) instead.
-// In the v1 API, each function can only serve one request per container, so
-// this will be the maximum concurrent request count.
-setGlobalOptions({ maxInstances: 10 });
+setGlobalOptions({maxInstances: 10});
 
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
+admin.initializeApp();
 
-// exports.helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
+// Named 'scalebooks' Firestore database
+const db = getFirestore("scalebooks");
+
+// Gmail credentials stored as Firebase secrets
+const gmailUser = defineSecret("GMAIL_USER");
+const gmailPass = defineSecret("GMAIL_APP_PASS");
+
+/**
+ * Invites a user: sends a branded invitation email via Gmail.
+ * The invited user signs in with their Google account — no password needed.
+ * Called from SettingsPage (new invite) and the Resend Invite button.
+ */
+exports.createAuthUser = onCall(
+    {secrets: ["GMAIL_USER", "GMAIL_APP_PASS"]},
+    async (request) => {
+      if (!request.auth) {
+        throw new HttpsError("unauthenticated", "You must be signed in.");
+      }
+
+      const {email, fullName} = request.data;
+      if (!email || typeof email !== "string") {
+        throw new HttpsError("invalid-argument", "A valid email is required.");
+      }
+
+      // Verify caller is an Admin in appUsers
+      const callerEmail = (request.auth.token.email || "").toLowerCase();
+      const snap = await db
+          .collection("appUsers")
+          .where("email", "==", callerEmail)
+          .limit(1)
+          .get();
+      const isAdmin =
+        !snap.empty && (snap.docs[0].data().roles || []).includes("Admin");
+
+      if (!isAdmin) {
+        throw new HttpsError(
+            "permission-denied",
+            "Only Admins can invite users.",
+        );
+      }
+
+      // Send invitation email — user signs in via Google, no password setup needed
+      const appUrl = "https://scalebooks-9a629.web.app/login";
+
+      const transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: gmailUser.value(),
+          pass: gmailPass.value(),
+        },
+      });
+
+      await transporter.sendMail({
+        from: `"ScaleBooks Finance Portal" <${gmailUser.value()}>`,
+        to: email.trim().toLowerCase(),
+        subject: "You've been invited to ScaleBooks Finance Portal",
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+            <h2 style="color:#f97316;margin-bottom:8px;">You've been invited!</h2>
+            <p style="color:#374151;">Hi ${fullName || "there"},</p>
+            <p style="color:#374151;">
+              You have been invited to access the
+              <strong>ScaleBooks Finance Portal</strong> by Workscale Resources Inc.
+            </p>
+            <p style="color:#374151;">Click the button below and sign in with your Google account to get started:</p>
+            <p style="text-align:center;margin:24px 0;">
+              <a href="${appUrl}"
+                 style="background:#f97316;color:#fff;padding:13px 28px;border-radius:8px;
+                        text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
+                Sign In to ScaleBooks
+              </a>
+            </p>
+            <p style="color:#94a3b8;font-size:12px;">
+              If you weren't expecting this invitation, you can safely ignore this email.
+            </p>
+          </div>
+        `,
+      });
+
+      return {sent: true};
+    },
+);

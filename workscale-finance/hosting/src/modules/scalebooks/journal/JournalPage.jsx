@@ -5,8 +5,9 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import { nextJournalEntryId } from '../../../utils/documentIds.js';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
-const JE_TYPES = ['Manual','Adjusting','Closing','Reversing'];
+const JE_TYPES = ['Manual','Adjusting','Closing','Reversing','Voucher'];
 const PAGE_SIZES = [20, 50, 100];
 const uid = () => Math.random().toString(36).slice(2,10).toUpperCase();
 
@@ -14,10 +15,13 @@ const fmtPHP = n => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maxim
 const fmtCur = n => '₱' + fmtPHP(n);
 
 const STATUS_STYLES = {
-  Draft:    {bg:'#fef9c3',border:'#fde68a',color:'#a16207'},
-  Posted:   {bg:'#f0fdf4',border:'#bbf7d0',color:'#15803d'},
-  Reversed: {bg:'#fff7ed',border:'#fed7aa',color:'#c2410c'},
-  Voided:   {bg:'#fef2f2',border:'#fecaca',color:'#b91c1c'},
+  'Draft':         {bg:'#fef9c3',border:'#fde68a',color:'#a16207'},
+  'For Clearing':  {bg:'#eff6ff',border:'#bfdbfe',color:'#1d4ed8'},
+  'Cleared':       {bg:'#ecfdf5',border:'#6ee7b7',color:'#065f46'},
+  'For Posting':   {bg:'#fff7ed',border:'#fed7aa',color:'#c2410c'},
+  'Posted':        {bg:'#f0fdf4',border:'#bbf7d0',color:'#15803d'},
+  'Reversed':      {bg:'#fff7ed',border:'#fed7aa',color:'#c2410c'},
+  'Voided':        {bg:'#fef2f2',border:'#fecaca',color:'#b91c1c'},
 };
 
 const CSS = `
@@ -71,6 +75,9 @@ const CSS = `
 `;
 
 export default function JournalPage() {
+  const { can } = usePermissions();
+  const canPost        = can('Journal', 'Poster') || can('Journal', 'Approver');
+  const canApprovePost = can('Journal', 'Approver');
   const [entries, setEntries]   = useState([]);
   const [expanded, setExpanded] = useState(new Set());
   const [search, setSearch]     = useState('');
@@ -114,8 +121,10 @@ export default function JournalPage() {
 
   /* ── Stats ─────────────────────────────────────────────────── */
   const totalDebits  = entries.reduce((s,e)=>(e.lines||[]).reduce((ss,l)=>ss+(parseFloat(l.debit)||0),s),0);
-  const totalPosted  = entries.filter(e=>e.status==='Posted').length;
-  const totalDraft   = entries.filter(e=>e.status==='Draft').length;
+  const totalPosted     = entries.filter(e=>e.status==='Posted').length;
+  const totalCleared    = entries.filter(e=>e.status==='Cleared').length;
+  const totalForClearing = entries.filter(e=>e.status==='For Clearing').length;
+  const totalDraft      = entries.filter(e=>['Draft','For Clearing','For Posting'].includes(e.status)).length;
   const totalEntries = entries.length;
 
   /* ── Toggle expand ──────────────────────────────────────────── */
@@ -167,6 +176,16 @@ export default function JournalPage() {
   async function postEntry(id) {
     await updateDoc(doc(db,'journalEntries',id),{status:'Posted',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
     showToast('Posted.');
+  }
+
+  async function requestPost(id) {
+    await updateDoc(doc(db,'journalEntries',id),{status:'For Posting',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
+    showToast('Submitted for posting.');
+  }
+
+  async function approvePost(id) {
+    await updateDoc(doc(db,'journalEntries',id),{status:'Posted',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
+    showToast('Journal Entry posted.');
   }
 
   async function reverseEntry(e) {
@@ -273,7 +292,7 @@ export default function JournalPage() {
       <div className="jp-topbar">
         <div>
           <h1 style={{margin:0,fontSize:18,fontWeight:900}}>Journal Entries</h1>
-          <p style={{margin:0,fontSize:12,color:'#64748b'}}>{totalEntries} entries · {totalPosted} posted · {totalDraft} draft</p>
+          <p style={{margin:0,fontSize:12,color:'#64748b'}}>{totalEntries} entries · {totalPosted} posted · {totalForClearing} for clearing · {totalDraft} pending</p>
         </div>
         <button className="btn btn-primary" onClick={openNew}>+ New JE</button>
       </div>
@@ -282,7 +301,8 @@ export default function JournalPage() {
         <div className="stats-bar">
           <div className="stat"><div className="stat-lbl">Total Entries</div><div className="stat-val">{totalEntries}</div></div>
           <div className="stat"><div className="stat-lbl">Posted</div><div className="stat-val" style={{color:'#15803d'}}>{totalPosted}</div></div>
-          <div className="stat"><div className="stat-lbl">Draft</div><div className="stat-val" style={{color:'#a16207'}}>{totalDraft}</div></div>
+          <div className="stat"><div className="stat-lbl">Cleared</div><div className="stat-val" style={{color:'#065f46'}}>{totalCleared}</div></div>
+          <div className="stat"><div className="stat-lbl">For Clearing</div><div className="stat-val" style={{color:'#1d4ed8'}}>{totalForClearing}</div></div>
           <div className="stat"><div className="stat-lbl">Total Debits (Posted)</div><div className="stat-val">{fmtCur(entries.filter(e=>e.status==='Posted').reduce((s,e)=>s+(parseFloat(e.totalDebit)||0),0))}</div></div>
         </div>
         {/* Filters */}
@@ -323,8 +343,10 @@ export default function JournalPage() {
                     <div style={{display:'flex',gap:6,alignItems:'center',flexShrink:0}}>
                       <span style={{fontWeight:700,fontSize:12,color:'#64748b'}}>{fmtCur(e.totalDebit||0)}</span>
                       <button className="btn btn-ghost btn-sm" onClick={ev=>{ev.stopPropagation();openEdit(e);}}>Edit</button>
-                      {e.status==='Draft'&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bbf7d0',color:'#15803d'}} onClick={ev=>{ev.stopPropagation();postEntry(e.id);}}>Post</button>}
-                      {e.status==='Posted'&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();reverseEntry(e);}}>Reverse</button>}
+                      {e.status==='Draft'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bbf7d0',color:'#15803d'}} onClick={ev=>{ev.stopPropagation();postEntry(e.id);}}>Post</button>}
+                      {e.status==='Cleared'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bfdbfe',color:'#1d4ed8'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for posting?',()=>requestPost(e.id));}}>Post</button>}
+                      {e.status==='For Posting'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={ev=>{ev.stopPropagation();askConfirm('Approve and post this Journal Entry?',()=>approvePost(e.id));}}>Approve &amp; Post</button>}
+                      {e.status==='Posted'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();reverseEntry(e);}}>Reverse</button>}
                       {e.status==='Draft'&&<button onClick={ev=>{ev.stopPropagation();deleteEntry(e.id);}} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>}
                       <span style={{color:'#94a3b8',fontSize:14}}>{isOpen?'▲':'▼'}</span>
                     </div>

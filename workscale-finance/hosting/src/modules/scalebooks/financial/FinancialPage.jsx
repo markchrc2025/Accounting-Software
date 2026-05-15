@@ -202,7 +202,10 @@ export default function FinancialPage() {
   // Phase 2/3: actual payments + monitoring
   const [payments,      setPayments]      = useState([]);
   const [voucherDocs,   setVoucherDocs]   = useState([]);
+  const [checkbooks,    setCheckbooks]    = useState([]);
   const [payModal,      setPayModal]      = useState(null);  // loan.id
+  const [pmForm,        setPmForm]        = useState({ checkbookId:'', checks:[] });
+  // pmForm.checks: [{id, checkNo, checkDate, amount}]
   const [monitorFilter, setMonitorFilter] = useState('outstanding'); // outstanding | paidoff | atrisk | all
   const [historyLoanFilter, setHistoryLoanFilter] = useState('all');
 
@@ -232,11 +235,15 @@ export default function FinancialPage() {
       snap => setVoucherDocs(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
       err  => console.error('vouchers subscription error:', err)
     );
-    return () => { unsub(); unsubV(); };
+    // Live subscription to checkbooks (for PM modal)
+    const unsubCb = onSnapshot(
+      query(collection(db, 'checkbookMaster'), orderBy('bankCode')),
+      snap => setCheckbooks(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
+    return () => { unsub(); unsubV(); unsubCb(); };
   }, []);
 
-  /* ── Voucher lookup map (by human-readable voucherId string) ──── */
-  const voucherMap = useMemo(() => {
+  /* ── Voucher lookup map (by human-readable voucherId string) ──── */  const voucherMap = useMemo(() => {
     const m = {};
     for (const v of voucherDocs) if (v.voucherId) m[v.voucherId] = v;
     return m;
@@ -1585,7 +1592,10 @@ export default function FinancialPage() {
               const pm  = l.paymentMethod || 'Check';
               const clr = PM[pm] || PM.Check;
               let details = '';
-              if (pm === 'Check') details = (l.pmChecks||[]).join(', ');
+              if (pm === 'Check') {
+                const chks = l.pmChecks || [];
+                details = chks.map(c => typeof c === 'string' ? c : c.checkNo).filter(Boolean).join(', ') || '—';
+              }
               else if (pm === 'Auto-Debit') details = `Day ${l.pmAdaDay||'—'} · ${l.pmAdaBank||'—'}`;
               else if (pm === 'Bank Transfer') details = l.pmBtBank||'—';
               return (
@@ -1665,11 +1675,11 @@ export default function FinancialPage() {
 
       {/* Payment Method Modal */}
       {pmLoan && (
-        <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setPmModal(null)}>
+        <div className="backdrop" onClick={e=>{ if(e.target===e.currentTarget){ setPmModal(null); setPmForm({checkbookId:'',checks:[]}); } }}>
           <div className="modal">
             <div className="modal-h">
               <strong>Payment Method — {pmLoan.name||`Loan ${pmLoan.id}`}</strong>
-              <button className="btn btn-ghost btn-sm" onClick={()=>setPmModal(null)}>✕</button>
+              <button className="btn btn-ghost btn-sm" onClick={()=>{ setPmModal(null); setPmForm({checkbookId:'',checks:[]}); }}>✕</button>
             </div>
             <div className="modal-b">
               <div style={{ display:'flex', gap:8, marginBottom:16 }}>
@@ -1678,16 +1688,63 @@ export default function FinancialPage() {
                     onClick={()=>updateLoan(pmLoan.id,'paymentMethod',pm)}>{pm}</button>
                 ))}
               </div>
-              {(pmLoan.paymentMethod||'Check') === 'Check' && (
-                <div className="field">
-                  <label>Check Series / Bank Account Numbers</label>
-                  <input
-                    value={(pmLoan.pmChecks||[]).join(', ')}
-                    onChange={e=>updateLoan(pmLoan.id,'pmChecks',e.target.value.split(',').map(s=>s.trim()).filter(Boolean))}
-                    placeholder="e.g. BDO-001, BPI-002"
-                  />
-                </div>
-              )}
+              {(pmLoan.paymentMethod||'Check') === 'Check' && (() => {
+                const selCb = checkbooks.find(c => c.id === pmForm.checkbookId);
+                const activeCbs = checkbooks.filter(c => c.isActive !== false);
+                const pendingTotal = pmForm.checks.reduce((s,c) => s + (Number(c.amount)||0), 0);
+                const addCheck = () => {
+                  const existingNums = pmForm.checks.map(c => parseInt(c.checkNo)).filter(n => !isNaN(n));
+                  const base = parseInt(selCb?.nextCheckNumber || selCb?.startingNumber || 0);
+                  const width = String(selCb?.nextCheckNumber || selCb?.startingNumber || '').length || 0;
+                  const maxNum = existingNums.length > 0 ? Math.max(...existingNums) : base - 1;
+                  const nextNo = selCb ? String(maxNum + 1).padStart(width, '0') : '';
+                  setPmForm(f => ({ ...f, checks: [...f.checks, { id: Date.now(), checkNo: nextNo, checkDate: '', amount: 0 }] }));
+                };
+                const updCheck = (id, key, val) => setPmForm(f => ({ ...f, checks: f.checks.map(c => c.id===id ? {...c,[key]:val} : c) }));
+                const delCheck = (id) => setPmForm(f => ({ ...f, checks: f.checks.filter(c => c.id !== id) }));
+                return (
+                  <>
+                    <div className="field" style={{marginBottom:12}}>
+                      <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Checkbook / Issuing Bank</label>
+                      <select value={pmForm.checkbookId} onChange={e=>setPmForm(f=>({...f,checkbookId:e.target.value}))} style={{width:'100%',border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}}>
+                        <option value="">— Select checkbook —</option>
+                        {activeCbs.map(cb => {
+                          const acct = calAccounts.find(a => a.code === cb.bankCode || a.id === cb.bankCode);
+                          const label = acct ? acct.name : cb.bankCode;
+                          return <option key={cb.id} value={cb.id}>{label} · {cb.checkbookType||'Loose'} · {cb.startingNumber}–{cb.endingNumber} (next: {cb.nextCheckNumber})</option>;
+                        })}
+                      </select>
+                    </div>
+                    <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,marginBottom:8}}>
+                      <thead>
+                        <tr style={{background:'#f8fafc'}}>
+                          <th style={{padding:'7px 10px',textAlign:'left',fontWeight:800,fontSize:10,textTransform:'uppercase',letterSpacing:'.06em',color:'#64748b',borderBottom:'2px solid #e5e7eb'}}>Check No.</th>
+                          <th style={{padding:'7px 10px',textAlign:'left',fontWeight:800,fontSize:10,textTransform:'uppercase',letterSpacing:'.06em',color:'#64748b',borderBottom:'2px solid #e5e7eb'}}>Check Date</th>
+                          <th style={{padding:'7px 10px',textAlign:'right',fontWeight:800,fontSize:10,textTransform:'uppercase',letterSpacing:'.06em',color:'#64748b',borderBottom:'2px solid #e5e7eb'}}>Amount (₱)</th>
+                          <th style={{width:28,borderBottom:'2px solid #e5e7eb'}}></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pmForm.checks.length === 0 && (
+                          <tr><td colSpan={4} style={{padding:'18px',textAlign:'center',color:'#94a3b8',fontSize:12}}>No pending checks. Click "+ Add Check" to queue one.</td></tr>
+                        )}
+                        {pmForm.checks.map(c => (
+                          <tr key={c.id} style={{borderBottom:'1px solid #f1f5f9'}}>
+                            <td style={{padding:'5px 6px'}}><input value={c.checkNo} onChange={e=>updCheck(c.id,'checkNo',e.target.value)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%'}} placeholder="Check #" /></td>
+                            <td style={{padding:'5px 6px'}}><input type="date" value={c.checkDate} onChange={e=>updCheck(c.id,'checkDate',e.target.value)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%'}} /></td>
+                            <td style={{padding:'5px 6px'}}><input type="number" step="0.01" value={c.amount||''} onChange={e=>updCheck(c.id,'amount',parseFloat(e.target.value)||0)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%',textAlign:'right'}} placeholder="0.00" /></td>
+                            <td style={{padding:'5px 4px',textAlign:'center'}}><button onClick={()=>delCheck(c.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'2px 4px'}}>✕</button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 0',borderTop:'2px solid #e5e7eb'}}>
+                      <button className="btn btn-ghost btn-sm" onClick={addCheck} disabled={!pmForm.checkbookId}>+ Add Check</button>
+                      <span style={{fontSize:12,fontWeight:800,color:'#0f172a'}}>PENDING · {pmForm.checks.length} CHECK{pmForm.checks.length!==1?'S':''} &nbsp;<span style={{color:'#dc2626'}}>₱{pendingTotal.toLocaleString('en-PH',{minimumFractionDigits:2})}</span></span>
+                    </div>
+                  </>
+                );
+              })()}
               {pmLoan.paymentMethod === 'Auto-Debit' && (
                 <div className="grid4">
                   <div className="field col2">
@@ -1715,8 +1772,20 @@ export default function FinancialPage() {
               </div>
             </div>
             <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>setPmModal(null)}>Close</button>
-              <button className="btn btn-primary" onClick={()=>{ saveToFirestore(loans); setPmModal(null); showToast('Payment method saved.'); }}>Save</button>
+              <button className="btn btn-ghost" onClick={()=>{ setPmModal(null); setPmForm({checkbookId:'',checks:[]}); }}>Close</button>
+              <button className="btn btn-primary" onClick={()=>{
+                const updatedLoans = loans.map(l => l.id !== pmLoan.id ? l : {
+                  ...l,
+                  pmCheckbookId:   pmForm.checkbookId,
+                  pmCheckbookCode: checkbooks.find(c=>c.id===pmForm.checkbookId)?.bankCode || '',
+                  pmChecks:        pmForm.checks,
+                });
+                setLoans(updatedLoans);
+                saveToFirestore(updatedLoans);
+                setPmModal(null);
+                setPmForm({checkbookId:'',checks:[]});
+                showToast('Payment method saved.');
+              }}>Save</button>
             </div>
           </div>
         </div>

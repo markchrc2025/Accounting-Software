@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { db, auth } from '../firebase.js';
 
@@ -59,7 +59,13 @@ export function PermissionsProvider({ children }) {
 
       const unsubSnap = onSnapshot(q, snap => {
         if (!snap.empty) {
-          setUserRecord({ id: snap.docs[0].id, ...snap.docs[0].data() });
+          const docSnap = snap.docs[0];
+          const data = docSnap.data();
+          setUserRecord({ id: docSnap.id, ...data });
+          // Auto-mark invite as accepted on first successful login
+          if (data.inviteStatus === 'invited') {
+            updateDoc(doc(db, 'appUsers', docSnap.id), { inviteStatus: 'active' }).catch(() => {});
+          }
         } else {
           // Authenticated but not yet registered in appUsers → implicit Admin
           // (first-time owner / bootstrap scenario)

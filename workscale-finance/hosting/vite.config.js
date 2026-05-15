@@ -7,5 +7,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      // jsPDF has optional peer deps (canvg, dompurify) not needed for our usage
+      external: ['canvg', 'dompurify'],
+    },
+  },
+  optimizeDeps: {
+    include: ['jspdf', 'html2canvas'],
   },
 });

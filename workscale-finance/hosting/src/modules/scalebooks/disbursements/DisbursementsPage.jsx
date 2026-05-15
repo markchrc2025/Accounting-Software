@@ -5,14 +5,156 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import { nextDisbursementReportId } from '../../../utils/documentIds.js';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
-const fmt = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
-const uid = () => Math.random().toString(36).slice(2, 10).toUpperCase();
+const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
+const fmtN = (n) => new Intl.NumberFormat('en-PH', { minimumFractionDigits:2, maximumFractionDigits:2 }).format(n || 0);
+const uid  = () => Math.random().toString(36).slice(2, 10).toUpperCase();
 const today = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (d) => { try { return d ? new Date(d+'T00:00:00').toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'}) : '—'; } catch { return d||'—'; } };
 
-const BANKS = ['UBPBPHM','BPI','BDO','RCBC','MBTC','CASH'];
+const PAYROLL_TYPES = ['PAYROLL','FINAL_PAY'];
 
 const DR_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Rejected','Voided'];
+
+// ── PDF generation ────────────────────────────────────────────────────────────
+function buildPdfHtml(report, bankAccounts, companyName = 'Workscale Resources Inc.') {
+  const lines = report.lines || [];
+  const bankBals = report.bankBalances || {};
+
+  // Group lines by bankCode
+  const groups = {};
+  lines.forEach(l => {
+    const k = l.bankCode || 'OTHER';
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(l);
+  });
+
+  const groupsHtml = Object.entries(groups).map(([bankCode, bLines]) => {
+    const sub = bLines.reduce((s,l)=>s+(Number(l.amount)||0),0);
+    const acc = bankAccounts.find(a => a.code === bankCode);
+    const bankLabel = acc ? `${acc.code} — ${acc.name}` : bankCode;
+    return `
+      <tr class="bank-header"><td colspan="7"><strong>${bankLabel}</strong></td></tr>
+      ${bLines.map((l,i)=>`
+        <tr>
+          <td>${l.lineNo||i+1}</td>
+          <td>${l.voucherId||'—'}</td>
+          <td>${l.contact||'—'}</td>
+          <td>${l.description||l.voucherType||'—'}</td>
+          <td>${l.checkNo||'—'}</td>
+          <td>${l.refNo||'—'}</td>
+          <td class="amt">₱${fmtN(l.amount)}</td>
+        </tr>`).join('')}
+      <tr class="sub-row"><td colspan="6" style="text-align:right"><strong>Subtotal — ${bankLabel}</strong></td><td class="amt"><strong>₱${fmtN(sub)}</strong></td></tr>`;
+  }).join('');
+
+  const bankBalRows = bankAccounts.map(acc => {
+    const bal   = Number(bankBals[acc.code]) || 0;
+    const disb  = lines.filter(l=>l.bankCode===acc.code).reduce((s,l)=>s+(Number(l.amount)||0),0);
+    const after = bal - disb;
+    return `<tr>
+      <td>${acc.code} — ${acc.name}</td>
+      <td class="amt">₱${fmtN(bal)}</td>
+      <td class="amt">₱${fmtN(disb)}</td>
+      <td class="amt ${after<0?'neg':''}">₱${fmtN(after)}</td>
+    </tr>`;
+  }).join('');
+
+  const totalBal  = Object.values(bankBals).reduce((s,v)=>s+(Number(v)||0),0);
+  const totalDisb = lines.reduce((s,l)=>s+(Number(l.amount)||0),0);
+  const expColl   = Number(report.expectedCollection)||0;
+  const balAfter  = totalBal + expColl - totalDisb;
+
+  // Late lines section
+  const repDate = report.date ? new Date(report.date) : null;
+  const lateLines = repDate ? lines.filter(l => {
+    if (!l.checkDate) return false;
+    const cd = new Date(l.checkDate);
+    return !isNaN(cd.getTime()) && (cd.getMonth()!==repDate.getMonth() || cd.getFullYear()!==repDate.getFullYear());
+  }) : [];
+  const lateHtml = lateLines.length > 0 ? `
+    <h3 class="section-head">FOR LATE APPROVALS</h3>
+    <table class="main-tbl">
+      <thead><tr><th>#</th><th>Voucher No.</th><th>Payee</th><th>Description</th><th>Check No.</th><th>Ref No.</th><th class="amt">Amount</th></tr></thead>
+      <tbody>${lateLines.map((l,i)=>`<tr><td>${l.lineNo||i+1}</td><td>${l.voucherId||'—'}</td><td>${l.contact||'—'}</td><td>${l.description||l.voucherType||'—'}</td><td>${l.checkNo||'—'}</td><td>${l.refNo||'—'}</td><td class="amt">₱${fmtN(l.amount)}</td></tr>`).join('')}</tbody>
+    </table>` : '';
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>DR — ${report.reportId||report.id}</title>
+  <style>
+    @page { size: letter landscape; margin: 15mm 12mm; }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; font-size: 10px; color: #0b1220; }
+    .header { text-align: center; margin-bottom: 10px; }
+    .header h1 { font-size: 14px; font-weight: 900; text-transform: uppercase; margin: 0 0 2px; }
+    .header h2 { font-size: 11px; font-weight: 700; margin: 0 0 2px; }
+    .header p  { font-size: 9px; color: #555; margin: 0; }
+    .meta { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 9px; }
+    .meta span { font-weight: 700; }
+    .section-head { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .05em; border-bottom: 2px solid #333; padding-bottom: 2px; margin: 10px 0 4px; }
+    .main-tbl { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+    .main-tbl th { font-size: 9px; font-weight: 900; text-transform: uppercase; background: #f0f0f0; border: 1px solid #ccc; padding: 4px 6px; }
+    .main-tbl td { border: 1px solid #ddd; padding: 3px 6px; font-size: 9px; }
+    .main-tbl tr.bank-header td { background: #e8eef6; font-weight: 900; padding: 4px 6px; }
+    .main-tbl tr.sub-row td { background: #f8f8f8; }
+    .amt { text-align: right; white-space: nowrap; }
+    .neg { color: #dc2626; }
+    .bal-tbl { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+    .bal-tbl th { font-size: 9px; font-weight: 900; background: #f0f0f0; border: 1px solid #ccc; padding: 4px 6px; text-align: left; }
+    .bal-tbl td { border: 1px solid #ddd; padding: 3px 6px; font-size: 9px; }
+    .summary-box { border: 1px solid #999; padding: 8px 12px; display: inline-block; min-width: 280px; float: right; margin-bottom: 10px; }
+    .summary-box h4 { font-size: 10px; font-weight: 900; text-transform: uppercase; margin: 0 0 6px; border-bottom: 1px solid #999; padding-bottom: 3px; }
+    .summary-row { display: flex; justify-content: space-between; font-size: 9px; margin-bottom: 2px; }
+    .summary-row.total { font-weight: 900; border-top: 1px solid #999; margin-top: 4px; padding-top: 3px; font-size: 10px; }
+    .sig-block { clear: both; display: flex; justify-content: space-around; margin-top: 24px; }
+    .sig-col { text-align: center; min-width: 140px; }
+    .sig-line { border-top: 1px solid #333; margin-bottom: 4px; }
+    .sig-label { font-size: 9px; font-weight: 700; }
+    .sig-name { font-size: 9px; font-weight: 900; }
+    @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .no-print { display: none; } }
+  </style>
+  </head><body>
+    <div class="no-print" style="padding:10px;background:#f5f5f5;text-align:center">
+      <button onclick="window.print()" style="padding:8px 20px;font-size:13px;font-weight:700;background:#f97316;color:#fff;border:0;border-radius:8px;cursor:pointer">🖨 Print / Save as PDF</button>
+    </div>
+    <div class="header">
+      <h2>${companyName}</h2>
+      <h1>Master Disbursement Report</h1>
+      <p>${fmtDate(report.date)} &nbsp;|&nbsp; Report No.: ${report.reportId||report.id} &nbsp;|&nbsp; Status: ${report.status||'Draft'}</p>
+    </div>
+    <div class="meta">
+      <div>Prepared by: <span>${report.createdBy||'—'}</span></div>
+      <div>Reviewed by: <span>${report.reviewedBy||'—'}</span></div>
+      <div>Approved by: <span>${report.approvedBy||'—'}</span></div>
+    </div>
+    <h3 class="section-head">Disbursements</h3>
+    <table class="main-tbl">
+      <thead><tr><th>#</th><th>Voucher No.</th><th>Payee</th><th>Description</th><th>Check No.</th><th>Ref No.</th><th class="amt">Amount</th></tr></thead>
+      <tbody>${groupsHtml}</tbody>
+      <tfoot><tr style="background:#e8eef6"><td colspan="6" style="text-align:right;font-weight:900;font-size:10px">GRAND TOTAL</td><td class="amt" style="font-weight:900;font-size:10px">₱${fmtN(totalDisb)}</td></tr></tfoot>
+    </table>
+    ${lateHtml}
+    <h3 class="section-head">Bank Account Balances</h3>
+    <table class="bal-tbl">
+      <thead><tr><th>Account</th><th class="amt">Current Balance</th><th class="amt">Less: Disbursements</th><th class="amt">Balance After</th></tr></thead>
+      <tbody>${bankBalRows}</tbody>
+    </table>
+    <div class="summary-box">
+      <h4>Summary</h4>
+      <div class="summary-row"><span>Total Bank Balance (Before)</span><span>₱${fmtN(totalBal)}</span></div>
+      <div class="summary-row"><span>Less: Total Disbursements</span><span>(₱${fmtN(totalDisb)})</span></div>
+      <div class="summary-row"><span>Add: Expected Collection</span><span>₱${fmtN(expColl)}</span></div>
+      <div class="summary-row total"><span>Bank Balance After</span><span class="${balAfter<0?'neg':''}">₱${fmtN(balAfter)}</span></div>
+    </div>
+    ${report.notes ? `<div style="clear:both;font-size:9px;color:#555;margin-top:6px"><strong>Notes:</strong> ${report.notes}</div>` : '<div style="clear:both"></div>'}
+    <div class="sig-block">
+      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-name">${report.createdBy||'&nbsp;'}</div><div class="sig-label">Prepared By</div></div>
+      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-name">${report.reviewedBy||'&nbsp;'}</div><div class="sig-label">Reviewed By</div></div>
+      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-name">${report.approvedBy||'&nbsp;'}</div><div class="sig-label">Approved By</div></div>
+      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-label">Noted By</div></div>
+    </div>
+  </body></html>`;
+}
 
 const STATUS_STYLES = {
   'Draft':            { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
@@ -45,7 +187,7 @@ const CSS = `
   tr:last-child td { border-bottom:none; }
   .pill { display:inline-block; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid; white-space:nowrap; }
   .backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
-  .modal    { width:min(1000px,98vw); max-height:92vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
+  .modal    { width:min(1100px,98vw); max-height:94vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
   .modal-sm { width:min(480px,98vw); }
   .modal-h  { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid #e5e7eb; background:#f8fafc; flex-shrink:0; }
   .modal-h strong { font-size:15px; font-weight:900; }
@@ -57,7 +199,7 @@ const CSS = `
   .field    { display:flex; flex-direction:column; gap:5px; }
   .field label { font-size:10px; font-weight:800; color:#64748b; letter-spacing:.06em; text-transform:uppercase; }
   .field input,.field select,.field textarea { width:100%; border:1px solid #e5e7eb; border-radius:10px; padding:9px 10px; font-size:13px; background:#fff; font-family:inherit; box-sizing:border-box; }
-  .section-title { font-size:11px; font-weight:800; color:#94a3b8; letter-spacing:.07em; text-transform:uppercase; margin:16px 0 8px; border-bottom:1px solid #f1f5f9; padding-bottom:6px; }
+  .section-title { font-size:11px; font-weight:800; color:#94a3b8; letter-spacing:.07em; text-transform:uppercase; margin:16px 0 8px; border-bottom:1px solid #f1f5f9; padding-bottom:6px; display:flex; align-items:center; justify-content:space-between; }
   .lines-tbl th,.lines-tbl td { border-bottom:1px solid #f1f5f9; padding:8px 10px; }
   .lines-tbl td input,.lines-tbl td select { width:100%; border:1px solid #e5e7eb; border-radius:8px; padding:7px 8px; font-size:12px; font-family:inherit; }
   .tfoot-row { display:flex; justify-content:flex-end; gap:20px; padding:10px 16px; background:#f8fafc; border-top:2px solid #e5e7eb; font-size:13px; font-weight:700; }
@@ -68,11 +210,24 @@ const CSS = `
   .bulk-bar  { display:flex; align-items:center; gap:10px; padding:8px 14px; background:#fff7ed; border:1px solid #fed7aa; border-radius:10px; margin-bottom:10px; flex-wrap:wrap; }
   .empty { padding:48px; text-align:center; color:#94a3b8; font-size:13px; }
   .toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; animation:fadeIn .2s; }
-  .backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
   .expand-row td { background:#f8fafc; padding:16px 20px; }
-  .elig-check { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid #f1f5f9; }
+  .elig-check { display:flex; align-items:flex-start; gap:10px; padding:10px 14px; border-bottom:1px solid #f1f5f9; }
   .elig-check:last-child { border-bottom:none; }
+  .elig-late  { background:#fffbeb; border-left:3px solid #f59e0b; }
+  .bank-cards { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:4px; }
+  .bank-card  { background:#f8fafc; border:1px solid #e5e7eb; border-radius:10px; padding:10px 14px; min-width:160px; }
+  .bank-card-code { font-size:9px; font-weight:800; color:#94a3b8; letter-spacing:.06em; text-transform:uppercase; }
+  .bank-card-name { font-size:12px; font-weight:800; color:#0b1220; margin-bottom:6px; }
+  .bank-card-lbl  { font-size:9px; color:#94a3b8; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+  .bank-card-val  { font-size:13px; font-weight:900; color:#1d4ed8; }
+  .bank-card input { width:100%; border:1px solid #bfdbfe; border-radius:8px; padding:5px 8px; font-size:12px; font-weight:700; color:#1d4ed8; background:#eff6ff; font-family:inherit; box-sizing:border-box; }
+  .summary-bar { display:flex; flex-wrap:wrap; gap:12px; background:#f0fdf4; border:1px solid #6ee7b7; border-radius:12px; padding:12px 16px; margin-bottom:12px; align-items:center; }
+  .summary-item { display:flex; flex-direction:column; }
+  .summary-item-lbl { font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; }
+  .summary-item-val { font-size:14px; font-weight:900; color:#065f46; }
+  .summary-item-val.neg { color:#dc2626; }
+  .late-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:800; background:#fef3c7; color:#92400e; border:1px solid #fde68a; margin-left:8px; }
 `;
 
 function StatusPill({ status }) {
@@ -81,14 +236,19 @@ function StatusPill({ status }) {
 }
 
 export default function DisbursementsPage() {
-  const [reports,   setReports]   = useState([]);
-  const [vouchers,  setVouchers]  = useState([]);
+  const { globalRoles, isAdmin } = usePermissions();
+  const canReviewOrApprove = isAdmin || globalRoles.some(r => ['Verifier','Approver'].includes(r));
+
+  const [reports,      setReports]      = useState([]);
+  const [vouchers,     setVouchers]     = useState([]);
+  const [bankAccounts, setBankAccounts] = useState([]); // COA accounts with subType='Bank'
+  const [dailyBals,    setDailyBals]    = useState([]); // dailyBankBalances entries
 
   // Filters
-  const [search,       setSearch]      = useState('');
+  const [search,       setSearch]       = useState('');
   const [filterStatus, setFilterStatus] = useState('');
-  const [dateFrom,     setDateFrom]    = useState('');
-  const [dateTo,       setDateTo]      = useState('');
+  const [dateFrom,     setDateFrom]     = useState('');
+  const [dateTo,       setDateTo]       = useState('');
 
   // Bulk
   const [selected, setSelected] = useState(new Set());
@@ -97,61 +257,198 @@ export default function DisbursementsPage() {
   const [expandId, setExpandId] = useState(null);
 
   // Modals
-  const [showModal,   setShowModal]   = useState(false);
-  const [editing,     setEditing]     = useState(null);
-  const [statusModal, setStatusModal] = useState(null);
-  const [viewModal,   setViewModal]   = useState(null);
+  const [showModal,    setShowModal]    = useState(false);
+  const [editing,      setEditing]      = useState(null);
+  const [statusModal,  setStatusModal]  = useState(null);
+  const [viewModal,    setViewModal]    = useState(null);
+  const [confirmModal, setConfirmModal] = useState(null);
 
   // Form
-  const [form,   setForm]   = useState({ date:today(), expectedCollection:0, notes:'' });
-  const [drLines, setDrLines] = useState([]); // lines picked from eligible vouchers
-  const [saving, setSaving]  = useState(false);
-  const [toast,  setToast]   = useState('');
+  const [form,    setForm]    = useState({ date:today(), expectedCollection:0, notes:'' });
+  const [drLines, setDrLines] = useState([]); // lines picked from eligible items
+  // bankBals is derived live from dailyBals — no manual state needed
+  const [saving,  setSaving]  = useState(false);
+  const [toast,   setToast]   = useState('');
 
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
-  const [confirmModal, setConfirmModal] = useState(null);
+  const showToast  = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
   const user = auth.currentUser?.email || '';
 
-  // Live data
+  // ── Data loading ──────────────────────────────────────────────────────────────
   useEffect(() => {
+    // Live reports
     const unsub = onSnapshot(
       query(collection(db,'disbursementReports'), orderBy('createdAt','desc')),
       snap => setReports(snap.docs.map(d => ({ id:d.id, ...d.data() })))
     );
-    // Load eligible vouchers (Approved status)
-    getDocs(query(collection(db,'vouchers'), where('status','==','Approved')))
-      .then(s => setVouchers(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    return unsub;
+    // COA bank accounts (one-time)
+    getDocs(query(collection(db,'accounts'), where('subType','==','Bank')))
+      .then(s => setBankAccounts(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.code||'').localeCompare(b.code||''))));
+    // Daily bank balances — live from Bank Management
+    const unsubBals = onSnapshot(
+      query(collection(db,'dailyBankBalances'), orderBy('date','desc')),
+      snap => setDailyBals(snap.docs.map(d=>({id:d.id,...d.data()})))
+    );
+    return () => { unsub(); unsubBals(); };
   }, []);
 
-  // Also reload eligible vouchers when modal opens
-  const refreshVouchers = () => {
-    getDocs(query(collection(db,'vouchers'), where('status','in',['Approved','For Disbursement'])))
+  // Refresh vouchers when the create/edit modal is opened (dailyBals is already live)
+  const refreshModalData = () => {
+    getDocs(query(collection(db,'vouchers'), where('status','in',['Pending','Pending Review','Pending Approval','Approved','For Disbursement'])))
       .then(s => setVouchers(s.docs.map(d => ({ id:d.id, ...d.data() }))));
   };
 
-  // Filtered reports
+  // ── Helpers ───────────────────────────────────────────────────────────────────
+
+  // Get the latest daily bank balance (endBal = `ending`) for a given account code on or before a date
+  const getLatestBal = (accountCode, beforeDate) => {
+    const entries = dailyBals
+      .filter(b => b.bankCode === accountCode && (!beforeDate || b.date <= beforeDate))
+      .sort((a,b) => b.date.localeCompare(a.date));
+    return entries.length > 0 ? (Number(entries[0].ending) || 0) : 0;
+  };
+
+  // Build initial bankBals for a given report date from dailyBals
+  const buildInitialBankBals = (date) => {
+    const result = {};
+    bankAccounts.forEach(acc => { result[acc.code] = getLatestBal(acc.code, date || today()); });
+    return result;
+  };
+
+  // ── Eligible vouchers (memo) ──────────────────────────────────────────────────
+  // Splits vouchers into { eligible, late } for the create/edit modal
+  // Also computes the set of _eligKeys already in drLines (for pre-check when editing)
+  const { eligible, late } = useMemo(() => {
+    if (!form.date) return { eligible: [], late: [] };
+    const repDate = new Date(form.date + 'T00:00:00');
+    const repMonth = repDate.getMonth();
+    const repYear  = repDate.getFullYear();
+    const editingId = editing ? (editing.reportId || editing.id) : null;
+
+    const eligible = [];
+    const late     = [];
+
+    vouchers.forEach(v => {
+      const status = v.status || '';
+      if (['Paid','Voided','Rejected'].includes(status)) return;
+      // Skip vouchers already in ANOTHER report
+      if (status === 'For Disbursement' && v.disbursementRef && v.disbursementRef !== editingId) return;
+
+      const isPayroll = PAYROLL_TYPES.includes(v.voucherType);
+
+      if (isPayroll && Array.isArray(v.lines) && v.lines.length > 0) {
+        // PAYROLL / FINAL_PAY — expand per line
+        v.lines.forEach(l => {
+          const lineCheckDate = l.lineCheckDate || v.checkDate || '';
+          const item = {
+            key:          `${v.voucherId||v.id}::${l.lineNo}`,
+            voucherId:    v.voucherId || v.id,
+            voucherDocId: v.id,
+            lineNo:       l.lineNo,
+            voucherType:  v.voucherType,
+            contact:      l.contact || v.contactSummary || '',
+            description:  l.description || '',
+            amount:       Number(l.amount) || 0,
+            bankCode:     l.lineBankCode || v.paymentFromAccountCode || '',
+            checkNo:      l.lineCheckNumber || v.checkNumber || '',
+            checkDate:    lineCheckDate,
+            isPayrollLine:true,
+            _preDisbStatus: v.preDisbursementStatus || v.status,
+          };
+          if (lineCheckDate) {
+            try {
+              const cd = new Date(lineCheckDate + 'T00:00:00');
+              if (!isNaN(cd.getTime()) && (cd.getMonth() !== repMonth || cd.getFullYear() !== repYear)) {
+                late.push(item); return;
+              }
+            } catch { /* no-op */ }
+          }
+          eligible.push(item);
+        });
+      } else {
+        // Regular voucher (PAYMENT, LOAN, CHECK)
+        const item = {
+          key:          `${v.voucherId||v.id}::`,
+          voucherId:    v.voucherId || v.id,
+          voucherDocId: v.id,
+          lineNo:       null,
+          voucherType:  v.voucherType || '',
+          contact:      v.contactSummary || '',
+          description:  v.purposeCategory || '',
+          amount:       Number(v.totalAmount) || 0,
+          bankCode:     v.paymentFromAccountCode || '',
+          checkNo:      v.checkNumber || '',
+          checkDate:    v.checkDate || '',
+          isPayrollLine:false,
+          _preDisbStatus: v.preDisbursementStatus || v.status,
+        };
+        if (item.checkDate) {
+          try {
+            const cd = new Date(item.checkDate + 'T00:00:00');
+            if (!isNaN(cd.getTime()) && (cd.getMonth() !== repMonth || cd.getFullYear() !== repYear)) {
+              late.push(item); return;
+            }
+          } catch { /* no-op */ }
+        }
+        eligible.push(item);
+      }
+    });
+
+    return { eligible, late };
+  }, [vouchers, form.date, editing]);
+
+  // ── Computed totals ───────────────────────────────────────────────────────────
+  const lineTotal      = drLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
+  const totalBankBals  = bankAccounts.reduce((s,acc) => s + getLatestBal(acc.code, form.date), 0);
+  const balanceAfter   = totalBankBals + (Number(form.expectedCollection)||0) - lineTotal;
+
+  // ── Toggle voucher/line selection ─────────────────────────────────────────────
+  const toggleItem = (item) => {
+    setDrLines(prev => {
+      const exists = prev.find(l => l._eligKey === item.key);
+      if (exists) return prev.filter(l => l._eligKey !== item.key);
+      return [...prev, {
+        _key:          uid(),
+        _eligKey:      item.key,
+        voucherId:     item.voucherId,
+        voucherDocId:  item.voucherDocId,
+        lineNo:        item.lineNo,
+        voucherType:   item.voucherType,
+        contact:       item.contact,
+        description:   item.description,
+        amount:        item.amount,
+        bankCode:      item.bankCode,
+        checkNo:       item.checkNo,
+        refNo:         '',
+        isPayrollLine: item.isPayrollLine || false,
+        _preDisbStatus:item._preDisbStatus || 'Approved',
+      }];
+    });
+  };
+
+  const setLineField = (key, field, val) =>
+    setDrLines(prev => prev.map(l => l._key === key ? { ...l, [field]: val } : l));
+
+  // ── Filtered & KPI ───────────────────────────────────────────────────────────
   const filtered = useMemo(() => {
     let r = [...reports];
     const q = search.toLowerCase();
-    if (q) r = r.filter(x => (x.reportId||x.id||'').toLowerCase().includes(q) || (x.bankCode||'').toLowerCase().includes(q));
+    if (q) r = r.filter(x => (x.reportId||x.id||'').toLowerCase().includes(q) || (x.createdBy||'').toLowerCase().includes(q));
     if (filterStatus) r = r.filter(x => (x.status||'Draft') === filterStatus);
     if (dateFrom) r = r.filter(x => (x.date||'') >= dateFrom);
     if (dateTo)   r = r.filter(x => (x.date||'') <= dateTo);
     return r;
   }, [reports, search, filterStatus, dateFrom, dateTo]);
 
-  // KPIs
   const kpis = useMemo(() => ({
-    total:   reports.length,
-    draft:   reports.filter(r => r.status === 'Draft').length,
-    pending: reports.filter(r => ['Pending Review','Pending Approval'].includes(r.status)).length,
-    approved:reports.filter(r => r.status === 'Approved').length,
-    totalAmt:reports.filter(r => !['Voided','Rejected'].includes(r.status)).reduce((s,r) => s+(Number(r.totalAmount)||0), 0),
+    total:    reports.length,
+    draft:    reports.filter(r => r.status === 'Draft').length,
+    pending:  reports.filter(r => ['Pending Review','Pending Approval'].includes(r.status)).length,
+    approved: reports.filter(r => r.status === 'Approved').length,
+    totalAmt: reports.filter(r => !['Voided','Rejected'].includes(r.status)).reduce((s,r) => s+(Number(r.totalAmount)||0), 0),
   }), [reports]);
 
-  // Bulk
+  // ── Bulk operations ───────────────────────────────────────────────────────────
   const toggleSel = (id) => setSelected(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
   const toggleAll = () => {
     if (selected.size === filtered.length) setSelected(new Set());
@@ -159,88 +456,125 @@ export default function DisbursementsPage() {
   };
   const bulkSubmit = () => {
     if (!selected.size) return;
-    const count = selected.size;
-    askConfirm(`Submit ${count} report(s) for approval?`, async () => {
+    askConfirm(`Submit ${selected.size} report(s) for approval?`, async () => {
       await Promise.all([...selected].map(id => updateDoc(doc(db,'disbursementReports',id), { status:'Pending Review', updatedAt:serverTimestamp(), updatedBy:user })));
       setSelected(new Set()); showToast('Submitted for review.');
     });
   };
   const bulkDelete = () => {
     if (!selected.size) return;
-    const count = selected.size;
-    askConfirm(`Delete ${count} report(s)?`, async () => {
+    askConfirm(`Delete ${selected.size} report(s)?`, async () => {
       await Promise.all([...selected].map(id => deleteDoc(doc(db,'disbursementReports',id))));
       setSelected(new Set()); showToast('Deleted.');
     });
   };
 
-  // Open create modal
+  // ── Open Create modal ─────────────────────────────────────────────────────────
   const openNew = () => {
-    refreshVouchers();
+    refreshModalData();
     setEditing(null);
-    setForm({ date:today(), expectedCollection:0, notes:'' });
+    const date = today();
+    setForm({ date, expectedCollection:0, notes:'' });
     setDrLines([]);
     setShowModal(true);
   };
 
+  // ── Open Edit modal ───────────────────────────────────────────────────────────
   const openEdit = (r) => {
-    refreshVouchers();
+    refreshModalData();
     setEditing(r);
     setForm({ date:r.date||today(), expectedCollection:r.expectedCollection||0, notes:r.notes||'' });
-    setDrLines((r.lines||[]).map(l => ({ ...l, _key: uid() })));
+    // Pre-populate drLines from saved report lines
+    setDrLines((r.lines||[]).map(l => ({
+      ...l,
+      _key:     uid(),
+      _eligKey: `${l.voucherId}::${l.lineNo != null ? l.lineNo : ''}`,
+      _preDisbStatus: 'Approved', // will be resolved via voucher lookup on save
+    })));
     setShowModal(true);
   };
 
-  // Toggle voucher in lines
-  const toggleVoucher = (v) => {
-    setDrLines(prev => {
-      const exists = prev.find(l => l.voucherId === (v.voucherId||v.id));
-      if (exists) return prev.filter(l => l.voucherId !== (v.voucherId||v.id));
-      return [...prev, {
-        _key: uid(),
-        voucherId:   v.voucherId || v.id,
-        voucherType: v.voucherType||'',
-        contact:     v.contactSummary||'',
-        amount:      Number(v.totalAmount)||0,
-        bankCode:    v.paymentFromAccountCode||'',
-        checkNo:     v.checkNumber||'',
-        refNo:       '',
-        status:      'In Disbursement',
-      }];
-    });
-  };
-
-  const setLineField = (key, field, val) => {
-    setDrLines(prev => prev.map(l => l._key === key ? { ...l, [field]: val } : l));
-  };
-
-  const lineTotal = drLines.reduce((s,l) => s+(Number(l.amount)||0), 0);
-
-  // Save report
+  // ── Save report ───────────────────────────────────────────────────────────────
   const saveReport = async (status) => {
     if (drLines.length === 0) { showToast('Add at least one voucher line.'); return; }
     setSaving(true);
     try {
+      const reportLines = drLines.map((l,i) => ({
+        lineNo:        i+1,
+        voucherId:     l.voucherId,
+        voucherDocId:  l.voucherDocId || '',
+        srcLineNo:     l.lineNo ?? null,
+        voucherType:   l.voucherType || '',
+        contact:       l.contact || '',
+        description:   l.description || '',
+        amount:        Number(l.amount)||0,
+        bankCode:      l.bankCode||'',
+        checkNo:       l.checkNo||'',
+        refNo:         l.refNo||'',
+        isPayrollLine: l.isPayrollLine||false,
+        status:        'In Disbursement',
+      }));
+
       const payload = {
         date:               form.date,
         bankCode:           'MULTIPLE',
         totalAmount:        lineTotal,
         expectedCollection: Number(form.expectedCollection)||0,
         notes:              form.notes||'',
+        bankBalances:       buildInitialBankBals(form.date),
         status:             status || 'Draft',
-        lines:              drLines.map((l,i) => ({ lineNo:i+1, voucherId:l.voucherId, voucherType:l.voucherType, contact:l.contact, amount:Number(l.amount)||0, bankCode:l.bankCode||'', checkNo:l.checkNo||'', refNo:l.refNo||'', status:'In Disbursement' })),
-        updatedAt:          serverTimestamp(), updatedBy: user
+        lines:              reportLines,
+        updatedAt:          serverTimestamp(),
+        updatedBy:          user,
       };
+
       if (editing) {
         await updateDoc(doc(db,'disbursementReports',editing.id), payload);
+
+        // Diff vouchers: newly added vs removed
+        const prevIds = new Set((editing.lines||[]).map(l=>l.voucherId));
+        const newIds  = new Set(drLines.map(l=>l.voucherId));
+
+        // Newly added vouchers → mark For Disbursement + save preDisbursementStatus
+        const addedVids = [...newIds].filter(vid => !prevIds.has(vid));
+        await Promise.all(addedVids.map(vid => {
+          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
+          if (!v || v.status === 'For Disbursement') return null;
+          return updateDoc(doc(db,'vouchers',v.id), {
+            status: 'For Disbursement', preDisbursementStatus: v.status,
+            disbursementRef: editing.reportId||editing.id,
+            updatedAt: serverTimestamp(), updatedBy: user,
+          });
+        }).filter(Boolean));
+
+        // Removed vouchers → revert to preDisbursementStatus
+        const removedVids = [...prevIds].filter(vid => !newIds.has(vid));
+        await Promise.all(removedVids.map(vid => {
+          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
+          if (!v) return null;
+          return updateDoc(doc(db,'vouchers',v.id), {
+            status: v.preDisbursementStatus || 'Approved',
+            preDisbursementStatus: '', disbursementRef: '',
+            updatedAt: serverTimestamp(), updatedBy: user,
+          });
+        }).filter(Boolean));
+
         showToast('Report updated.');
       } else {
         const reportId = await nextDisbursementReportId(form.date);
-        await addDoc(collection(db,'disbursementReports'), { ...payload, reportId, createdAt:serverTimestamp(), createdBy:user });
-        // Mark vouchers as For Disbursement
-        await Promise.all(drLines.map(l => {
-          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === l.voucherId);
-          if (v) return updateDoc(doc(db,'vouchers',v.id), { status:'For Disbursement', disbursementRef:reportId, updatedAt:serverTimestamp(), updatedBy:user });
+        await addDoc(collection(db,'disbursementReports'), {
+          ...payload, reportId, createdAt:serverTimestamp(), createdBy:user
+        });
+        // Mark each unique voucher as For Disbursement (save preDisbursementStatus)
+        const uniqueVids = [...new Set(drLines.map(l=>l.voucherId))];
+        await Promise.all(uniqueVids.map(vid => {
+          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
+          if (!v) return null;
+          return updateDoc(doc(db,'vouchers',v.id), {
+            status: 'For Disbursement', preDisbursementStatus: v.status,
+            disbursementRef: reportId,
+            updatedAt: serverTimestamp(), updatedBy: user,
+          });
         }).filter(Boolean));
         showToast('Report created.');
       }
@@ -249,84 +583,146 @@ export default function DisbursementsPage() {
     setSaving(false);
   };
 
+  // ── Status update ─────────────────────────────────────────────────────────────
   const doStatusUpdate = async () => {
     if (!statusModal) return;
     const { report, newStatus, reason } = statusModal;
     setSaving(true);
     try {
-      await updateDoc(doc(db,'disbursementReports',report.id), {
-        status:newStatus, ...(reason?{rejectReason:reason}:{}),
-        updatedAt:serverTimestamp(), updatedBy:user
-      });
-      // If Approved → mark all vouchers as Paid AND auto-post loan payments
-      if (newStatus === 'Approved') {
-        const lines = report.lines || [];
-        await Promise.all(lines.map(async l => {
-          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === l.voucherId);
-          if (!v) return;
-          // 1) mark voucher as Paid
-          await updateDoc(doc(db,'vouchers',v.id), { status:'Paid', updatedAt:serverTimestamp(), updatedBy:user });
+      const updateFields = {
+        status: newStatus,
+        ...(reason ? { rejectReason: reason } : {}),
+        ...(newStatus === 'Pending Review'   ? { reviewedBy: user }  : {}),
+        ...(newStatus === 'Pending Approval' ? { reviewedBy: user }  : {}),
+        ...(newStatus === 'Approved'         ? { approvedBy: user }  : {}),
+        updatedAt: serverTimestamp(), updatedBy: user,
+      };
+      await updateDoc(doc(db,'disbursementReports',report.id), updateFields);
 
-          // 2) Phase 5: auto-post to loanPayments when voucher is linked to a loan
-          //    and we haven't already posted (idempotency via loanPaymentId).
+      if (newStatus === 'Approved') {
+        // Mark all vouchers as Paid + auto-post loan payments
+        const lines = report.lines || [];
+        const uniqueVids = [...new Set(lines.map(l=>l.voucherId))];
+        await Promise.all(uniqueVids.map(async vid => {
+          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
+          if (!v) return;
+          await updateDoc(doc(db,'vouchers',v.id), {
+            status:'Paid', preDisbursementStatus:'', disbursementRef:'',
+            updatedAt:serverTimestamp(), updatedBy:user
+          });
           if (v.loanId && !v.loanPaymentId) {
             const vLines = Array.isArray(v.lines) ? v.lines : [];
-            const interestAmt  = vLines
-              .filter(x => (x.category||'').toLowerCase() === 'finance cost')
-              .reduce((s, x) => s + (Number(x.amount) || 0), 0);
-            const principalAmt = vLines
-              .filter(x => (x.category||'').toLowerCase() === 'loans payable')
-              .reduce((s, x) => s + (Number(x.amount) || 0), 0);
-            const total = Number(v.totalAmount) || (interestAmt + principalAmt);
-            const penaltyAmt = Math.max(0, total - interestAmt - principalAmt);
-
+            const interestAmt  = vLines.filter(x=>(x.category||'').toLowerCase()==='finance cost').reduce((s,x)=>s+(Number(x.amount)||0),0);
+            const principalAmt = vLines.filter(x=>(x.category||'').toLowerCase()==='loans payable').reduce((s,x)=>s+(Number(x.amount)||0),0);
+            const total        = Number(v.totalAmount) || (interestAmt+principalAmt);
+            const penaltyAmt   = Math.max(0, total - interestAmt - principalAmt);
+            const line         = lines.find(l=>l.voucherId===vid)||{};
             try {
               const payRef = await addDoc(collection(db,'loanPayments'), {
-                loanId:      v.loanId,
-                loanName:    v.contactSummary || '',
-                date:        report.date || v.preparationDate || today(),
-                interest:    interestAmt,
-                principal:   principalAmt,
-                penalty:     penaltyAmt,
-                total,
-                method:      'Voucher',
-                referenceNo: l.checkNo || l.refNo || '',
-                bank:        l.bankCode || v.paymentFromAccountCode || '',
-                voucherId:   v.voucherId || v.id,
-                disbursementReportId: report.reportId || report.id,
-                allocations: [], // FIFO allocation by reconciliation engine
-                notes:       `Auto-posted from Disbursement Report ${report.reportId||report.id}`,
-                source:      'disbursement-auto',
-                createdAt:   serverTimestamp(),
-                createdBy:   user,
+                loanId:v.loanId, loanName:v.contactSummary||'', date:report.date||v.preparationDate||today(),
+                interest:interestAmt, principal:principalAmt, penalty:penaltyAmt, total,
+                method:'Voucher', referenceNo:line.checkNo||line.refNo||'',
+                bank:line.bankCode||v.paymentFromAccountCode||'',
+                voucherId:v.voucherId||v.id, disbursementReportId:report.reportId||report.id,
+                allocations:[], notes:`Auto-posted from DR ${report.reportId||report.id}`,
+                source:'disbursement-auto', createdAt:serverTimestamp(), createdBy:user,
               });
               await updateDoc(doc(db,'vouchers',v.id), { loanPaymentId: payRef.id });
-            } catch (err) {
-              console.error('Auto-post loan payment failed for voucher', v.id, err);
-            }
+            } catch(err) { console.error('Auto-post failed for', v.id, err); }
           }
         }));
       }
+
+      if (newStatus === 'Rejected') {
+        // Revert all vouchers to preDisbursementStatus
+        const lines = report.lines || [];
+        const uniqueVids = [...new Set(lines.map(l=>l.voucherId))];
+        await Promise.all(uniqueVids.map(vid => {
+          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
+          if (!v) return null;
+          return updateDoc(doc(db,'vouchers',v.id), {
+            status: v.preDisbursementStatus || 'Approved',
+            preDisbursementStatus: '', disbursementRef: '',
+            updatedAt: serverTimestamp(), updatedBy: user,
+          });
+        }).filter(Boolean));
+      }
+
       showToast(`Status updated to ${newStatus}.`);
       setStatusModal(null);
     } catch(e) { showToast('Error: ' + e.message); }
     setSaving(false);
   };
 
+  // ── Delete report (reverts voucher statuses) ──────────────────────────────────
   const deleteReport = (r) => {
-    askConfirm(`Delete report ${r.reportId||r.id}?`, async () => {
+    askConfirm(`Delete report ${r.reportId||r.id}? Vouchers will be reverted.`, async () => {
+      const lines = r.lines || [];
+      const uniqueVids = [...new Set(lines.map(l=>l.voucherId))];
+      await Promise.all(uniqueVids.map(vid => {
+        const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
+        if (!v) return null;
+        return updateDoc(doc(db,'vouchers',v.id), {
+          status: v.preDisbursementStatus || 'Approved',
+          preDisbursementStatus: '', disbursementRef: '',
+          updatedAt:serverTimestamp(), updatedBy:user,
+        });
+      }).filter(Boolean));
       await deleteDoc(doc(db,'disbursementReports',r.id));
-      showToast('Report deleted.');
+      showToast('Report deleted. Vouchers reverted.');
     });
   };
 
+  // ── Remove a line from an existing report (in View modal) ────────────────────
+  const removeLine = (lineIndex) => {
+    const report = viewModal;
+    if (!report) return;
+    const line = (report.lines||[])[lineIndex];
+    if (!line) return;
+    askConfirm(`Remove ${line.voucherId} from this report? The voucher will be reverted.`, async () => {
+      const newLines = (report.lines||[])
+        .filter((_,i) => i !== lineIndex)
+        .map((l,i) => ({ ...l, lineNo: i+1 }));
+      const newTotal = newLines.reduce((s,l) => s+(Number(l.amount)||0), 0);
+      await updateDoc(doc(db,'disbursementReports',report.id), {
+        lines: newLines, totalAmount: newTotal,
+        updatedAt:serverTimestamp(), updatedBy:user,
+      });
+      // Check if this voucher still has lines in the report
+      const stillHasLines = newLines.some(l => l.voucherId === line.voucherId);
+      if (!stillHasLines) {
+        const v = vouchers.find(v2 => (v2.voucherId||v2.id) === line.voucherId);
+        if (v) {
+          await updateDoc(doc(db,'vouchers',v.id), {
+            status: v.preDisbursementStatus || 'Approved',
+            preDisbursementStatus: '', disbursementRef: '',
+            updatedAt:serverTimestamp(), updatedBy:user,
+          });
+        }
+      }
+      setViewModal(prev => prev ? { ...prev, lines:newLines, totalAmount:newTotal } : null);
+      showToast('Line removed and voucher reverted.');
+    });
+  };
+
+  // ── PDF export ────────────────────────────────────────────────────────────────
+  const openPdf = (r) => {
+    const html = buildPdfHtml(r, bankAccounts);
+    const win = window.open('', '_blank');
+    if (!win) { showToast('Pop-up blocked. Please allow pop-ups for this site.'); return; }
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 800);
+  };
+
+  // ── Status helpers ────────────────────────────────────────────────────────────
   const nextStatuses = (status) => {
     if (status === 'Draft')            return ['Pending Review','Voided'];
     if (status === 'Pending Review')   return ['Pending Approval','Rejected','Voided'];
     if (status === 'Pending Approval') return ['Approved','Rejected','Voided'];
     return [];
   };
-
   const canEdit = (r) => ['Draft','Pending Review'].includes(r.status||'Draft');
 
   return (
@@ -446,6 +842,9 @@ export default function DisbursementsPage() {
                       <div style={{display:'flex',gap:4,justifyContent:'center'}}>
                         <button className="btn btn-ghost btn-xs" onClick={()=>setViewModal(r)}>View</button>
                         {canEdit(r) && <button className="btn btn-ghost btn-xs" onClick={()=>openEdit(r)}>Edit</button>}
+                        {(r.status==='Draft'||r.status==='Rejected') && (
+                          <button className="btn btn-ghost btn-xs" style={{color:'#1d4ed8',border:'1px solid #bfdbfe'}} onClick={()=>setStatusModal({report:r,newStatus:'Pending Review',reason:null})}>Submit</button>
+                        )}
                         {nextStatuses(r.status||'Draft').length > 0 && (
                           <select className="input" style={{padding:'3px 6px',fontSize:11,borderRadius:8,cursor:'pointer'}}
                             defaultValue=""
@@ -455,6 +854,7 @@ export default function DisbursementsPage() {
                           </select>
                         )}
                         {(r.status||'Draft')==='Draft' && <button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>deleteReport(r)}>🗑</button>}
+                        <button className="btn btn-ghost btn-xs" title="Print PDF" onClick={()=>openPdf(r)}>🖨</button>
                       </div>
                     </td>
                   </tr>,
@@ -506,13 +906,15 @@ export default function DisbursementsPage() {
               <button className="btn btn-ghost btn-sm" onClick={()=>setShowModal(false)}>✕</button>
             </div>
             <div className="modal-b">
+
+              {/* ── Header fields ── */}
               <div className="grid4">
                 <div className="field">
                   <label>Date</label>
                   <input type="date" value={form.date||''} onChange={e=>setForm(f=>({...f,date:e.target.value}))} />
                 </div>
                 <div className="field">
-                  <label>Expected Collection</label>
+                  <label>Expected Collection (₱)</label>
                   <input type="number" value={form.expectedCollection||0} onChange={e=>setForm(f=>({...f,expectedCollection:e.target.value}))} />
                 </div>
                 <div className="field col2">
@@ -521,25 +923,101 @@ export default function DisbursementsPage() {
                 </div>
               </div>
 
-              {/* Eligible Vouchers */}
-              <div className="section-title">Eligible Vouchers (Approved)</div>
-              {vouchers.filter(v=>v.status==='Approved').length === 0
-                ? <div style={{padding:'12px 0',fontSize:13,color:'#94a3b8'}}>No approved vouchers available.</div>
+              {/* ── Bank Account Balances Table ── */}
+              {bankAccounts.length > 0 && (<>
+                <div className="section-title">
+                  <span>Bank Account Balances</span>
+                  <span style={{fontSize:10,fontWeight:600,color:'#94a3b8'}}>Live Book Balance from Bank Management</span>
+                </div>
+                <table className="lines-tbl" style={{fontSize:13,marginBottom:10,tableLayout:'fixed'}}>
+                  <colgroup>
+                    <col style={{width:'60px'}} />
+                    <col />
+                    <col style={{width:'220px'}} />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Code</th>
+                      <th>Bank Account</th>
+                      <th style={{textAlign:'right'}}>Book Balance (₱)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bankAccounts.map(acc => (
+                      <tr key={acc.code}>
+                        <td style={{fontWeight:800,color:'#94a3b8',fontSize:11}}>{acc.code}</td>
+                        <td style={{fontWeight:700,color:'#0b1220'}}>{acc.name}</td>
+                        <td style={{textAlign:'right',fontWeight:700,color:'#1d4ed8',fontSize:13}}>
+                          {fmt(getLatestBal(acc.code, form.date))}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr style={{background:'#f8fafc',borderTop:'2px solid #e5e7eb'}}>
+                      <td colSpan={2} style={{textAlign:'right',fontWeight:800,color:'#64748b',fontSize:12,letterSpacing:'.04em',textTransform:'uppercase'}}>Total Bank Balances</td>
+                      <td style={{textAlign:'right',fontWeight:900,color:'#1d4ed8',fontSize:14}}>{fmt(totalBankBals)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </>)}
+
+              {/* ── Live Summary Bar ── */}
+              <div className="summary-bar">
+                <div className="summary-item">
+                  <span className="summary-item-lbl">Total Bank Balances</span>
+                  <span className="summary-item-val">{fmt(totalBankBals)}</span>
+                </div>
+                <span style={{color:'#94a3b8',fontWeight:700,fontSize:16}}>+</span>
+                <div className="summary-item">
+                  <span className="summary-item-lbl">Expected Collection</span>
+                  <span className="summary-item-val">{fmt(Number(form.expectedCollection)||0)}</span>
+                </div>
+                <span style={{color:'#94a3b8',fontWeight:700,fontSize:16}}>−</span>
+                <div className="summary-item">
+                  <span className="summary-item-lbl">Total Disbursements</span>
+                  <span className="summary-item-val" style={{color:'#dc2626'}}>{fmt(lineTotal)}</span>
+                </div>
+                <span style={{color:'#94a3b8',fontWeight:700,fontSize:16}}>=</span>
+                <div className="summary-item">
+                  <span className="summary-item-lbl">Balance After</span>
+                  <span className={`summary-item-val ${balanceAfter<0?'neg':''}`} style={{fontSize:18}}>{fmt(balanceAfter)}</span>
+                </div>
+              </div>
+
+              {/* ── Eligible Vouchers (same month) ── */}
+              <div className="section-title">
+                <span>Eligible Vouchers — Same Month ({eligible.length})</span>
+                <span style={{fontSize:10,fontWeight:600,color:'#94a3b8'}}>Pending, Approved &amp; For Disbursement</span>
+                {eligible.length > 0 && (
+                  <button className="btn btn-ghost btn-xs" onClick={()=>{
+                    const unchecked = eligible.filter(it => !drLines.some(l=>l._eligKey===it.key));
+                    if (unchecked.length > 0) unchecked.forEach(toggleItem);
+                    else eligible.forEach(it => setDrLines(prev=>prev.filter(l=>l._eligKey!==it.key)));
+                  }}>
+                    {eligible.every(it=>drLines.some(l=>l._eligKey===it.key)) ? 'Deselect All' : 'Select All'}
+                  </button>
+                )}
+              </div>
+              {eligible.length === 0
+                ? <div style={{padding:'12px 0',fontSize:13,color:'#94a3b8'}}>
+                    {form.date ? `No eligible vouchers for ${form.date.slice(0,7)}.` : 'Set a report date to see eligible vouchers.'}
+                  </div>
                 : (
-                  <div style={{border:'1px solid #e5e7eb',borderRadius:12,overflow:'hidden',marginBottom:16}}>
-                    {vouchers.filter(v=>v.status==='Approved').map(v => {
-                      const vid = v.voucherId||v.id;
-                      const checked = drLines.some(l=>l.voucherId===vid);
+                  <div style={{border:'1px solid #e5e7eb',borderRadius:12,overflow:'hidden',marginBottom:12}}>
+                    {eligible.map(item => {
+                      const checked = drLines.some(l=>l._eligKey===item.key);
                       return (
-                        <div key={v.id} className="elig-check" style={{background:checked?'#fff7ed':'#fff'}}>
-                          <input type="checkbox" checked={checked} onChange={()=>toggleVoucher(v)} style={{width:16,height:16,accentColor:'#f97316'}} />
-                          <div style={{flex:1,fontSize:13}}>
-                            <strong style={{color:'#f97316'}}>{vid}</strong>
-                            <span style={{marginLeft:8,color:'#64748b'}}>{v.voucherType}</span>
-                            <span style={{marginLeft:8,color:'#64748b'}}>{v.contactSummary||''}</span>
+                        <div key={item.key} className="elig-check" style={{background:checked?'#fff7ed':'#fff',cursor:'pointer'}} onClick={()=>toggleItem(item)}>
+                          <input type="checkbox" checked={checked} readOnly style={{width:16,height:16,accentColor:'#f97316',flexShrink:0}} />
+                          <div style={{flex:1,fontSize:12}}>
+                            <strong style={{color:'#f97316'}}>{item.voucherId}</strong>
+                            {item.isPayrollLine && <span style={{marginLeft:6,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 5px',borderRadius:4,fontWeight:700}}>LINE {item.lineNo}</span>}
+                            <span style={{marginLeft:8,color:'#64748b',fontSize:11}}>{item.voucherType}</span>
+                            <span style={{marginLeft:8,color:'#0b1220'}}>{item.contact}</span>
+                            {item.description && <span style={{marginLeft:8,color:'#94a3b8',fontSize:11}}>{item.description}</span>}
                           </div>
-                          <span style={{fontWeight:700,minWidth:100,textAlign:'right'}}>{fmt(v.totalAmount)}</span>
-                          <span style={{marginLeft:8,fontSize:11,color:'#64748b'}}>{v.paymentFromAccountCode||''}</span>
+                          <span style={{fontSize:11,color:'#64748b',marginRight:8}}>{item.bankCode||'—'}</span>
+                          {item.checkDate && <span style={{fontSize:11,color:'#94a3b8',marginRight:8}}>{item.checkDate}</span>}
+                          <span style={{fontWeight:700,minWidth:100,textAlign:'right',fontSize:13}}>{fmt(item.amount)}</span>
                         </div>
                       );
                     })}
@@ -547,38 +1025,71 @@ export default function DisbursementsPage() {
                 )
               }
 
-              {/* Selected Lines Table */}
+              {/* ── Late Vouchers (different month) ── */}
+              {late.length > 0 && (<>
+                <div className="section-title">
+                  <span>Late Approvals — Different Month <span className="late-badge">{late.length}</span></span>
+                  <button className="btn btn-ghost btn-xs" onClick={()=>{
+                    const unchecked = late.filter(it => !drLines.some(l=>l._eligKey===it.key));
+                    if (unchecked.length > 0) unchecked.forEach(toggleItem);
+                    else late.forEach(it => setDrLines(prev=>prev.filter(l=>l._eligKey!==it.key)));
+                  }}>
+                    {late.every(it=>drLines.some(l=>l._eligKey===it.key)) ? 'Deselect All' : 'Select All'}
+                  </button>
+                </div>
+                <div style={{border:'1px solid #fde68a',borderRadius:12,overflow:'hidden',marginBottom:12}}>
+                  {late.map(item => {
+                    const checked = drLines.some(l=>l._eligKey===item.key);
+                    return (
+                      <div key={item.key} className="elig-check elig-late" style={{background:checked?'#fefce8':'#fffbeb',cursor:'pointer'}} onClick={()=>toggleItem(item)}>
+                        <input type="checkbox" checked={checked} readOnly style={{width:16,height:16,accentColor:'#f59e0b',flexShrink:0}} />
+                        <div style={{flex:1,fontSize:12}}>
+                          <strong style={{color:'#d97706'}}>{item.voucherId}</strong>
+                          {item.isPayrollLine && <span style={{marginLeft:6,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 5px',borderRadius:4,fontWeight:700}}>LINE {item.lineNo}</span>}
+                          <span style={{marginLeft:8,color:'#64748b',fontSize:11}}>{item.voucherType}</span>
+                          <span style={{marginLeft:8,color:'#0b1220'}}>{item.contact}</span>
+                        </div>
+                        <span style={{fontSize:11,color:'#64748b',marginRight:8}}>{item.bankCode||'—'}</span>
+                        {item.checkDate && <span style={{fontSize:11,color:'#92400e',fontWeight:700,marginRight:8}}>{item.checkDate}</span>}
+                        <span style={{fontWeight:700,minWidth:100,textAlign:'right',fontSize:13}}>{fmt(item.amount)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>)}
+
+              {/* ── Selected Lines Table ── */}
               {drLines.length > 0 && (
                 <>
-                  <div className="section-title">Disbursement Lines ({drLines.length})</div>
+                  <div className="section-title"><span>Disbursement Lines ({drLines.length})</span></div>
                   <table className="lines-tbl" style={{fontSize:12,marginBottom:8}}>
                     <thead>
-                      <tr><th>#</th><th>Voucher ID</th><th>Type</th><th>Contact</th><th>Bank</th><th>Check No.</th><th>Ref No.</th><th style={{textAlign:'right'}}>Amount</th><th></th></tr>
+                      <tr><th>#</th><th>Voucher ID</th><th>Type</th><th>Contact / Description</th><th>Bank</th><th>Check No.</th><th>Ref No.</th><th style={{textAlign:'right'}}>Amount</th><th></th></tr>
                     </thead>
                     <tbody>
                       {drLines.map((l,i) => (
                         <tr key={l._key}>
                           <td style={{color:'#94a3b8',fontWeight:700,width:32,textAlign:'center'}}>{i+1}</td>
-                          <td style={{fontWeight:700,color:'#f97316'}}>{l.voucherId}</td>
-                          <td>{l.voucherType}</td>
-                          <td>{l.contact||'—'}</td>
-                          <td>
-                            <select value={l.bankCode||''} onChange={e=>setLineField(l._key,'bankCode',e.target.value)}>
-                              <option value="">—</option>
-                              {BANKS.map(b=><option key={b}>{b}</option>)}
-                            </select>
+                          <td style={{fontWeight:700,color:'#f97316'}}>
+                            {l.voucherId}
+                            {l.isPayrollLine && <span style={{marginLeft:4,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 4px',borderRadius:4,fontWeight:700}}>L{l.lineNo}</span>}
                           </td>
-                          <td><input value={l.checkNo||''} onChange={e=>setLineField(l._key,'checkNo',e.target.value)} placeholder="Check #" /></td>
-                          <td><input value={l.refNo||''} onChange={e=>setLineField(l._key,'refNo',e.target.value)} placeholder="Ref #" /></td>
-                          <td><input type="number" style={{textAlign:'right'}} value={l.amount||0} onChange={e=>setLineField(l._key,'amount',e.target.value)} /></td>
+                          <td>{l.voucherType}</td>
+                          <td style={{maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.contact||l.description||'—'}</td>
+                          <td style={{color:'#374151'}}>{l.bankCode ? `${l.bankCode}` : '—'}</td>
+                          <td style={{color:'#374151'}}>{l.checkNo||'—'}</td>
+                          <td style={{color:'#374151'}}>{l.refNo||'—'}</td>
+                          <td style={{textAlign:'right',fontWeight:700,color:'#0b1220',paddingRight:8}}>{fmt(l.amount||0)}</td>
                           <td><button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>setDrLines(prev=>prev.filter(x=>x._key!==l._key))}>✕</button></td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                   <div className="tfoot-row">
-                    <span style={{color:'#94a3b8'}}>Total Amount:</span>
-                    <span style={{color:'#0b1220'}}>{fmt(lineTotal)}</span>
+                    <span style={{color:'#94a3b8'}}>Total Disbursements:</span>
+                    <span style={{color:'#dc2626'}}>{fmt(lineTotal)}</span>
+                    <span style={{color:'#94a3b8',marginLeft:20}}>Balance After:</span>
+                    <span style={{color:balanceAfter<0?'#dc2626':'#065f46'}}>{fmt(balanceAfter)}</span>
                   </div>
                 </>
               )}
@@ -605,42 +1116,107 @@ export default function DisbursementsPage() {
             </div>
             <div className="modal-b">
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:12,marginBottom:20}}>
-                {[['Date',viewModal.date],['Total Amount',fmt(viewModal.totalAmount)],['Expected Collection',fmt(viewModal.expectedCollection)],['Bank',viewModal.bankCode||'MULTIPLE'],['Created By',viewModal.createdBy||'—'],['Reviewed By',viewModal.reviewedBy||'—'],['Approved By',viewModal.approvedBy||'—']].map(([k,v])=>(
+                {[['Date',viewModal.date],['Total Amount',fmt(viewModal.totalAmount)],['Expected Collection',fmt(viewModal.expectedCollection)],['Created By',viewModal.createdBy||'—'],['Reviewed By',viewModal.reviewedBy||'—'],['Approved By',viewModal.approvedBy||'—']].map(([k,v])=>(
                   <div key={k}><div style={{fontSize:10,fontWeight:800,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:4}}>{k}</div><div style={{fontWeight:700}}>{v||'—'}</div></div>
                 ))}
               </div>
-              {viewModal.rejectReason && <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12,marginBottom:12}}><strong style={{color:'#dc2626'}}>Reject Reason: </strong>{viewModal.rejectReason}</div>}
-              <div className="section-title">Lines</div>
+              {viewModal.rejectReason && (
+                <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12,marginBottom:12}}>
+                  <strong style={{color:'#dc2626'}}>Reject Reason: </strong>{viewModal.rejectReason}
+                </div>
+              )}
+              {/* Bank balances snapshot */}
+              {viewModal.bankBalances && Object.keys(viewModal.bankBalances).length > 0 && (
+                <>
+                  <div className="section-title"><span>Bank Balances (at time of report)</span></div>
+                  <div className="bank-cards" style={{marginBottom:12}}>
+                    {bankAccounts.filter(acc=>viewModal.bankBalances[acc.code]!=null).map(acc=>{
+                      const bal  = Number(viewModal.bankBalances[acc.code])||0;
+                      const disb = (viewModal.lines||[]).filter(l=>l.bankCode===acc.code).reduce((s,l)=>s+(Number(l.amount)||0),0);
+                      return (
+                        <div key={acc.code} className="bank-card">
+                          <div className="bank-card-code">{acc.code}</div>
+                          <div className="bank-card-name">{acc.name}</div>
+                          <div className="bank-card-lbl">Balance</div>
+                          <div className="bank-card-val">{fmt(bal)}</div>
+                          {disb>0 && <div style={{fontSize:11,color:'#94a3b8',marginTop:2}}>− {fmt(disb)} disbursed</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{background:'#f0fdf4',border:'1px solid #6ee7b7',borderRadius:10,padding:'10px 14px',marginBottom:12,display:'flex',flexWrap:'wrap',gap:16}}>
+                    {[
+                      ['Total Bank Bals', Object.values(viewModal.bankBalances).reduce((s,v)=>s+(Number(v)||0),0)],
+                      ['+ Expected Collection', Number(viewModal.expectedCollection)||0],
+                      ['− Disbursements', Number(viewModal.totalAmount)||0],
+                      ['= Balance After', Object.values(viewModal.bankBalances).reduce((s,v)=>s+(Number(v)||0),0) + (Number(viewModal.expectedCollection)||0) - (Number(viewModal.totalAmount)||0)],
+                    ].map(([lbl,val])=>(
+                      <div key={lbl}>
+                        <div style={{fontSize:9,fontWeight:800,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em'}}>{lbl}</div>
+                        <div style={{fontSize:14,fontWeight:900,color:lbl.includes('After')&&val<0?'#dc2626':'#065f46'}}>{fmt(val)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div className="section-title">
+                <span>Lines ({(viewModal.lines||[]).length})</span>
+                {canReviewOrApprove && ['Pending Review','Pending Approval'].includes(viewModal.status||'') && (
+                  <span style={{fontSize:10,color:'#94a3b8'}}>You can remove lines before approval</span>
+                )}
+              </div>
               {(viewModal.lines||[]).length===0
                 ? <div className="empty">No lines.</div>
                 : <table className="lines-tbl">
-                    <thead><tr><th>#</th><th>Voucher ID</th><th>Type</th><th>Contact</th><th>Bank</th><th>Check No.</th><th>Ref No.</th><th style={{textAlign:'right'}}>Amount</th></tr></thead>
+                    <thead>
+                      <tr>
+                        <th>#</th><th>Voucher ID</th><th>Type</th><th>Contact</th>
+                        <th>Bank</th><th>Check No.</th><th>Ref No.</th>
+                        <th style={{textAlign:'right'}}>Amount</th>
+                        {canReviewOrApprove && ['Pending Review','Pending Approval'].includes(viewModal.status||'') && <th></th>}
+                      </tr>
+                    </thead>
                     <tbody>
                       {(viewModal.lines||[]).map((l,i)=>(
                         <tr key={i}>
                           <td>{l.lineNo||i+1}</td>
-                          <td style={{fontWeight:700,color:'#f97316'}}>{l.voucherId||'—'}</td>
+                          <td style={{fontWeight:700,color:'#f97316'}}>
+                            {l.voucherId||'—'}
+                            {l.isPayrollLine && <span style={{marginLeft:4,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 4px',borderRadius:4,fontWeight:700}}>L{l.srcLineNo||l.lineNo}</span>}
+                          </td>
                           <td>{l.voucherType||'—'}</td>
                           <td>{l.contact||'—'}</td>
                           <td>{l.bankCode||'—'}</td>
                           <td>{l.checkNo||'—'}</td>
                           <td>{l.refNo||'—'}</td>
                           <td style={{textAlign:'right',fontWeight:700}}>{fmt(l.amount)}</td>
+                          {canReviewOrApprove && ['Pending Review','Pending Approval'].includes(viewModal.status||'') && (
+                            <td>
+                              <button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>removeLine(i)}>Remove</button>
+                            </td>
+                          )}
                         </tr>
                       ))}
-                      <tr><td colSpan={7} style={{textAlign:'right',fontWeight:800,color:'#64748b',fontSize:12}}>TOTAL</td><td style={{textAlign:'right',fontWeight:900}}>{fmt(viewModal.totalAmount)}</td></tr>
+                      <tr><td colSpan={canReviewOrApprove&&['Pending Review','Pending Approval'].includes(viewModal.status||'')?8:7} style={{textAlign:'right',fontWeight:800,color:'#64748b',fontSize:12}}>TOTAL</td><td style={{textAlign:'right',fontWeight:900}}>{fmt(viewModal.totalAmount)}</td></tr>
                     </tbody>
                   </table>
               }
+              {viewModal.notes && <div style={{marginTop:10,fontSize:12,color:'#64748b'}}><strong>Notes:</strong> {viewModal.notes}</div>}
             </div>
             <div className="modal-f">
+              <button className="btn btn-ghost btn-sm" onClick={()=>openPdf(viewModal)}>🖨 Print PDF</button>
               {canEdit(viewModal) && <button className="btn btn-ghost" onClick={()=>{setViewModal(null);openEdit(viewModal);}}>Edit</button>}
+              {(viewModal.status==='Draft'||viewModal.status==='Rejected') && (
+                <button className="btn btn-primary btn-sm" onClick={()=>{
+                  setViewModal(null);
+                  setStatusModal({report:viewModal,newStatus:'Pending Review',reason:null});
+                }}>Submit for Approval</button>
+              )}
               <button className="btn btn-ghost" onClick={()=>setViewModal(null)}>Close</button>
             </div>
           </div>
         </div>
       )}
-
       {/* Status Update Modal */}
       {statusModal && (
         <div className="backdrop" onClick={()=>setStatusModal(null)}>

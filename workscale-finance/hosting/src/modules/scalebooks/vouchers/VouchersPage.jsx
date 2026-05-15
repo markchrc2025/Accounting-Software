@@ -6,7 +6,8 @@ import {
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
-import { nextVoucherId, previewVoucherId } from '../../../utils/documentIds.js';
+import { nextVoucherId, previewVoucherId, nextJournalEntryId } from '../../../utils/documentIds.js';
+import VoucherPdfModal from './VoucherPdfModal.jsx';
 
 const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
 const fmtP = (n) => new Intl.NumberFormat('en-PH', { minimumFractionDigits:0, maximumFractionDigits:4 }).format(n || 0) + '%';
@@ -25,18 +26,19 @@ const VOUCHER_TYPES = [
 const AUTO_BANK_TYPES = ['PAYROLL','FINAL_PAY'];
 // Types where Tax columns are shown
 const TAX_VISIBLE_TYPES = ['PAYMENT'];
-const STATUSES = ['Pending','Pending Review','Pending Approval','Approved','For Disbursement','Paid','Rejected','Voided'];
+const STATUSES = ['Draft','Pending','For Verification','Verified','For Approval','Approved','Paid','Rejected','Voided'];
 
 
 const STATUS_STYLES = {
-  'Pending':            { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
-  'Pending Review':     { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
-  'Pending Approval':   { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
-  'Approved':           { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
-  'For Disbursement':   { background:'#f0f9ff', borderColor:'#bae6fd', color:'#0369a1' },
-  'Paid':               { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' },
-  'Rejected':           { background:'#fef2f2', borderColor:'#fecaca', color:'#dc2626' },
-  'Voided':             { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
+  'Draft':            { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
+  'Pending':          { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
+  'For Verification': { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
+  'Verified':         { background:'#f0f9ff', borderColor:'#bae6fd', color:'#0369a1' },
+  'For Approval':     { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
+  'Approved':         { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
+  'Paid':             { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' },
+  'Rejected':         { background:'#fef2f2', borderColor:'#fecaca', color:'#dc2626' },
+  'Voided':           { background:'#f8fafc', borderColor:'#e2e8f0', color:'#94a3b8' },
 };
 
 const EMPTY_LINE = () => ({ id: uid(), contactId:'', contact:'', expenseAccount:'', description:'', amount:'', category:'', taxRateId:'', taxType:'N/A', taxRate:0, taxAmt:0, inclusive:false });
@@ -128,13 +130,11 @@ export default function VouchersPage() {
   // Bulk
   const [selected, setSelected] = useState(new Set());
 
-  // Expand
-  const [expandId, setExpandId] = useState(null);
-
   // Modals
   const [showModal,    setShowModal]   = useState(false);
   const [viewModal,    setViewModal]   = useState(null);
-  const [statusModal,  setStatusModal] = useState(null); // { voucher, newStatus, reason }
+  const [pdfModal,     setPdfModal]    = useState(null);
+
   const [newAcctModal, setNewAcctModal] = useState(null);
 
   // Form
@@ -214,7 +214,7 @@ export default function VouchersPage() {
   // KPIs
   const kpis = useMemo(() => {
     const total   = vouchers.length;
-    const pending = vouchers.filter(v => ['Pending','Pending Review','Pending Approval'].includes(v.status)).length;
+    const pending = vouchers.filter(v => ['Pending','For Verification','Verified','For Approval'].includes(v.status)).length;
     const approved = vouchers.filter(v => v.status === 'Approved').length;
     const paid    = vouchers.filter(v => v.status === 'Paid').length;
     const totalAmt = vouchers.filter(v => v.status !== 'Voided').reduce((s,v) => s + (Number(v.totalAmount)||0), 0);
@@ -232,9 +232,9 @@ export default function VouchersPage() {
     if (!selected.size) return;
     const count = selected.size;
     askConfirm(`Submit ${count} voucher(s) for approval?`, async () => {
-      await Promise.all([...selected].map(id => updateDoc(doc(db,'vouchers',id), { status:'Pending Review', updatedAt:serverTimestamp(), updatedBy:user })));
+      await Promise.all([...selected].map(id => updateDoc(doc(db,'vouchers',id), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user })));
       setSelected(new Set());
-      showToast(`${count} voucher(s) submitted for review.`);
+      showToast(`${count} voucher(s) submitted.`);
     });
   };
 
@@ -298,6 +298,7 @@ export default function VouchersPage() {
   const saveVoucher = async (newStatus) => {
     const totalAmount = lines.reduce((s,l) => s + (Number(l.amount)||0), 0);
     const contactSummary = [...new Set(lines.map(l=>l.contact).filter(Boolean))].join(', ');
+    const status = newStatus || form.status;
     const payload = {
       voucherType:           form.voucherType,
       preparationDate:       form.preparationDate,
@@ -305,42 +306,69 @@ export default function VouchersPage() {
       paymentFromAccountCode:form.paymentFrom,
       contactSummary,
       totalAmount,
-      status:                newStatus || form.status,
+      status,
       notes:                 form.notes||'',
-      // Phase 5: link LOAN vouchers to a specific loan so the disbursement
-      // approval step can auto-post a payment to loanPayments.
       loanId: form.voucherType === 'LOAN' ? (form.loanId || '') : '',
       lines: lines.map((l,i) => ({ lineNo:i+1, contactId:l.contactId||'', contact:l.contact, expenseAccountCode:l.expenseAccount, description:l.description, amount:Number(l.amount)||0, category:l.category, taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:Number(l.taxRate)||0, taxAmt:Number(l.taxAmt)||0, inclusive:!!l.inclusive })),
       updatedAt: serverTimestamp(), updatedBy: user
     };
+
+    // Build JE lines from current journalLines (parse "(code) Name" format)
+    const buildJeLines = () => journalLines.map(j => {
+      const m = j.account.match(/^\(([^)]+)\)\s*(.*)/);
+      return { accountCode: m ? m[1] : j.account, accountName: m ? m[2] : j.account, description: '', debit: j.debit, credit: j.credit };
+    });
+
     setSaving(true);
     try {
       if (editing) {
         await updateDoc(doc(db,'vouchers',editing.id), payload);
+        // Always sync JE lines if already linked
+        if (editing.linkedJeId) {
+          const jeLines = buildJeLines();
+          await updateDoc(doc(db,'journalEntries',editing.linkedJeId), {
+            lines: jeLines,
+            totalDebit:  jeLines.reduce((s,l)=>s+l.debit, 0),
+            totalCredit: jeLines.reduce((s,l)=>s+l.credit, 0),
+            date: form.preparationDate,
+            updatedAt: serverTimestamp(), updatedBy: user
+          });
+        }
+        // Create JE if not yet linked (e.g. old voucher pre-dating this feature)
+        if (!editing.linkedJeId) {
+          const jeLines = buildJeLines();
+          const jeId = await nextJournalEntryId(form.preparationDate);
+          const voucherLabel = VOUCHER_TYPES.find(t=>t.value===form.voucherType)?.label || form.voucherType;
+          const jeRef = await addDoc(collection(db,'journalEntries'), {
+            jeId, date: form.preparationDate,
+            description: `${voucherLabel} ${editing.voucherId||''}${form.purposeCategory?' — '+form.purposeCategory:''}`,
+            type: 'Voucher', reference: editing.voucherId||'', sourceDocId: editing.id, sourceDocType: 'voucher',
+            status: 'For Clearing',
+            lines: jeLines, totalDebit: jeLines.reduce((s,l)=>s+l.debit,0), totalCredit: jeLines.reduce((s,l)=>s+l.credit,0),
+            createdAt: serverTimestamp(), createdBy: user, updatedAt: serverTimestamp(), updatedBy: user
+          });
+          await updateDoc(doc(db,'vouchers',editing.id), { linkedJeId: jeRef.id });
+        }
         showToast('Voucher updated.');
       } else {
         const voucherId = await nextVoucherId(form.voucherType, form.preparationDate);
-        await addDoc(collection(db,'vouchers'), { ...payload, voucherId, createdAt:serverTimestamp(), createdBy:user });
+        const voucherRef = await addDoc(collection(db,'vouchers'), { ...payload, voucherId, createdAt:serverTimestamp(), createdBy:user });
+        // Always auto-create JE immediately on voucher creation
+        const jeLines = buildJeLines();
+        const jeId = await nextJournalEntryId(form.preparationDate);
+        const voucherLabel = VOUCHER_TYPES.find(t=>t.value===form.voucherType)?.label || form.voucherType;
+        const jeRef = await addDoc(collection(db,'journalEntries'), {
+          jeId, date: form.preparationDate,
+          description: `${voucherLabel} ${voucherId}${form.purposeCategory?' — '+form.purposeCategory:''}`,
+          type: 'Voucher', reference: voucherId, sourceDocId: voucherRef.id, sourceDocType: 'voucher',
+          status: 'For Clearing',
+          lines: jeLines, totalDebit: jeLines.reduce((s,l)=>s+l.debit,0), totalCredit: jeLines.reduce((s,l)=>s+l.credit,0),
+          createdAt: serverTimestamp(), createdBy: user, updatedAt: serverTimestamp(), updatedBy: user
+        });
+        await updateDoc(voucherRef, { linkedJeId: jeRef.id });
         showToast('Voucher created.');
       }
       setShowModal(false);
-    } catch(e) { showToast('Error: ' + e.message); }
-    setSaving(false);
-  };
-
-  // Status update
-  const doStatusUpdate = async () => {
-    if (!statusModal) return;
-    const { voucher, newStatus, reason } = statusModal;
-    setSaving(true);
-    try {
-      await updateDoc(doc(db,'vouchers',voucher.id), {
-        status: newStatus,
-        ...(reason ? { rejectReason: reason } : {}),
-        updatedAt: serverTimestamp(), updatedBy: user
-      });
-      showToast(`Status updated to ${newStatus}.`);
-      setStatusModal(null);
     } catch(e) { showToast('Error: ' + e.message); }
     setSaving(false);
   };
@@ -502,16 +530,7 @@ export default function VouchersPage() {
   const jDebit  = journalLines.reduce((s,j)=>s+j.debit,0);
   const jCredit = journalLines.reduce((s,j)=>s+j.credit,0);
 
-  const nextStatuses = (status) => {
-    if (status === 'Pending')          return ['Pending Review','Voided'];
-    if (status === 'Pending Review')   return ['Pending Approval','Rejected','Voided'];
-    if (status === 'Pending Approval') return ['Approved','Rejected','Voided'];
-    if (status === 'Approved')         return ['For Disbursement','Voided'];
-    if (status === 'For Disbursement') return ['Paid','Voided'];
-    return [];
-  };
-
-  const canEdit = (v) => ['Pending','Pending Review'].includes(v.status);
+  const canEdit = (v) => ['Draft','Pending'].includes(v.status);
 
   return (
     <div className="vp-wrap">
@@ -618,14 +637,13 @@ export default function VouchersPage() {
                 <tr><td colSpan={8} className="empty">No vouchers found.</td></tr>
               )}
               {paginated.map(v => {
-                const isExpanded = expandId === v.id;
-                return [
+                return (
                   <tr key={v.id} style={{cursor:'pointer'}}>
                     <td style={{textAlign:'center'}} onClick={e=>e.stopPropagation()}>
                       <input type="checkbox" checked={selected.has(v.id)} onChange={()=>toggleSel(v.id)} />
                     </td>
                     <td>
-                      <a style={{fontWeight:900,color:'#f97316',textDecoration:'underline',cursor:'pointer'}} onClick={()=>setExpandId(isExpanded?null:v.id)}>
+                      <a style={{fontWeight:900,color:'#f97316',textDecoration:'underline',cursor:'pointer'}} onClick={()=>setPdfModal(v)}>
                         {v.voucherId || v.id}
                       </a>
                     </td>
@@ -638,56 +656,12 @@ export default function VouchersPage() {
                       <div style={{display:'flex',gap:4,justifyContent:'center'}}>
                         <button className="btn btn-ghost btn-xs" onClick={()=>setViewModal(v)}>View</button>
                         {canEdit(v) && <button className="btn btn-ghost btn-xs" onClick={()=>openEdit(v)}>Edit</button>}
-                        {nextStatuses(v.status).length > 0 && (
-                          <select className="input" style={{padding:'3px 6px',fontSize:11,border:'1px solid #e5e7eb',borderRadius:8,cursor:'pointer'}}
-                            defaultValue=""
-                            onChange={e => { if(e.target.value) { const ns=e.target.value; e.target.value=''; if(ns==='Rejected') setStatusModal({voucher:v,newStatus:ns,reason:''}); else setStatusModal({voucher:v,newStatus:ns,reason:null}); } }}>
-                            <option value="" disabled>Update…</option>
-                            {nextStatuses(v.status).map(s=><option key={s} value={s}>{s}</option>)}
-                          </select>
-                        )}
                         <button className="btn btn-ghost btn-xs" onClick={()=>duplicate(v)} title="Duplicate">📋</button>
-                        {v.status === 'Pending' && <button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>deleteVoucher(v)}>🗑</button>}
+                        {v.status === 'Draft' && <button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>deleteVoucher(v)}>🗑</button>}
                       </div>
                     </td>
-                  </tr>,
-                  isExpanded && (
-                    <tr key={v.id+'-exp'} className="expand-row">
-                      <td colSpan={8}>
-                        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:12}}>
-                          <div><span style={{fontSize:11,color:'#94a3b8',fontWeight:700}}>PURPOSE / CATEGORY</span><div style={{fontWeight:700}}>{v.purposeCategory||'—'}</div></div>
-                          <div><span style={{fontSize:11,color:'#94a3b8',fontWeight:700}}>PAYMENT FROM</span><div style={{fontWeight:700}}>{v.paymentFromAccountCode||'—'}</div></div>
-                          <div><span style={{fontSize:11,color:'#94a3b8',fontWeight:700}}>CHECK NO.</span><div style={{fontWeight:700}}>{v.checkNumber||'—'}</div></div>
-                          <div><span style={{fontSize:11,color:'#94a3b8',fontWeight:700}}>REVIEWED BY</span><div style={{fontWeight:700}}>{v.reviewedBy||'—'}</div></div>
-                          <div><span style={{fontSize:11,color:'#94a3b8',fontWeight:700}}>APPROVED BY</span><div style={{fontWeight:700}}>{v.approvedBy||'—'}</div></div>
-                          {v.rejectReason && <div style={{gridColumn:'span 2'}}><span style={{fontSize:11,color:'#dc2626',fontWeight:700}}>REJECT REASON</span><div>{v.rejectReason}</div></div>}
-                        </div>
-                        {(v.lines||[]).length > 0 && (
-                          <table className="lines-tbl" style={{fontSize:12}}>
-                            <thead>
-                              <tr>
-                                <th>#</th><th>Contact</th><th>Account</th><th>Description</th><th>Category</th><th>Tax</th><th style={{textAlign:'right'}}>Amount</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {(v.lines||[]).map((l,i) => (
-                                <tr key={i}>
-                                  <td>{l.lineNo||i+1}</td>
-                                  <td>{l.contact||'—'}</td>
-                                  <td>{l.expenseAccountCode||'—'}</td>
-                                  <td>{l.description||'—'}</td>
-                                  <td>{l.category||'—'}</td>
-                                  <td>{l.taxType||'—'}</td>
-                                  <td style={{textAlign:'right',fontWeight:700}}>{fmt(l.amount)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                ];
+                  </tr>
+                );
               })}
             </tbody>
           </table>
@@ -713,6 +687,14 @@ export default function VouchersPage() {
           </div>
         )}
       </div>
+
+      {/* PDF Preview Modal */}
+      {pdfModal && (
+        <VoucherPdfModal
+          voucher={pdfModal}
+          onClose={() => setPdfModal(null)}
+        />
+      )}
 
       {/* Create / Edit Modal */}
       {showModal && (
@@ -927,8 +909,8 @@ export default function VouchersPage() {
             </div>
             <div className="modal-f">
               <button className="btn btn-ghost" onClick={()=>setShowModal(false)}>Cancel</button>
-              <button className="btn btn-ghost" onClick={()=>saveVoucher('Pending')} disabled={saving}>Save Draft</button>
-              <button className="btn btn-primary" onClick={()=>saveVoucher('Pending Review')} disabled={saving}>{saving?'Saving…':'Submit for Review'}</button>
+              <button className="btn btn-ghost" onClick={()=>saveVoucher('Draft')} disabled={saving}>Save Draft</button>
+              <button className="btn btn-primary" onClick={()=>saveVoucher('Pending')} disabled={saving}>{saving?'Saving…':'Submit'}</button>
             </div>
           </div>
         </div>
@@ -1001,33 +983,6 @@ export default function VouchersPage() {
               {canEdit(viewModal) && <button className="btn btn-ghost" onClick={()=>{setViewModal(null);openEdit(viewModal);}}>Edit</button>}
               <button className="btn btn-ghost" onClick={()=>duplicate(viewModal)}>📋 Duplicate</button>
               <button className="btn btn-ghost" onClick={()=>setViewModal(null)}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Status Update Modal */}
-      {statusModal && (
-        <div className="backdrop" onClick={()=>setStatusModal(null)}>
-          <div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
-            <div className="modal-h">
-              <strong>Update Status → {statusModal.newStatus}</strong>
-              <button className="btn btn-ghost btn-sm" onClick={()=>setStatusModal(null)}>✕</button>
-            </div>
-            <div className="modal-b">
-              <p style={{fontSize:13,marginBottom:12}}>Voucher: <strong>{statusModal.voucher.voucherId||statusModal.voucher.id}</strong></p>
-              {statusModal.reason !== null && (
-                <div className="field">
-                  <label>Reason / Notes</label>
-                  <textarea rows={3} value={statusModal.reason||''} onChange={e=>setStatusModal(s=>({...s,reason:e.target.value}))} placeholder={statusModal.newStatus === 'Rejected' ? 'Required: explain the rejection…' : 'Optional notes…'} />
-                </div>
-              )}
-            </div>
-            <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>setStatusModal(null)}>Cancel</button>
-              <button className="btn btn-primary" onClick={doStatusUpdate} disabled={saving || (statusModal.newStatus==='Rejected' && !statusModal.reason?.trim())}>
-                {saving ? 'Saving…' : `Confirm — ${statusModal.newStatus}`}
-              </button>
             </div>
           </div>
         </div>

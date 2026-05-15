@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react';
 import {
   doc, getDoc, setDoc, serverTimestamp,
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, getDocs, writeBatch, query, orderBy,
+  collection, onSnapshot, addDoc, updateDoc, deleteDoc, getDocs, writeBatch, query, orderBy, where,
 } from 'firebase/firestore';
-import { db, auth, storage } from '../../../firebase.js';
+import { db, auth, storage, functions } from '../../../firebase.js';
+import { httpsCallable } from 'firebase/functions';
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import { invalidateDocIdSettings } from '../../../utils/documentIds.js';
 
 const GLOBAL_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
 const MODULE_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
+const ROUTING_DOC_TYPES = ['Vouchers', 'Weekly Projections', 'Disbursements', 'Check Voucher'];
 // Roles that Admin implicitly includes (all of them)
 const ADMIN_INHERITS = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
 const MODULE_GROUPS = [
@@ -163,6 +165,14 @@ const CSS = `
   .sp-toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; animation:sp-fade .2s; }
   @keyframes sp-fade { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
   .modal-wide { width:min(740px,98vw) !important; }
+  .inner-tabs { display:flex; gap:0; border-bottom:2px solid #e5e7eb; margin-bottom:20px; }
+  .inner-tab { padding:9px 18px; font-size:13px; font-weight:600; color:#64748b; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px; transition:color .12s,border-color .12s; user-select:none; }
+  .inner-tab:hover { color:#0b1220; }
+  .inner-tab-on { color:#f97316 !important; border-bottom-color:#f97316 !important; font-weight:800; }
+  .route-badge { display:inline-block; padding:2px 9px; border-radius:6px; font-size:11px; font-weight:700; background:#f0fdf4; color:#166534; border:1px solid #bbf7d0; }
+  .route-bypass { background:#fff7ed; color:#c2410c; border-color:#fed7aa; }
+  .delegate-active { background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; border-radius:6px; padding:2px 9px; font-size:11px; font-weight:700; }
+  .delegate-inactive { background:#f8fafc; color:#94a3b8; border:1px solid #e2e8f0; border-radius:6px; padding:2px 9px; font-size:11px; font-weight:700; }
   .modal-fs { width:100vw !important; max-width:100vw !important; height:100vh !important; border-radius:0 !important; margin:0 !important; }
   .modal-fs .modal-b-scroll { flex:1; overflow-y:auto; padding:24px 28px; display:flex; flex-direction:column; gap:16px; }
   .you-badge  { display:inline-block; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:800; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; flex-shrink:0; }
@@ -199,6 +209,11 @@ export default function SettingsPage() {
   const [dataWorking,   setDataWorking]   = useState(false);
   const [counters,      setCounters]      = useState({}); // { periodKey: seq }
   const [seqOverrides,  setSeqOverrides]  = useState({}); // { periodKey: editedSeq }
+  // Users & Roles inner tabs
+  const [usersRolesTab,     setUsersRolesTab]     = useState('user-list');
+  const [approvalRouting,   setApprovalRouting]   = useState({ routes: [], delegates: [] });
+  const [routingModal,      setRoutingModal]       = useState(null);
+  const [delegateAuthModal, setDelegateAuthModal]  = useState(null);
   const _today = new Date();
   const [selYear,  setSelYear]  = useState(_today.getFullYear());
   const [selMonth, setSelMonth] = useState(_today.getMonth() + 1); // 1-12
@@ -253,6 +268,13 @@ export default function SettingsPage() {
         requirePurposeCategory: d.requirePurposeCategory || false,
         staleCheckDays:    d.staleCheckDays    || 180,
         requireVoidReason: d.requireVoidReason !== false,
+      });
+    });
+    getDoc(doc(db, 'settings', 'approvalRouting')).then(snap => {
+      const d = snap.exists() ? snap.data() : {};
+      setApprovalRouting({
+        routes:    Array.isArray(d.routes)    ? d.routes    : [],
+        delegates: Array.isArray(d.delegates) ? d.delegates : [],
       });
     });
   }, []);
@@ -319,11 +341,40 @@ export default function SettingsPage() {
         moduleAccess: (rest.moduleAccess && typeof rest.moduleAccess === 'object') ? rest.moduleAccess : {},
         signatureUrl: rest.signatureUrl || '',
       };
-      if (treatAsNew) await addDoc(collection(db, 'appUsers'), { ...data, createdAt:serverTimestamp(), createdBy:me });
-      else            await updateDoc(doc(db, 'appUsers', id),  { ...data, updatedAt:serverTimestamp(), updatedBy:me });
-      showToast(treatAsNew ? 'User saved.' : 'User saved.'); setUserModal(null);
+      if (treatAsNew) {
+        // Prevent duplicate — check if email already exists in appUsers
+        const dupSnap = await getDocs(query(collection(db, 'appUsers'), where('email', '==', data.email)));
+        if (!dupSnap.empty) {
+          setSaving(false);
+          return showToast('This email is already registered as a user.');
+        }
+        await addDoc(collection(db, 'appUsers'), { ...data, inviteStatus: 'invited', invitedAt: serverTimestamp(), createdAt:serverTimestamp(), createdBy:me });
+        try {
+          // Cloud Function creates Auth account + sends branded invitation email
+          const createAuthUser = httpsCallable(functions, 'createAuthUser');
+          await createAuthUser({ email: data.email, fullName: data.fullName });
+          showToast('User saved. Invitation email sent to ' + data.email);
+        } catch (emailErr) {
+          showToast('User saved, but invitation email failed: ' + emailErr.message);
+        }
+      } else {
+        await updateDoc(doc(db, 'appUsers', id), { ...data, updatedAt:serverTimestamp(), updatedBy:me });
+        showToast('User saved.');
+      }
+      setUserModal(null);
     } catch(e) { showToast('Error: ' + e.message); }
     setSaving(false);
+  };
+
+  const resendInvite = async (user) => {
+    try {
+      // Cloud Function regenerates password-reset link and resends branded invite email
+      const createAuthUser = httpsCallable(functions, 'createAuthUser');
+      await createAuthUser({ email: user.email, fullName: user.fullName });
+      showToast('Invitation resent to ' + user.email);
+    } catch (e) {
+      showToast('Failed to resend invitation: ' + e.message);
+    }
   };
 
   const saveCat = async () => {
@@ -355,6 +406,17 @@ export default function SettingsPage() {
       await deleteDoc(doc(db, colName, id));
       showToast('Deleted.');
     });
+
+  const saveApprovalRouting = async (newData) => {
+    setSaving(true);
+    try {
+      const clean = { routes: newData.routes || [], delegates: newData.delegates || [] };
+      await setDoc(doc(db, 'settings', 'approvalRouting'), { ...clean, updatedAt: serverTimestamp(), updatedBy: me }, { merge: true });
+      setApprovalRouting(clean);
+      showToast('Approval routing saved.');
+    } catch(e) { showToast('Error: ' + e.message); }
+    setSaving(false);
+  };
 
   function OrgProfile() {
     if (!profileForm) return <div style={{padding:40,textAlign:'center',color:'#94a3b8'}}>Loading…</div>;
@@ -451,109 +513,509 @@ export default function SettingsPage() {
       roles: [], moduleAccess: {}, signatureUrl: '',
     });
 
+    // Helper: get display name for a user by email
+    const nameFor = (email) => {
+      const u = users.find(x => (x.email || '').toLowerCase() === (email || '').toLowerCase());
+      return u ? (u.fullName || u.displayName || email) : (email || '—');
+    };
+
+    // Users eligible to be Verifiers (has Verifier or Admin role)
+    const verifierUsers = users.filter(u => {
+      const r = Array.isArray(u.roles) ? u.roles : [];
+      return r.includes('Verifier') || r.includes('Admin');
+    });
+    // Users eligible to be Approvers (has Approver or Admin role)
+    const approverUsers = users.filter(u => {
+      const r = Array.isArray(u.roles) ? u.roles : [];
+      return r.includes('Approver') || r.includes('Admin');
+    });
+    // Users eligible to be Makers
+    const makerUsers = users.filter(u => {
+      const r = Array.isArray(u.roles) ? u.roles : [];
+      return r.includes('Maker') || r.includes('Admin');
+    });
+    // All verifier+approver users (for delegate delegator list)
+    const verifierApproverUsers = users.filter(u => {
+      const r = Array.isArray(u.roles) ? u.roles : [];
+      return r.includes('Verifier') || r.includes('Approver') || r.includes('Admin');
+    });
+
+    // ── Approval Routing helpers ──
+    const openAddRoute = () => setRoutingModal({
+      isNew: true, id: null,
+      documentType: ROUTING_DOC_TYPES[0],
+      makerEmail: '',
+      verifierEmail: '',
+      approverEmail: '',
+    });
+
+    const openEditRoute = (route) => setRoutingModal({ isNew: false, ...route });
+
+    const saveRoute = async () => {
+      if (!routingModal.makerEmail)    return showToast('Maker is required.');
+      if (!routingModal.approverEmail) return showToast('Approver is required.');
+      const isAutoBypass = routingModal.makerEmail === routingModal.verifierEmail;
+      const routeData = {
+        id:            routingModal.id || crypto.randomUUID(),
+        documentType:  routingModal.documentType,
+        makerEmail:    routingModal.makerEmail,
+        verifierEmail: isAutoBypass ? '' : (routingModal.verifierEmail || ''),
+        approverEmail: routingModal.approverEmail,
+        autoBypass:    isAutoBypass || !routingModal.verifierEmail,
+      };
+      const existing = approvalRouting.routes.filter(r => r.id !== routeData.id);
+      await saveApprovalRouting({ ...approvalRouting, routes: [...existing, routeData] });
+      setRoutingModal(null);
+    };
+
+    const deleteRoute = (id) =>
+      askConfirm('Delete this routing rule?', async () => {
+        await saveApprovalRouting({ ...approvalRouting, routes: approvalRouting.routes.filter(r => r.id !== id) });
+      });
+
+    // ── Delegate Authorization helpers ──
+    const openAddDelegate = () => setDelegateAuthModal({
+      isNew: true, id: null,
+      delegatorEmail: '',
+      delegateEmail: '',
+      documentTypes: [...ROUTING_DOC_TYPES],
+      fromDate: '',
+      toDate: '',
+      isActive: true,
+    });
+
+    const openEditDelegate = (d) => setDelegateAuthModal({ isNew: false, ...d, documentTypes: Array.isArray(d.documentTypes) ? [...d.documentTypes] : [...ROUTING_DOC_TYPES] });
+
+    const saveDelegate = async () => {
+      if (!delegateAuthModal.delegatorEmail) return showToast('Delegator is required.');
+      if (!delegateAuthModal.delegateEmail)  return showToast('Delegate is required.');
+      if (delegateAuthModal.delegatorEmail === delegateAuthModal.delegateEmail) return showToast('Delegator and Delegate must be different users.');
+      const delData = {
+        id:             delegateAuthModal.id || crypto.randomUUID(),
+        delegatorEmail: delegateAuthModal.delegatorEmail,
+        delegateEmail:  delegateAuthModal.delegateEmail,
+        documentTypes:  delegateAuthModal.documentTypes || [],
+        fromDate:       delegateAuthModal.fromDate || '',
+        toDate:         delegateAuthModal.toDate || '',
+        isActive:       delegateAuthModal.isActive !== false,
+      };
+      const existing = approvalRouting.delegates.filter(d => d.id !== delData.id);
+      await saveApprovalRouting({ ...approvalRouting, delegates: [...existing, delData] });
+      setDelegateAuthModal(null);
+    };
+
+    const deleteDelegate = (id) =>
+      askConfirm('Remove this delegation?', async () => {
+        await saveApprovalRouting({ ...approvalRouting, delegates: approvalRouting.delegates.filter(d => d.id !== id) });
+      });
+
+    const toggleDelegateActive = async (id) => {
+      const updated = approvalRouting.delegates.map(d => d.id === id ? { ...d, isActive: !d.isActive } : d);
+      await saveApprovalRouting({ ...approvalRouting, delegates: updated });
+    };
+
+    // ── TAB: User List ──
+    const renderUserList = () => (
+      <div className="sp-card" style={{overflow:'hidden'}}>
+        <div className="info-box">
+          <strong>Role guide:</strong>&nbsp;
+          <strong style={{color:'#0369a1'}}>Maker</strong> = create/edit drafts &nbsp;·&nbsp;
+          <strong style={{color:'#065f46'}}>Verifier</strong> = review documents &nbsp;·&nbsp;
+          <strong style={{color:'#1d4ed8'}}>Approver</strong> = approve / reject &nbsp;·&nbsp;
+          <strong style={{color:'#7e22ce'}}>Poster</strong> = post to ledger &nbsp;·&nbsp;
+          <strong style={{color:'#991b1b'}}>Admin</strong> = full access (inherits Maker + Verifier + Approver + Poster for <em>all</em> modules)
+        </div>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+          <span style={{fontSize:12,color:'#64748b'}}>{displayUsers.length} user{displayUsers.length!==1?'s':''} configured</span>
+          <button className="btn btn-primary btn-sm" onClick={openInvite}>+ Invite User</button>
+        </div>
+        <div style={{overflowX:'auto'}}>
+          <table style={{minWidth:900}}>
+            <thead>
+              <tr>
+                <th>GOOGLE ACCOUNT EMAIL</th>
+                <th>FULL NAME</th>
+                <th>WORK EMAIL</th>
+                <th>ROLES</th>
+                <th>MODULE ACCESS</th>
+                <th>SIGNATURE</th>
+                <th style={{textAlign:'center'}}>ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayUsers.length === 0 && (
+                <tr><td colSpan={7} style={{padding:28,textAlign:'center',color:'#94a3b8'}}>No users configured.</td></tr>
+              )}
+              {displayUsers.map(u => {
+                const isMe = (u.email || '').toLowerCase() === meEmail;
+                const userRoles = Array.isArray(u.roles) ? u.roles : u.role ? [u.role] : [];
+                const modAccess = (u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {};
+                const accessedModules = Object.entries(modAccess).filter(([, roles]) => Array.isArray(roles) && roles.length > 0);
+                return (
+                  <tr key={u.id}>
+                    <td>
+                      <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                        <span style={{fontWeight:600}}>{u.email}</span>
+                        {isMe && <span className="you-badge">You</span>}
+                        {u._isMeNotSaved && <span style={{fontSize:10,color:'#f97316',fontWeight:700}}>(unsaved)</span>}
+                      </div>
+                    </td>
+                    <td style={{fontWeight:500}}>{u.fullName || u.displayName || '—'}</td>
+                    <td style={{color:'#64748b',fontSize:12}}>{u.workEmail || '—'}</td>
+                    <td>
+                      <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                        {userRoles.length === 0
+                          ? <span style={{color:'#94a3b8',fontSize:12}}>—</span>
+                          : userRoles.map(r => {
+                              const rs = ROLE_STYLE[r] || ROLE_STYLE.VIEWER;
+                              return <span key={r} className="pill" style={rs}>{r}</span>;
+                            })
+                        }
+                      </div>
+                    </td>
+                    <td>
+                      {accessedModules.length === 0
+                        ? <span style={{color:'#94a3b8',fontSize:12}}>—</span>
+                        : userRoles.includes('Admin')
+                          ? <span style={{fontSize:12,fontWeight:700,color:'#991b1b'}}>All modules</span>
+                          : <span style={{fontSize:12,color:'#374151',fontWeight:600}}>{accessedModules.length} module{accessedModules.length !== 1 ? 's' : ''}
+                              <span style={{display:'block',fontSize:11,color:'#94a3b8',fontWeight:400,marginTop:2,maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+                                title={accessedModules.map(([m]) => m).join(', ')}>
+                                {accessedModules.map(([m]) => m).join(', ')}
+                              </span>
+                            </span>
+                      }
+                    </td>
+                    <td>
+                      {u.signatureUrl
+                        ? <a href={u.signatureUrl} target="_blank" rel="noreferrer" style={{color:'#f97316',fontSize:12,fontWeight:600}}>View ↗</a>
+                        : <span style={{color:'#94a3b8',fontSize:12}}>None</span>
+                      }
+                    </td>
+                    <td style={{textAlign:'center'}}>
+                      <div style={{display:'flex',gap:4,justifyContent:'center'}}>
+                        <button className="btn btn-ghost btn-xs" onClick={() => setUserModal({
+                          isNew: false, ...u,
+                          roles:        Array.isArray(u.roles) ? u.roles : u.role ? [u.role] : [],
+                          moduleAccess: (u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {},
+                          fullName:     u.fullName || u.displayName || '',
+                        })}>✏️ Edit</button>
+                        {!isMe && u.inviteStatus === 'invited' && (
+                          <button className="btn btn-xs" style={{background:'#fff7ed',color:'#ea580c',border:'1px solid #fed7aa',cursor:'pointer',borderRadius:8}}
+                            onClick={() => resendInvite(u)}>📨 Resend Invite</button>
+                        )}
+                        {!isMe && (
+                          <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}}
+                            onClick={() => del('appUsers', u.id, u.email)}>🗑</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+
+    // ── TAB: Approval Routing ──
+    const renderApprovalRouting = () => (
+      <>
+        {/* Routing Rules */}
+        <div className="sp-card">
+          <div className="sp-card-title">Routing Rules</div>
+          <div className="info-box" style={{marginBottom:14}}>
+            Define who verifies and approves each document type per Maker.
+            Only <strong>Verifier</strong> and <strong>Approver</strong> roles can be linked to a Maker.
+            If a Maker is also assigned as their own Verifier, verification is <strong>auto-bypassed</strong> and the document routes directly to the Approver.
+          </div>
+          <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
+            <button className="btn btn-primary btn-sm" onClick={openAddRoute}>+ Add Routing Rule</button>
+          </div>
+          <div style={{overflowX:'auto'}}>
+            <table style={{minWidth:820}}>
+              <thead>
+                <tr>
+                  <th>DOCUMENT TYPE</th>
+                  <th>MAKER</th>
+                  <th>VERIFIER</th>
+                  <th>APPROVER</th>
+                  <th>STATUS</th>
+                  <th style={{textAlign:'center'}}>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {approvalRouting.routes.length === 0 && (
+                  <tr><td colSpan={6} style={{padding:28,textAlign:'center',color:'#94a3b8'}}>No routing rules configured.</td></tr>
+                )}
+                {[...approvalRouting.routes]
+                  .sort((a,b) => (a.documentType||'').localeCompare(b.documentType||'') || (a.makerEmail||'').localeCompare(b.makerEmail||''))
+                  .map(route => {
+                    const bypass = route.autoBypass || !route.verifierEmail;
+                    return (
+                      <tr key={route.id}>
+                        <td><span className="mod-chip">{route.documentType}</span></td>
+                        <td style={{fontWeight:600,fontSize:13}}>{nameFor(route.makerEmail)}<div style={{fontSize:11,color:'#94a3b8'}}>{route.makerEmail}</div></td>
+                        <td>
+                          {bypass
+                            ? <span style={{color:'#94a3b8',fontSize:12,fontStyle:'italic'}}>— (bypassed)</span>
+                            : <><span style={{fontWeight:500}}>{nameFor(route.verifierEmail)}</span><div style={{fontSize:11,color:'#94a3b8'}}>{route.verifierEmail}</div></>
+                          }
+                        </td>
+                        <td><span style={{fontWeight:500}}>{nameFor(route.approverEmail)}</span><div style={{fontSize:11,color:'#94a3b8'}}>{route.approverEmail}</div></td>
+                        <td>
+                          {bypass
+                            ? <span className="route-badge route-bypass">Auto-bypass</span>
+                            : <span className="route-badge">Active</span>
+                          }
+                        </td>
+                        <td style={{textAlign:'center'}}>
+                          <div style={{display:'flex',gap:4,justifyContent:'center'}}>
+                            <button className="btn btn-ghost btn-xs" onClick={() => openEditRoute(route)}>✏️ Edit</button>
+                            <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}} onClick={() => deleteRoute(route.id)}>🗑</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Delegate Authorization */}
+        <div className="sp-card">
+          <div className="sp-card-title">Delegate Authorization</div>
+          <div className="info-box" style={{marginBottom:14}}>
+            When a Verifier or Approver is absent, they can authorize another user to act on their behalf for specific document types within a defined period.
+            The delegate must be a registered user. The original approver's routing rules still apply — the delegate simply fulfils the action.
+          </div>
+          <div style={{display:'flex',justifyContent:'flex-end',marginBottom:12}}>
+            <button className="btn btn-primary btn-sm" onClick={openAddDelegate}>+ Add Delegation</button>
+          </div>
+          <div style={{overflowX:'auto'}}>
+            <table style={{minWidth:860}}>
+              <thead>
+                <tr>
+                  <th>ABSENT USER (DELEGATOR)</th>
+                  <th>ACTING AS (DELEGATE)</th>
+                  <th>DOCUMENT TYPES</th>
+                  <th>PERIOD</th>
+                  <th>STATUS</th>
+                  <th style={{textAlign:'center'}}>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {approvalRouting.delegates.length === 0 && (
+                  <tr><td colSpan={6} style={{padding:28,textAlign:'center',color:'#94a3b8'}}>No delegations configured.</td></tr>
+                )}
+                {[...approvalRouting.delegates]
+                  .sort((a,b) => (a.delegatorEmail||'').localeCompare(b.delegatorEmail||''))
+                  .map(d => {
+                    const today = new Date().toISOString().slice(0,10);
+                    const withinPeriod = (!d.fromDate || d.fromDate <= today) && (!d.toDate || d.toDate >= today);
+                    const effectivelyActive = d.isActive && withinPeriod;
+                    return (
+                      <tr key={d.id}>
+                        <td>
+                          <span style={{fontWeight:600}}>{nameFor(d.delegatorEmail)}</span>
+                          <div style={{fontSize:11,color:'#94a3b8'}}>{d.delegatorEmail}</div>
+                        </td>
+                        <td>
+                          <span style={{fontWeight:500}}>{nameFor(d.delegateEmail)}</span>
+                          <div style={{fontSize:11,color:'#94a3b8'}}>{d.delegateEmail}</div>
+                        </td>
+                        <td>
+                          <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                            {(d.documentTypes||[]).map(dt => <span key={dt} className="mod-chip">{dt}</span>)}
+                          </div>
+                        </td>
+                        <td style={{fontSize:12,color:'#374151'}}>
+                          {d.fromDate || d.toDate
+                            ? <>{d.fromDate || '—'} → {d.toDate || '—'}</>
+                            : <span style={{color:'#94a3b8'}}>No limit</span>
+                          }
+                        </td>
+                        <td>
+                          <span
+                            className={effectivelyActive ? 'delegate-active' : 'delegate-inactive'}
+                            style={{cursor:'pointer'}}
+                            title={d.isActive && !withinPeriod ? 'Outside scheduled period' : undefined}
+                            onClick={() => toggleDelegateActive(d.id)}
+                          >
+                            {effectivelyActive ? '● Active' : d.isActive && !withinPeriod ? '○ Off-period' : '○ Inactive'}
+                          </span>
+                        </td>
+                        <td style={{textAlign:'center'}}>
+                          <div style={{display:'flex',gap:4,justifyContent:'center'}}>
+                            <button className="btn btn-ghost btn-xs" onClick={() => openEditDelegate(d)}>✏️ Edit</button>
+                            <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}} onClick={() => deleteDelegate(d.id)}>🗑</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </>
+    );
+
     return (
       <>
         <div className="sp-ch">
           <h1>Users &amp; Roles</h1>
           <p>Control who can access the Finance Portal and what they can do. Only invited users can log in.</p>
         </div>
-        <div className="sp-card" style={{overflow:'hidden'}}>
-          <div className="info-box">
-            <strong>Role guide:</strong>&nbsp;
-            <strong style={{color:'#0369a1'}}>Maker</strong> = create/edit drafts &nbsp;·&nbsp;
-            <strong style={{color:'#065f46'}}>Verifier</strong> = review documents &nbsp;·&nbsp;
-            <strong style={{color:'#1d4ed8'}}>Approver</strong> = approve / reject &nbsp;·&nbsp;
-            <strong style={{color:'#7e22ce'}}>Poster</strong> = post to ledger &nbsp;·&nbsp;
-            <strong style={{color:'#991b1b'}}>Admin</strong> = full access (inherits Maker + Verifier + Approver + Poster for <em>all</em> modules)
-          </div>
-          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
-            <span style={{fontSize:12,color:'#64748b'}}>{displayUsers.length} user{displayUsers.length!==1?'s':''} configured</span>
-            <button className="btn btn-primary btn-sm" onClick={openInvite}>+ Invite User</button>
-          </div>
-          <div style={{overflowX:'auto'}}>
-            <table style={{minWidth:900}}>
-              <thead>
-                <tr>
-                  <th>GOOGLE ACCOUNT EMAIL</th>
-                  <th>FULL NAME</th>
-                  <th>WORK EMAIL</th>
-                  <th>ROLES</th>
-                  <th>MODULE ACCESS</th>
-                  <th>SIGNATURE</th>
-                  <th style={{textAlign:'center'}}>ACTIONS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {displayUsers.length === 0 && (
-                  <tr><td colSpan={7} style={{padding:28,textAlign:'center',color:'#94a3b8'}}>No users configured.</td></tr>
-                )}
-                {displayUsers.map(u => {
-                  const isMe = (u.email || '').toLowerCase() === meEmail;
-                  const userRoles = Array.isArray(u.roles) ? u.roles : u.role ? [u.role] : [];
-                  const modAccess = (u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {};
-                  const accessedModules = Object.entries(modAccess).filter(([, roles]) => Array.isArray(roles) && roles.length > 0);
-                  return (
-                    <tr key={u.id}>
-                      <td>
-                        <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                          <span style={{fontWeight:600}}>{u.email}</span>
-                          {isMe && <span className="you-badge">You</span>}
-                          {u._isMeNotSaved && <span style={{fontSize:10,color:'#f97316',fontWeight:700}}>(unsaved)</span>}
-                        </div>
-                      </td>
-                      <td style={{fontWeight:500}}>{u.fullName || u.displayName || '—'}</td>
-                      <td style={{color:'#64748b',fontSize:12}}>{u.workEmail || '—'}</td>
-                      <td>
-                        <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-                          {userRoles.length === 0
-                            ? <span style={{color:'#94a3b8',fontSize:12}}>—</span>
-                            : userRoles.map(r => {
-                                const rs = ROLE_STYLE[r] || ROLE_STYLE.VIEWER;
-                                return <span key={r} className="pill" style={rs}>{r}</span>;
-                              })
-                          }
-                        </div>
-                      </td>
-                      <td>
-                        {accessedModules.length === 0
-                          ? <span style={{color:'#94a3b8',fontSize:12}}>—</span>
-                          : userRoles.includes('Admin')
-                            ? <span style={{fontSize:12,fontWeight:700,color:'#991b1b'}}>All modules</span>
-                            : <span style={{fontSize:12,color:'#374151',fontWeight:600}}>{accessedModules.length} module{accessedModules.length !== 1 ? 's' : ''}
-                                <span style={{display:'block',fontSize:11,color:'#94a3b8',fontWeight:400,marginTop:2,maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
-                                  title={accessedModules.map(([m]) => m).join(', ')}>
-                                  {accessedModules.map(([m]) => m).join(', ')}
-                                </span>
-                              </span>
-                        }
-                      </td>
-                      <td>
-                        {u.signatureUrl
-                          ? <a href={u.signatureUrl} target="_blank" rel="noreferrer" style={{color:'#f97316',fontSize:12,fontWeight:600}}>View ↗</a>
-                          : <span style={{color:'#94a3b8',fontSize:12}}>None</span>
-                        }
-                      </td>
-                      <td style={{textAlign:'center'}}>
-                        <div style={{display:'flex',gap:4,justifyContent:'center'}}>
-                          <button className="btn btn-ghost btn-xs" onClick={() => setUserModal({
-                            isNew: false, ...u,
-                            roles:        Array.isArray(u.roles) ? u.roles : u.role ? [u.role] : [],
-                            moduleAccess: (u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {},
-                            fullName:     u.fullName || u.displayName || '',
-                          })}>✏️ Edit</button>
-                          {!isMe && (
-                            <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}}
-                              onClick={() => del('appUsers', u.id, u.email)}>🗑</button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+
+        {/* Inner tabs */}
+        <div className="inner-tabs">
+          {[
+            { id: 'user-list',        label: '👥 User List' },
+            { id: 'approval-routing', label: '🔀 Approval Routing' },
+          ].map(t => (
+            <div key={t.id}
+              className={`inner-tab${usersRolesTab === t.id ? ' inner-tab-on' : ''}`}
+              onClick={() => setUsersRolesTab(t.id)}
+            >
+              {t.label}
+              {t.id === 'approval-routing' && approvalRouting.routes.length > 0 && (
+                <span style={{marginLeft:6,background:'#f97316',color:'#fff',borderRadius:999,padding:'1px 7px',fontSize:10,fontWeight:800}}>
+                  {approvalRouting.routes.length}
+                </span>
+              )}
+            </div>
+          ))}
         </div>
+
+        {usersRolesTab === 'user-list'        && renderUserList()}
+        {usersRolesTab === 'approval-routing' && renderApprovalRouting()}
+
+        {/* Routing Rule Modal */}
+        {routingModal && (
+          <div className="backdrop" onClick={() => setRoutingModal(null)}>
+            <div className="modal modal-wide" style={{maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e => e.stopPropagation()}>
+              <div className="modal-h">
+                <strong>{routingModal.isNew ? '➕ Add Routing Rule' : '✏️ Edit Routing Rule'}</strong>
+                <button className="btn btn-ghost btn-sm" onClick={() => setRoutingModal(null)}>✕</button>
+              </div>
+              <div className="modal-b" style={{overflowY:'auto'}}>
+                <div className="field">
+                  <label>Document Type *</label>
+                  <select value={routingModal.documentType} onChange={e => setRoutingModal(m => ({ ...m, documentType: e.target.value }))}>
+                    {ROUTING_DOC_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Maker *</label>
+                  <select value={routingModal.makerEmail} onChange={e => setRoutingModal(m => ({ ...m, makerEmail: e.target.value }))}>
+                    <option value="">— Select Maker —</option>
+                    {makerUsers.map(u => <option key={u.id} value={u.email}>{u.fullName || u.email} ({u.email})</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Verifier</label>
+                  <select value={routingModal.verifierEmail} onChange={e => setRoutingModal(m => ({ ...m, verifierEmail: e.target.value }))}>
+                    <option value="">— None (auto-bypass to Approver) —</option>
+                    {verifierUsers.map(u => <option key={u.id} value={u.email}>{u.fullName || u.email} ({u.email})</option>)}
+                  </select>
+                  {routingModal.verifierEmail && routingModal.makerEmail && routingModal.verifierEmail === routingModal.makerEmail && (
+                    <div style={{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,padding:'8px 12px',fontSize:12,color:'#c2410c',marginTop:4}}>
+                      ⚠️ This Maker is also the selected Verifier. Verification will be <strong>auto-bypassed</strong> — the document will route directly to the Approver.
+                    </div>
+                  )}
+                </div>
+                <div className="field">
+                  <label>Approver *</label>
+                  <select value={routingModal.approverEmail} onChange={e => setRoutingModal(m => ({ ...m, approverEmail: e.target.value }))}>
+                    <option value="">— Select Approver —</option>
+                    {approverUsers.map(u => <option key={u.id} value={u.email}>{u.fullName || u.email} ({u.email})</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="modal-f">
+                <button className="btn btn-ghost" onClick={() => setRoutingModal(null)}>Cancel</button>
+                <button className="btn btn-primary" disabled={saving} onClick={saveRoute}>{saving ? 'Saving…' : 'Save Rule'}</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Delegate Authorization Modal */}
+        {delegateAuthModal && (
+          <div className="backdrop" onClick={() => setDelegateAuthModal(null)}>
+            <div className="modal modal-wide" style={{maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e => e.stopPropagation()}>
+              <div className="modal-h">
+                <strong>{delegateAuthModal.isNew ? '➕ Add Delegation' : '✏️ Edit Delegation'}</strong>
+                <button className="btn btn-ghost btn-sm" onClick={() => setDelegateAuthModal(null)}>✕</button>
+              </div>
+              <div className="modal-b" style={{overflowY:'auto'}}>
+                <div className="field">
+                  <label>Absent User (Delegator) *</label>
+                  <select value={delegateAuthModal.delegatorEmail} onChange={e => setDelegateAuthModal(m => ({ ...m, delegatorEmail: e.target.value }))}>
+                    <option value="">— Select Verifier / Approver —</option>
+                    {verifierApproverUsers.map(u => <option key={u.id} value={u.email}>{u.fullName || u.email} ({u.email})</option>)}
+                  </select>
+                  <span style={{fontSize:11,color:'#94a3b8'}}>The Verifier or Approver who is temporarily absent.</span>
+                </div>
+                <div className="field">
+                  <label>Acting As (Delegate) *</label>
+                  <select value={delegateAuthModal.delegateEmail} onChange={e => setDelegateAuthModal(m => ({ ...m, delegateEmail: e.target.value }))}>
+                    <option value="">— Select user to act on their behalf —</option>
+                    {users.filter(u => u.email !== delegateAuthModal.delegatorEmail).map(u => <option key={u.id} value={u.email}>{u.fullName || u.email} ({u.email})</option>)}
+                  </select>
+                  <span style={{fontSize:11,color:'#94a3b8'}}>This user will receive and action the documents in place of the absent user.</span>
+                </div>
+                <div className="field">
+                  <label>Document Types</label>
+                  <div style={{display:'flex',gap:8,flexWrap:'wrap',padding:'8px 0'}}>
+                    {ROUTING_DOC_TYPES.map(dt => {
+                      const checked = (delegateAuthModal.documentTypes || []).includes(dt);
+                      return (
+                        <label key={dt} style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',fontSize:13,color:'#374151'}}>
+                          <input type="checkbox" checked={checked}
+                            onChange={() => {
+                              const cur = delegateAuthModal.documentTypes || [];
+                              setDelegateAuthModal(m => ({ ...m, documentTypes: checked ? cur.filter(x => x !== dt) : [...cur, dt] }));
+                            }}
+                            style={{accentColor:'#f97316',cursor:'pointer'}}
+                          />
+                          {dt}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <span style={{fontSize:11,color:'#94a3b8'}}>Leave all checked to delegate all document types.</span>
+                </div>
+                <div className="grid2">
+                  <div className="field">
+                    <label>From Date</label>
+                    <input type="date" value={delegateAuthModal.fromDate || ''} onChange={e => setDelegateAuthModal(m => ({ ...m, fromDate: e.target.value }))} />
+                  </div>
+                  <div className="field">
+                    <label>To Date</label>
+                    <input type="date" value={delegateAuthModal.toDate || ''} onChange={e => setDelegateAuthModal(m => ({ ...m, toDate: e.target.value }))} />
+                  </div>
+                </div>
+                <span style={{fontSize:11,color:'#94a3b8'}}>Leave dates blank for an open-ended delegation. The delegation is only effective while <em>Active</em> and within the specified period.</span>
+                <div style={{display:'flex',alignItems:'center',gap:10,paddingTop:4}}>
+                  <Toggle checked={delegateAuthModal.isActive} onChange={v => setDelegateAuthModal(m => ({ ...m, isActive: v }))} />
+                  <span style={{fontSize:13,fontWeight:600,color: delegateAuthModal.isActive ? '#065f46' : '#94a3b8'}}>
+                    {delegateAuthModal.isActive ? 'Active' : 'Inactive'}
+                  </span>
+                </div>
+              </div>
+              <div className="modal-f">
+                <button className="btn btn-ghost" onClick={() => setDelegateAuthModal(null)}>Cancel</button>
+                <button className="btn btn-primary" disabled={saving} onClick={saveDelegate}>{saving ? 'Saving…' : 'Save Delegation'}</button>
+              </div>
+            </div>
+          </div>
+        )}
       </>
     );
   }

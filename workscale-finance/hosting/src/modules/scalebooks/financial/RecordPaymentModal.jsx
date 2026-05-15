@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, getDocs, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import { nextVoucherId } from '../../../utils/documentIds.js';
+import { issueCheck, getActiveCheckbook } from '../../../utils/issueCheck.js';
 
 const fmtPHP = (n) => new Intl.NumberFormat('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
 const fmtCur = (n) => '₱' + fmtPHP(n);
@@ -39,6 +40,35 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [activeCb,     setActiveCb]     = useState(null);
+
+  // Load bank/cash accounts for the bank dropdown
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDocs(collection(db, 'coaAccounts'));
+        const banks = snap.docs.map(d => ({ id:d.id, ...d.data() }))
+          .filter(a => /cash|bank/i.test(a.parentName || a.category || a.name || ''));
+        setBankAccounts(banks);
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  // Whenever bank changes (and method is Check), look up active checkbook
+  useEffect(() => {
+    if (form.method !== 'Check' || !form.bank) { setActiveCb(null); return; }
+    let cancel = false;
+    getActiveCheckbook(form.bank).then(cb => { if (!cancel) setActiveCb(cb); }).catch(() => setActiveCb(null));
+    return () => { cancel = true; };
+  }, [form.bank, form.method]);
+
+  // Auto-fill ref no with next check # when applicable
+  useEffect(() => {
+    if (form.method === 'Check' && activeCb && !form.referenceNo) {
+      setForm(f => ({ ...f, referenceNo: String(activeCb.nextCheckNumber || '') }));
+    }
+  }, [activeCb, form.method]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { setError(''); }, [form]);
 
@@ -60,16 +90,19 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
   const handleSave = async () => {
     if (!form.date) { setError('Payment date is required.'); return; }
     if (total <= 0) { setError('Enter at least one of Interest / Principal / Penalty.'); return; }
+    if (form.method === 'Check' && !form.bank) { setError('Select a bank account to issue the check.'); return; }
+    if (form.method === 'Check' && !activeCb)  { setError('No active checkbook for this bank. Open Check Registry → Checkbook Management.'); return; }
     setSaving(true);
     try {
       const user = auth.currentUser?.email || '';
+      const loanLabel = loan.name || `Loan ${loan.id}`;
 
       // --- Auto-create Loan Voucher ---
       let finalVoucherId = form.voucherId || '';
+      let voucherDocId   = '';
       if (form.autoVoucher) {
         const vLines = [];
         let lineNo = 1;
-        const loanLabel = loan.name || `Loan ${loan.id}`;
         if (Number(form.interest) > 0) {
           vLines.push({ lineNo: lineNo++, description: `Interest — ${loanLabel}`, amount: Number(form.interest) || 0, category: 'Finance Cost', expenseAccountCode: '', contactId: '', contact: loanLabel, taxType: 'N/A', taxRate: 0, taxAmt: 0 });
         }
@@ -80,7 +113,7 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
           vLines.push({ lineNo: lineNo++, description: `Penalty — ${loanLabel}`, amount: Number(form.penalty) || 0, category: 'Finance Cost', expenseAccountCode: '', contactId: '', contact: loanLabel, taxType: 'N/A', taxRate: 0, taxAmt: 0 });
         }
         const vId = await nextVoucherId('LOAN', form.date);
-        await addDoc(collection(db, 'vouchers'), {
+        const vRef = await addDoc(collection(db, 'vouchers'), {
           voucherId:              vId,
           voucherType:            'LOAN',
           preparationDate:        form.date,
@@ -98,6 +131,25 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
           updatedBy:              user,
         });
         finalVoucherId = vId;
+        voucherDocId   = vRef.id;
+      }
+
+      // --- Issue check from active checkbook ---
+      let checkInfo = null;
+      if (form.method === 'Check' && activeCb) {
+        checkInfo = await issueCheck({
+          bankCode:      form.bank,
+          payeeName:     loanLabel,
+          amount:        total,
+          netAmount:     total,
+          issueDate:     form.date,
+          checkNumber:   form.referenceNo || undefined,
+          referenceType: 'Loan Payment',
+          referenceId:   loan.id,
+          voucherDocId,
+          notes:         form.notes || `Loan payment — ${loanLabel}`,
+          user,
+        });
       }
 
       // --- Save loan payment record ---
@@ -110,9 +162,11 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
         penalty: Number(form.penalty) || 0,
         total,
         method: form.method,
-        referenceNo: form.referenceNo || '',
+        referenceNo: checkInfo?.checkNumber || form.referenceNo || '',
         bank: form.bank || '',
         voucherId: finalVoucherId,
+        checkId:    checkInfo?.checkId        || '',
+        checkRegisterId: checkInfo?.checkRegisterId || '',
         notes: form.notes || '',
         allocations: form.appliedPeriod
           ? [{
@@ -215,6 +269,27 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
             </div>
           </div>
 
+          {/* Checkbook banner shown when method is Check */}
+          {form.method === 'Check' && form.bank && (
+            activeCb ? (
+              <div style={{
+                background:'#eff6ff', border:'1px solid #bfdbfe', borderLeft:'4px solid #1d4ed8',
+                borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'#1e3a8a',
+                display:'flex', flexWrap:'wrap', gap:10, alignItems:'center',
+              }}>
+                <span>📋 <strong>Active Checkbook</strong></span>
+                <span>{activeCb.checkbookType}</span>
+                <span>Range: <strong>{activeCb.startingNumber}–{activeCb.endingNumber}</strong></span>
+                <span>Next: <strong style={{ color:'#f97316' }}>{activeCb.nextCheckNumber}</strong></span>
+              </div>
+            ) : (
+              <div style={{
+                background:'#fff7ed', border:'1px solid #fed7aa', borderLeft:'4px solid #f97316',
+                borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'#9a3412',
+              }}>⚠️ No active checkbook for this bank. Open <strong>Check Registry → Checkbook Management</strong> to add one before issuing checks.</div>
+            )
+          )}
+
           {/* Row 2: interest / principal / penalty */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 12 }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -238,11 +313,20 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 12 }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               <label style={lblS}>Bank / Account</label>
-              <input style={inpS} value={form.bank} onChange={e => setField('bank', e.target.value)} placeholder="e.g. BDO 1234" />
+              {bankAccounts.length > 0 ? (
+                <select style={inpS} value={form.bank} onChange={e => setField('bank', e.target.value)}>
+                  <option value="">— Select —</option>
+                  {bankAccounts.map(b => (
+                    <option key={b.id} value={b.code || b.id}>{b.code} — {b.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input style={inpS} value={form.bank} onChange={e => setField('bank', e.target.value)} placeholder="e.g. BDO 1234" />
+              )}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Reference No.</label>
-              <input style={inpS} value={form.referenceNo} onChange={e => setField('referenceNo', e.target.value)} placeholder="Check / Txn No." />
+              <label style={lblS}>{form.method === 'Check' ? 'Check No.' : 'Reference No.'}</label>
+              <input style={inpS} value={form.referenceNo} onChange={e => setField('referenceNo', e.target.value)} placeholder={form.method === 'Check' ? 'Check #' : 'Txn No.'} />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               <label style={lblS}>Loan Voucher</label>
