@@ -239,7 +239,9 @@ export default function SettingsPage() {
         country:          d.country          || 'Philippines',
         fiscalYearStart:  d.fiscalYearStart  || '01',
         logoUrl:          d.logoUrl          || '',
+        logoBase64:       d.logoBase64       || '',
         billingWebAppUrl: d.billingWebAppUrl || '',
+        voucherNotedBy: d.voucherNotedBy || ''
       });
     });
     getDoc(doc(db, 'settings', 'modules')).then(snap => {
@@ -427,10 +429,18 @@ export default function SettingsPage() {
       if (!file.type.startsWith('image/')) return showToast('Please select an image file.');
       setLogoUploading(true);
       try {
+        // Convert to base64 data URL (used by PDF generator without CORS issues)
+        const base64 = await new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = () => res(reader.result);
+          reader.onerror = rej;
+          reader.readAsDataURL(file);
+        });
         const sRef = storageRef(storage, 'settings/company-logo');
         await uploadBytes(sRef, file);
         const url = await getDownloadURL(sRef);
         up('logoUrl', url);
+        up('logoBase64', base64);
         showToast('Logo uploaded.');
       } catch(err) { showToast('Upload failed: ' + err.message); }
       setLogoUploading(false);
@@ -481,6 +491,13 @@ export default function SettingsPage() {
                 <span style={{fontSize:11,color:'#94a3b8'}}>PNG, JPG or SVG. Shown on documents.</span>
               </div>
             </div>
+          </div>
+        </div>
+        <div className="sp-card">
+          <div className="sp-card-title">Document Signatories</div>
+          <p style={{fontSize:12,color:'#64748b',marginBottom:16}}>"Reviewed by" and "Approved by" are automatically pulled from Approval Routing (Users &amp; Roles). Only "Noted by" is configured here.</p>
+          <div className="grid2">
+            <div className="field"><label>Noted by</label><input value={profileForm.voucherNotedBy} onChange={e=>up('voucherNotedBy',e.target.value)} placeholder="Full name" /></div>
           </div>
         </div>
         <div className="save-bar">

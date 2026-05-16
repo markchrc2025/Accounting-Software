@@ -6,18 +6,33 @@ import {
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
-import { nextCheckVoucherId } from '../../../utils/documentIds.js';
+import { nextCheckVoucherId, nextJournalEntryId } from '../../../utils/documentIds.js';
+import CheckVoucherPdfModal from './CheckVoucherPdfModal.jsx';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CHECKBOOK_TYPES = ['Loose', 'Bound'];
 const CHECK_STATUSES  = ['Issued', 'Cleared', 'Voided', 'Stopped', 'Stale'];
 
+// Physical check status styles (for secondary badge)
 const STATUS_STYLES = {
   Issued:  { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
   Cleared: { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' },
   Voided:  { background:'#fef2f2', borderColor:'#fecaca', color:'#b91c1c' },
   Stopped: { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
   Stale:   { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
+};
+
+// Voucher approval status styles (mirrors VouchersPage)
+const VOUCHER_STATUS_STYLES = {
+  'Draft':            { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
+  'Pending':          { background:'#fff7ed', borderColor:'#fed7aa', color:'#c2410c' },
+  'For Verification': { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
+  'Verified':         { background:'#f0f9ff', borderColor:'#bae6fd', color:'#0369a1' },
+  'For Approval':     { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
+  'Approved':         { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
+  'Paid':             { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' },
+  'Rejected':         { background:'#fef2f2', borderColor:'#fecaca', color:'#dc2626' },
+  'Voided':           { background:'#f8fafc', borderColor:'#e2e8f0', color:'#94a3b8' },
 };
 
 const uid   = () => Math.random().toString(36).slice(2, 10).toUpperCase();
@@ -90,6 +105,7 @@ const CSS = `
   .jnl-tbl th { background:#f1f5f9; font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:.05em; }
   .jnl-tbl tfoot td { background:#f1f5f9; font-weight:800; border-top:2px solid #e2e8f0; }
   .toast      { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; }
+  .bulk-bar   { display:flex; align-items:center; gap:10px; padding:8px 14px; background:#fff7ed; border:1px solid #fed7aa; border-radius:10px; margin-bottom:10px; flex-wrap:wrap; }
   @media(max-width:640px) { .kpi-row{grid-template-columns:repeat(3,1fr);} }
 `;
 
@@ -106,8 +122,10 @@ export default function CheckRegistryPage() {
 
   const [activeTab,    setActiveTab]    = useState('register');
   const [cvModal,      setCvModal]      = useState(null);
+  const [cvPdfModal,   setCvPdfModal]   = useState(null);
   const [cbModal,      setCbModal]      = useState(null);
-  const [statusModal,  setStatusModal]  = useState(null);
+  const [markModal,    setMarkModal]    = useState(null); // { referenceId, items:[{...check,newStatus,...}] }
+  const [openMenu,     setOpenMenu]     = useState(null); // null or { id, top, right }
   const [confirmModal, setConfirmModal] = useState(null);
 
   const [filterBank,   setFilterBank]   = useState('');
@@ -120,6 +138,7 @@ export default function CheckRegistryPage() {
   const [analyticsBank,   setAnalyticsBank]   = useState('');
   const [saving,       setSaving]       = useState(false);
   const [toast,        setToast]        = useState('');
+  const [selected,     setSelected]     = useState(new Set());
 
   // Check Voucher form state
   const [cvForm,  setCvForm]  = useState({});
@@ -128,6 +147,38 @@ export default function CheckRegistryPage() {
   const showToast  = msg => { setToast(msg); setTimeout(() => setToast(''), 3200); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
   const user = auth.currentUser?.email || '';
+
+  // ── Bulk selection helpers ─────────────────────────────────────────────────
+  const toggleSel = id => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAll = visibleIds => {
+    if (visibleIds.length > 0 && visibleIds.every(id => selected.has(id))) setSelected(new Set());
+    else setSelected(new Set(visibleIds));
+  };
+
+  const bulkSubmit = (visibleIds) => {
+    const ids = visibleIds.filter(id => selected.has(id));
+    if (!ids.length) return;
+    const voucherDocIds = ids.map(id => checks.find(c => c.id === id)?.voucherDocId).filter(Boolean);
+    askConfirm(`Submit ${ids.length} check voucher(s) for approval?`, async () => {
+      await Promise.all(voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user })));
+      setSelected(new Set());
+      showToast(`${ids.length} check voucher(s) submitted for approval.`);
+    });
+  };
+
+  const bulkVoid = (visibleIds) => {
+    const ids = visibleIds.filter(id => selected.has(id));
+    if (!ids.length) return;
+    const voucherDocIds = ids.map(id => checks.find(c => c.id === id)?.voucherDocId).filter(Boolean);
+    askConfirm(`Void ${ids.length} check voucher(s)? This cannot be undone.`, async () => {
+      await Promise.all([
+        ...voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
+        ...ids.map(id => updateDoc(doc(db,'checkRegister',id), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
+      ]);
+      setSelected(new Set());
+      showToast(`${ids.length} check voucher(s) voided.`);
+    });
+  };
 
   // ── Live Data ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -156,6 +207,12 @@ export default function CheckRegistryPage() {
     return [...rateItems, ...groupItems].sort((a,b) => a.name.localeCompare(b.name));
   }, [taxRates, taxGroups]);
 
+  // Post-Dated Checks Issued account (looked up by name from COA)
+  const pdcAccount = useMemo(() =>
+    accounts.find(a => /post.?dated check/i.test(a.name||'') || /pdc.?issued/i.test(a.name||'')),
+    [accounts]
+  );
+
   const bankAccounts = useMemo(() =>
     accounts.filter(a =>
       ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) ||
@@ -172,10 +229,28 @@ export default function CheckRegistryPage() {
     return `CHK-${yyyyMMdd}-${checkNumber}`;
   };
 
-  // KPIs
-  const countsByStatus = {};
-  CHECK_STATUSES.forEach(s => { countsByStatus[s] = checks.filter(c => c.status === s).length; });
-  const totalIssued = checks.filter(c => c.status === 'Issued').reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+  // For old-style multi-check docs (1 doc representing N checks), display the sum of all voucher lines.
+  // New-style docs (N separate docs per line) use their own stored amount unchanged.
+  const checkDisplayAmt = useMemo(() => {
+    const map = new Map();
+    checks.forEach(c => {
+      if (c.isPartOfMultiple && c.voucherDocId) {
+        const siblings = checks.filter(x => x.voucherDocId === c.voucherDocId);
+        if (siblings.length === 1) {
+          const v = vouchers.find(vv => vv.id === c.voucherDocId);
+          if (v?.lines?.length > 1) {
+            map.set(c.id, v.lines.reduce((s, l) => s + (Number(l.amount) || 0), 0));
+            return;
+          }
+        }
+      }
+      map.set(c.id, parseFloat(c.amount) || 0);
+    });
+    return map;
+  }, [checks, vouchers]);
+
+  // totalIssued — amount only, counts are derived from expandedChecks below
+  const totalIssued = checks.filter(c => c.status === 'Issued').reduce((s,c) => s + (checkDisplayAmt.get(c.id) ?? parseFloat(c.amount) ?? 0), 0);
 
   // Apply preset to date range whenever it changes
   useEffect(() => {
@@ -200,8 +275,18 @@ export default function CheckRegistryPage() {
 
   // Filtered checks
   const filtered = useMemo(() => checks.filter(c => {
-    if (filterBank   && c.bankCode !== filterBank)   return false;
-    if (filterStatus && c.status   !== filterStatus) return false;
+    if (filterBank && c.bankCode !== filterBank) return false;
+    if (filterStatus) {
+      if (filterStatus.startsWith('v:')) {
+        // Approval (voucher) status filter
+        const vStatus = filterStatus.slice(2);
+        const voucher = vouchers.find(v => v.id === c.voucherDocId);
+        if ((voucher?.status || 'Pending') !== vStatus) return false;
+      } else {
+        // Physical check status filter
+        if (c.status !== filterStatus) return false;
+      }
+    }
     if (dateFrom && (c.issueDate||'') < dateFrom) return false;
     if (dateTo   && (c.issueDate||'') > dateTo)   return false;
     if (search) {
@@ -212,13 +297,46 @@ export default function CheckRegistryPage() {
             (c.checkId||'').toLowerCase().includes(q))) return false;
     }
     return true;
-  }), [checks, filterBank, filterStatus, search, dateFrom, dateTo]);
+  }), [checks, vouchers, filterBank, filterStatus, search, dateFrom, dateTo]);
+
+  // Expand old-style single-doc multi-check vouchers into per-line virtual entries for analytics.
+  // Old schema: 1 checkRegister doc with checkNumber:'Multiple', isPartOfMultiple:true.
+  // New schema: N docs (one per line), each with lineNo. Both are handled transparently.
+  const expandedChecks = useMemo(() => {
+    const result = [];
+    const expandedVouchers = new Set();
+    checks.forEach(c => {
+      if (c.isPartOfMultiple && c.voucherDocId && !expandedVouchers.has(c.voucherDocId)) {
+        const siblings = checks.filter(x => x.voucherDocId === c.voucherDocId);
+        if (siblings.length === 1) {
+          // Old-style: single doc for multiple checks — expand via voucher lines
+          const voucher = vouchers.find(v => v.id === c.voucherDocId);
+          if (voucher?.lines?.length > 1) {
+            expandedVouchers.add(c.voucherDocId);
+            voucher.lines.forEach(line => {
+              result.push({
+                ...c,
+                checkNumber: String(line.lineCheckNo || '').trim() || c.checkNumber,
+                amount:      Number(line.amount) || 0,
+              });
+            });
+            return;
+          }
+        } else {
+          // New-style: already one doc per line, mark voucher as handled
+          expandedVouchers.add(c.voucherDocId);
+        }
+      }
+      result.push(c);
+    });
+    return result;
+  }, [checks, vouchers]);
 
   // Outstanding aging buckets (Issued only, by days since issueDate)
   const aging = useMemo(() => {
     const buckets = { '0-30':{n:0,a:0}, '31-60':{n:0,a:0}, '61-90':{n:0,a:0}, '90+':{n:0,a:0} };
     const now = new Date();
-    checks.filter(c => c.status === 'Issued').forEach(c => {
+    expandedChecks.filter(c => c.status === 'Issued').forEach(c => {
       const d = new Date(c.issueDate); if (isNaN(d)) return;
       const days = Math.floor((now - d) / 86400000);
       const amt  = parseFloat(c.amount) || 0;
@@ -226,7 +344,7 @@ export default function CheckRegistryPage() {
       buckets[k].n += 1; buckets[k].a += amt;
     });
     return buckets;
-  }, [checks]);
+  }, [expandedChecks]);
 
   // Time-series buckets for analytics tab
   function bucketKey(dateStr, bucket) {
@@ -241,7 +359,7 @@ export default function CheckRegistryPage() {
   }
   const series = useMemo(() => {
     const map = new Map(); // key -> { issuedN, issuedA, clearedN, clearedA, voidedN, voidedA }
-    checks.forEach(c => {
+    expandedChecks.forEach(c => {
       if (analyticsBank && c.bankCode !== analyticsBank) return;
       const k = bucketKey(c.issueDate, analyticsBucket);
       if (!k) return;
@@ -253,7 +371,7 @@ export default function CheckRegistryPage() {
       if (c.status === 'Voided')  { row.voidedN  += 1; row.voidedA  += amt; }
     });
     return [...map.values()].sort((a,b) => b.key.localeCompare(a.key));
-  }, [checks, analyticsBucket, analyticsBank]);
+  }, [expandedChecks, analyticsBucket, analyticsBank]);
 
   // ── Line helpers ───────────────────────────────────────────────────────────
   const setLine = (i, key, val) => setCvLines(prev => prev.map((l, idx) => {
@@ -267,12 +385,42 @@ export default function CheckRegistryPage() {
     const amt  = Number(updated.amount) || 0;
     const rate = Number(updated.taxRate) || 0;
     updated.taxAmt = updated.taxRateId
-      ? Math.round((updated.inclusive ? amt - amt/(1 + rate/100) : amt*(rate/100)) * 100) / 100
+      ? Math.round((cvForm.inclusive ? amt - amt/(1 + rate/100) : amt*(rate/100)) * 100) / 100
       : 0;
     return updated;
   }));
-  const addLine    = ()  => setCvLines(prev => [...prev, EMPTY_LINE()]);
+  const addLine = () => {
+    if (!cvForm.isMultipleChecks) {
+      setCvLines(prev => [...prev, EMPTY_LINE()]);
+      return;
+    }
+    // Auto-fill the new row's check number: next after the highest number already in use
+    const cb = activeCheckbook(cvForm.bankCode);
+    setCvLines(prev => {
+      const usedNos = prev.map(l => parseInt(l.lineCheckNo || '0') || 0).filter(n => n > 0);
+      const base    = usedNos.length > 0
+        ? Math.max(...usedNos)
+        : (parseInt(cb?.nextCheckNumber) || 1) - 1;
+      const next    = base + 1;
+      const width   = cb ? String(cb.endingNumber || cb.nextCheckNumber).length : 10;
+      const newLine = cb
+        ? { ...EMPTY_LINE(), lineCheckNo: String(next).padStart(width, '0') }
+        : EMPTY_LINE();
+      return [...prev, newLine];
+    });
+  };
   const removeLine = (i) => setCvLines(prev => prev.filter((_,idx) => idx !== i));
+
+  // Global inclusive toggle — recalculates taxAmt on all lines
+  const handleInclusiveToggle = (checked) => {
+    setCvForm(f => ({ ...f, inclusive: checked }));
+    setCvLines(prev => prev.map(l => {
+      const amt  = Number(l.amount) || 0;
+      const rate = Number(l.taxRate) || 0;
+      const taxAmt = l.taxRateId ? (checked ? amt - amt/(1+rate/100) : amt*(rate/100)) : 0;
+      return { ...l, taxAmt: Math.round(taxAmt*100)/100 };
+    }));
+  };
 
   const lineTotal = cvLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
   const taxTotal  = cvLines.reduce((s,l) => s + (Number(l.taxAmt)||0),  0);
@@ -308,7 +456,7 @@ export default function CheckRegistryPage() {
       if (!amt) return;
 
       // 1. Expense debit (net of inclusive tax)
-      const expAmt = (tax > 0 && l.inclusive) ? amt - tax : amt;
+      const expAmt = (tax > 0 && cvForm.inclusive) ? amt - tax : amt;
       if (l.expenseAccount) {
         jl.push({ account: acctLabel(l.expenseAccount), debit: expAmt, credit: 0 });
       }
@@ -341,18 +489,17 @@ export default function CheckRegistryPage() {
       }
 
       // 3. Bank credit: gross amount paid
-      bankCreditTotal += l.inclusive ? amt : amt + tax;
+      bankCreditTotal += cvForm.inclusive ? amt : amt + tax;
     });
 
-    // 4. Bank / Cash credit
-    const bankAcct = bankAccounts.find(a => a.code === cvForm.bankCode || a.id === cvForm.bankCode);
-    const bankLabel = bankAcct
-      ? acctLabel(`${bankAcct.code} — ${bankAcct.name}`)
-      : (cvForm.bankCode || 'Bank / Cash');
-    if (bankCreditTotal > 0) jl.push({ account: bankLabel, debit: 0, credit: bankCreditTotal });
+    // 4. Post-Dated Checks Issued credit (interim liability — clears to bank when check is encashed)
+    const pdcLabel = pdcAccount
+      ? `(${pdcAccount.code}) ${pdcAccount.name}`
+      : 'Post-Dated Checks Issued';
+    if (bankCreditTotal > 0) jl.push({ account: pdcLabel, debit: 0, credit: bankCreditTotal });
 
     return jl;
-  }, [cvLines, cvForm.bankCode, bankAccounts, taxRates, taxGroups, accounts]);
+  }, [cvLines, cvForm.bankCode, cvForm.inclusive, bankAccounts, taxRates, taxGroups, accounts, pdcAccount]);
 
   const jDebit  = journalLines.reduce((s,j) => s+j.debit,  0);
   const jCredit = journalLines.reduce((s,j) => s+j.credit, 0);
@@ -361,9 +508,130 @@ export default function CheckRegistryPage() {
   const openNewCv = () => {
     const defaultBank = bankAccounts[0]?.code || bankAccounts[0]?.id || '';
     const cb = activeCheckbook(defaultBank);
-    setCvForm({ bankCode:defaultBank, issueDate:today(), purposeCategory:'', isMultipleChecks:false, globalCheckNo:cb?.nextCheckNumber||'', globalCheckDate:today(), notes:'' });
+    setCvForm({ bankCode:defaultBank, issueDate:today(), purposeCategory:'', isMultipleChecks:false, globalCheckNo:cb?.nextCheckNumber||'', globalCheckDate:today(), notes:'', inclusive:false });
     setCvLines([EMPTY_LINE()]);
     setCvModal({ _new:true });
+  };
+
+  const openEditCv = (check) => {
+    if (!check.voucherDocId) return alert('No voucher linked to this check.');
+    const v = vouchers.find(x => x.id === check.voucherDocId);
+    if (!v) return alert('Voucher not found.');
+    if (!['Pending','Draft'].includes(v.status))
+      return alert(`Cannot edit: voucher is "${v.status}". Only Pending vouchers can be edited.`);
+    const isInclusive = !!(v.lines?.[0]?.inclusive);
+    setCvForm({
+      bankCode:         v.paymentFromAccountCode || '',
+      issueDate:        v.preparationDate        || '',
+      purposeCategory:  v.purposeCategory        || '',
+      isMultipleChecks: !!v.isMultipleChecks,
+      globalCheckNo:    v.checkNumber            || '',
+      globalCheckDate:  v.checkDate              || '',
+      notes:            v.notes                  || '',
+      inclusive:        isInclusive,
+    });
+    setCvLines((v.lines || []).map((l, i) => ({
+      id:             Date.now() + i,
+      contactId:      l.contactId          || '',
+      contact:        l.contact            || '',
+      expenseAccount: l.expenseAccountCode || '',
+      description:    l.description        || '',
+      taxRateId:      l.taxRateId          || '',
+      taxRate:        Number(l.taxRate)    || 0,
+      amount:         Number(l.amount)     || 0,
+      taxAmt:         Number(l.taxAmt)     || 0,
+      lineCheckNo:    l.lineCheckNo        || '',
+      lineCheckDate:  l.lineCheckDate      || '',
+    })));
+    const checkDocs = checks.filter(c => c.voucherDocId === check.voucherDocId);
+    setCvModal({
+      _edit:        true,
+      _docId:       v.id,
+      _voucherId:   v.voucherId,
+      _linkedJeId:  v.linkedJeId  || '',
+      _checkDocIds: checkDocs.map(c => c.id),
+      _isMultiple:  !!v.isMultipleChecks,
+    });
+  };
+
+  // ── Update Check Voucher (edit mode) ─────────────────────────────────
+  const updateCheckVoucher = async () => {
+    if (!cvForm.bankCode)  return alert('Select a bank account.');
+    if (!cvForm.issueDate) return alert('Issue date is required.');
+    if (!(lineTotal > 0))  return alert('Total amount must be greater than zero.');
+    if (cvLines.some(l => !l.expenseAccount)) return alert('All lines need an account (COA).');
+    setSaving(true);
+    try {
+      const payeeSummary = [...new Set(cvLines.map(l => l.contact).filter(Boolean))].join(', ') || cvForm.purposeCategory || '';
+      const linesPayload = cvLines.map((l, i) => ({
+        lineNo:             i + 1,
+        contactId:          l.contactId          || '',
+        contact:            l.contact            || '',
+        expenseAccountCode: l.expenseAccount     || '',
+        description:        l.description        || '',
+        amount:             Number(l.amount)     || 0,
+        taxRateId:          l.taxRateId          || '',
+        taxType:            l.taxType            || 'N/A',
+        taxRate:            Number(l.taxRate)    || 0,
+        taxAmt:             Number(l.taxAmt)     || 0,
+        inclusive:          !!cvForm.inclusive,
+        lineCheckNo:   cvModal._isMultiple ? (l.lineCheckNo||'')   : (cvForm.globalCheckNo||''),
+        lineCheckDate: cvModal._isMultiple ? (l.lineCheckDate||'') : (cvForm.globalCheckDate||cvForm.issueDate||''),
+      }));
+
+      // 1. Update the voucher doc
+      await updateDoc(doc(db,'vouchers',cvModal._docId), {
+        purposeCategory: cvForm.purposeCategory || '',
+        contactSummary:  payeeSummary,
+        totalAmount:     lineTotal,
+        taxTotal,
+        netCash,
+        notes:           cvForm.notes || '',
+        lines:           linesPayload,
+        updatedAt:       serverTimestamp(), updatedBy: user,
+      });
+
+      // 2. Regenerate the "For Clearing" JE
+      if (cvModal._linkedJeId) {
+        const cvJeLines = journalLines.map(j => {
+          const m = j.account.match(/^\(([^)]+)\)\s*(.*)/);
+          return { accountCode: m ? m[1] : j.account, accountName: m ? m[2] : j.account, description: '', debit: j.debit, credit: j.credit };
+        });
+        await updateDoc(doc(db,'journalEntries',cvModal._linkedJeId), {
+          description: `Check Voucher ${cvModal._voucherId}${cvForm.purposeCategory ? ' — ' + cvForm.purposeCategory : ''}`,
+          lines:       cvJeLines,
+          totalDebit:  cvJeLines.reduce((s,l) => s + l.debit,  0),
+          totalCredit: cvJeLines.reduce((s,l) => s + l.credit, 0),
+          updatedAt:   serverTimestamp(), updatedBy: user,
+        });
+      }
+
+      // 3. Sync check register amounts
+      if (!cvModal._isMultiple && cvModal._checkDocIds?.length === 1) {
+        await updateDoc(doc(db,'checkRegister',cvModal._checkDocIds[0]), {
+          amount: lineTotal, netAmount: netCash, payeeName: payeeSummary,
+          updatedAt: serverTimestamp(), updatedBy: user,
+        });
+      } else if (cvModal._isMultiple) {
+        const checkDocs = checks.filter(c => cvModal._checkDocIds.includes(c.id));
+        for (const [idx, l] of cvLines.entries()) {
+          const lineAmt = Number(l.amount) || 0;
+          const lineTax = Number(l.taxAmt)  || 0;
+          const cd = checkDocs.find(c => c.lineNo === idx + 1);
+          if (cd) {
+            await updateDoc(doc(db,'checkRegister',cd.id), {
+              amount: lineAmt, netAmount: lineAmt - lineTax,
+              payeeName: l.contact || payeeSummary,
+              updatedAt: serverTimestamp(), updatedBy: user,
+            });
+          }
+        }
+      }
+
+      showToast(`Check Voucher ${cvModal._voucherId} updated.`);
+      setCvModal(null);
+    } catch(e) { console.error(e); alert('Update failed: ' + e.message); }
+    setSaving(false);
   };
 
   // ── Create Check Voucher ───────────────────────────────────────────────────
@@ -390,6 +658,11 @@ export default function CheckRegistryPage() {
     const numbersToValidate = cvForm.isMultipleChecks
       ? cvLines.map(l => String(l.lineCheckNo||'').trim()).filter(Boolean)
       : [String(assignedCheckNo)];
+
+    // 0. All lines must have a check number in Multiple Checks mode
+    if (cvForm.isMultipleChecks && cvLines.some(l => !String(l.lineCheckNo||'').trim())) {
+      return alert('All lines need a check number in Multiple Checks mode. Use \"Use Next #\" to auto-fill.');
+    }
 
     // 1. Intra-form duplicates (multiple checks only)
     if (cvForm.isMultipleChecks) {
@@ -437,13 +710,14 @@ export default function CheckRegistryPage() {
 
       const batch      = writeBatch(db);
       const voucherRef = doc(collection(db, 'vouchers'));
-      const checkRef   = doc(collection(db, 'checkRegister'));
+      const checkRefs  = []; // one entry per checkRegister document
 
       batch.set(voucherRef, {
         voucherId, voucherType:'CHECK',
         preparationDate:        cvForm.issueDate,
         purposeCategory:        cvForm.purposeCategory || '',
         paymentFromAccountCode: cvForm.bankCode,
+        pdcAccountCode:         pdcAccount?.code || '',
         contactSummary:         payeeSummary,
         totalAmount:            lineTotal, taxTotal, netCash,
         status:                 'Pending',
@@ -457,58 +731,251 @@ export default function CheckRegistryPage() {
         updatedAt:serverTimestamp(), updatedBy:user,
       });
 
-      batch.set(checkRef, {
-        checkId, checkbookId:cb.id, bankCode:cvForm.bankCode,
-        checkNumber:   cvForm.isMultipleChecks ? 'Multiple' : String(assignedCheckNo),
-        issueDate:     cvForm.issueDate,
-        payeeName:     payeeSummary,
-        amount:        lineTotal, netAmount:netCash,
-        status:        'Issued',
-        referenceType: 'Check Voucher',
-        referenceId:   voucherId,
-        voucherDocId:  voucherRef.id,
-        voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
-        notes:         cvForm.notes || '',
-        createdAt:serverTimestamp(), createdBy:user,
-        updatedAt:serverTimestamp(), updatedBy:user,
-      });
+      if (cvForm.isMultipleChecks) {
+        // One checkRegister doc per line — each with its own check number, date, and amount
+        cvLines.forEach((l, idx) => {
+          const lineRef     = doc(collection(db, 'checkRegister'));
+          const lineCheckNo = String(l.lineCheckNo || '').trim();
+          const lineAmt     = Number(l.amount) || 0;
+          const lineTax     = Number(l.taxAmt)  || 0;
+          checkRefs.push(lineRef);
+          batch.set(lineRef, {
+            checkId:          genCheckId(lineCheckNo || (assignedCheckNo + idx)),
+            checkbookId:      cb.id,
+            bankCode:         cvForm.bankCode,
+            checkNumber:      lineCheckNo,
+            checkDate:        l.lineCheckDate || cvForm.issueDate,
+            issueDate:        cvForm.issueDate,
+            payeeName:        l.contact || payeeSummary,
+            amount:           lineAmt,
+            netAmount:        lineAmt - lineTax,
+            status:           'Issued',
+            referenceType:    'Check Voucher',
+            referenceId:      voucherId,
+            voucherDocId:     voucherRef.id,
+            isPartOfMultiple: true,
+            lineNo:           idx + 1,
+            voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
+            notes:            cvForm.notes || '',
+            createdAt: serverTimestamp(), createdBy: user,
+            updatedAt: serverTimestamp(), updatedBy: user,
+          });
+        });
+      } else {
+        const checkRef = doc(collection(db, 'checkRegister'));
+        checkRefs.push(checkRef);
+        batch.set(checkRef, {
+          checkId, checkbookId:cb.id, bankCode:cvForm.bankCode,
+          checkNumber:      String(assignedCheckNo),
+          checkDate:        cvForm.globalCheckDate || cvForm.issueDate,
+          issueDate:        cvForm.issueDate,
+          payeeName:        payeeSummary,
+          amount:           lineTotal, netAmount:netCash,
+          status:           'Issued',
+          referenceType:    'Check Voucher',
+          referenceId:      voucherId,
+          voucherDocId:     voucherRef.id,
+          isPartOfMultiple: false,
+          voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
+          notes:            cvForm.notes || '',
+          createdAt: serverTimestamp(), createdBy: user,
+          updatedAt: serverTimestamp(), updatedBy: user,
+        });
+      }
 
       await batch.commit();
 
       // Advance checkbook next check number
+      let nextNo;
+      if (cvForm.isMultipleChecks) {
+        const usedNos = cvLines.map(l => parseInt(l.lineCheckNo||'0')||0).filter(n => n > 0);
+        const maxUsed = usedNos.length > 0 ? Math.max(...usedNos) : assignedCheckNo;
+        nextNo = String(maxUsed + 1).padStart(String(end).length, '0');
+      } else {
+        nextNo = String(assignedCheckNo + 1).padStart(String(end).length, '0');
+      }
       await updateDoc(doc(db,'checkbookMaster',cb.id), {
-        nextCheckNumber: String(assignedCheckNo + 1).padStart(String(end).length, '0'),
-        updatedAt:serverTimestamp(), updatedBy:user,
+        nextCheckNumber: nextNo,
+        updatedAt: serverTimestamp(), updatedBy: user,
       });
 
-      showToast(`Check Voucher ${voucherId} created · Check #${cvForm.isMultipleChecks ? 'Multiple' : assignedCheckNo}`);
+      // Auto-create “For Clearing” JE (Dr. Expenses / Cr. Post-Dated Checks Issued)
+      const cvJeLines = journalLines.map(j => {
+        const m = j.account.match(/^\(([^)]+)\)\s*(.*)/);
+        return { accountCode: m ? m[1] : j.account, accountName: m ? m[2] : j.account, description: '', debit: j.debit, credit: j.credit };
+      });
+      const cvJeId = await nextJournalEntryId(cvForm.issueDate);
+      const jeRef  = await addDoc(collection(db, 'journalEntries'), {
+        jeId: cvJeId, date: cvForm.issueDate,
+        description: `Check Voucher ${voucherId}${cvForm.purposeCategory ? ' — ' + cvForm.purposeCategory : ''}`,
+        type: 'Check Voucher', reference: voucherId, sourceDocId: voucherRef.id, sourceDocType: 'voucher',
+        status: 'For Clearing',
+        lines: cvJeLines,
+        totalDebit: cvJeLines.reduce((s,l) => s + l.debit, 0),
+        totalCredit: cvJeLines.reduce((s,l) => s + l.credit, 0),
+        createdAt: serverTimestamp(), createdBy: user,
+        updatedAt: serverTimestamp(), updatedBy: user,
+      });
+      // Link JE id to the voucher and all check register entries
+      await Promise.all([
+        updateDoc(voucherRef, { linkedJeId: jeRef.id }),
+        ...checkRefs.map(ref => updateDoc(ref, { linkedJeId: jeRef.id })),
+      ]);
+
+      const checkSummary = cvForm.isMultipleChecks
+        ? `${cvLines.length} checks (#${cvLines.map(l => l.lineCheckNo).filter(Boolean).join(', ')})`
+        : `Check #${assignedCheckNo}`;
+      showToast(`Check Voucher ${voucherId} created · ${checkSummary}`);
       setCvModal(null);
     } catch(e) { console.error(e); alert('Error: ' + e.message); }
     setSaving(false);
   };
 
-  // ── Update check status (with linked voucher side effect) ─────────────────
-  const updateStatus = async (form) => {
-    if (!form.status || form.status === statusModal.status) return alert('Select a new status.');
-    if (form.status === 'Voided' && !form.voidReason) return alert('Void reason is required.');
+  // ── Open the unified mark modal (single or multi-check voucher) ────────────
+  const openMarkModal = (check) => {
+    const voucher = vouchers.find(v => v.id === check.voucherDocId);
+    let items;
+    if (check.isPartOfMultiple && voucher?.lines?.length) {
+      const siblingDocs = checks.filter(c => c.voucherDocId === check.voucherDocId);
+      items = voucher.lines.map((line, idx) => {
+        // Match line to its checkRegister doc: by lineNo (new schema), by checkNumber, or
+        // fall back to the single shared doc (old schema where one doc covers all lines)
+        const matchedDoc =
+          siblingDocs.find(c => c.lineNo === idx + 1) ||
+          siblingDocs.find(c => c.checkNumber === String(line.lineCheckNo || '').trim()) ||
+          (siblingDocs.length === 1 ? siblingDocs[0] : null);
+        const base = matchedDoc || check;
+        return {
+          ...base,
+          checkNumber:    String(line.lineCheckNo || '').trim() || base.checkNumber || '—',
+          checkDate:      line.lineCheckDate || base.checkDate || '',
+          amount:         Number(line.amount) || base.amount || 0,
+          payeeName:      line.contact || base.payeeName || '',
+          lineNo:         idx + 1,
+          id:             matchedDoc?.id ?? null,
+          newStatus:      base.status || check.status,
+          newClearedDate: base.clearedDate  || today(),
+          newVoidedDate:  base.voidedDate   || today(),
+          newVoidReason:  base.voidReason   || '',
+          newStoppedDate: base.stoppedDate  || today(),
+          newStaleDate:   base.staleDate    || today(),
+        };
+      });
+    } else {
+      items = [{
+        ...check,
+        newStatus:      check.status,
+        newClearedDate: check.clearedDate  || today(),
+        newVoidedDate:  check.voidedDate   || today(),
+        newVoidReason:  check.voidReason   || '',
+        newStoppedDate: check.stoppedDate  || today(),
+        newStaleDate:   check.staleDate    || today(),
+      }];
+    }
+    setMarkModal({ referenceId: check.referenceId || '', items });
+  };
+
+  // ── Update check status (with linked voucher + JE side effects) ─────────────
+  // opts.batchClearedIds: Set of check IDs being cleared in the same save batch
+  // opts.silent:          true → skip toast (caller will show one summary toast)
+  const updateStatus = async (form, { batchClearedIds = new Set(), silent = false } = {}) => {
+    if (form.status === 'Voided' && !form.voidReason?.trim()) return alert('Void reason is required.');
     setSaving(true);
     try {
       const patch = { status:form.status, updatedAt:serverTimestamp(), updatedBy:user };
       if (form.status === 'Cleared') patch.clearedDate = form.clearedDate || today();
-      if (form.status === 'Voided')  { patch.voidedDate = today(); patch.voidReason = form.voidReason; }
+      if (form.status === 'Voided')  { patch.voidedDate = form.voidedDate || today(); patch.voidReason = form.voidReason; }
       if (form.status === 'Stopped') patch.stoppedDate = form.stoppedDate || today();
       if (form.status === 'Stale')   patch.staleDate   = form.staleDate   || today();
       await updateDoc(doc(db,'checkRegister',form.id), patch);
 
-      // GAS updateCheckStatus side effects: Cleared→voucher Paid, Voided→voucher Pending
+      // Voucher side effects: Cleared→Paid only when ALL sibling checks are cleared; Voided→Pending
       if (form.voucherDocId) {
-        if (form.status === 'Cleared') await updateDoc(doc(db,'vouchers',form.voucherDocId), { status:'Paid',    updatedAt:serverTimestamp(), updatedBy:user });
-        if (form.status === 'Voided')  await updateDoc(doc(db,'vouchers',form.voucherDocId), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user });
+        if (form.status === 'Cleared') {
+          const siblings     = checks.filter(c => c.voucherDocId === form.voucherDocId && c.id !== form.id);
+          const allCleared   = siblings.every(c => c.status === 'Cleared');
+          if (allCleared) {
+            await updateDoc(doc(db,'vouchers',form.voucherDocId), { status:'Paid', updatedAt:serverTimestamp(), updatedBy:user });
+          }
+        }
+        if (form.status === 'Voided') {
+          await updateDoc(doc(db,'vouchers',form.voucherDocId), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user });
+        }
       }
 
-      setStatusModal(null);
-      showToast(`Check status updated to ${form.status}.`);
+      // Clearing JEs: when check is encashed, finalise the issuance JE then record bank payment
+      if (form.status === 'Cleared') {
+        const clearDate = form.clearedDate || today();
+        const jeAmount  = Number(form.netAmount || form.amount || 0);
+        const bankAcct  = accounts.find(a => a.code === form.bankCode || a.id === form.bankCode);
+
+        // 1. Mark the original “For Clearing” issuance JE as “Cleared” once ALL sibling checks clear
+        if (form.linkedJeId) {
+          const siblings   = checks.filter(c => c.voucherDocId === form.voucherDocId && c.id !== form.id);
+          const allCleared = siblings.every(c => c.status === 'Cleared');
+          if (allCleared) {
+            await updateDoc(doc(db,'journalEntries',form.linkedJeId), {
+              status: 'Cleared', updatedAt: serverTimestamp(), updatedBy: user,
+            });
+          }
+        }
+
+        // 2. Create new “Posted” clearing JE (Dr. PDC Issued / Cr. Bank)
+        if (pdcAccount && bankAcct && jeAmount > 0) {
+          const clearJeId = await nextJournalEntryId(clearDate);
+          await addDoc(collection(db, 'journalEntries'), {
+            jeId: clearJeId, date: clearDate,
+            description: `PDC Cleared — ${form.referenceId || form.checkId} · Check #${form.checkNumber}`,
+            type: 'Check Cleared', reference: form.referenceId || form.checkId || '',
+            sourceDocId: form.voucherDocId || '', sourceDocType: 'voucher',
+            status: 'Posted',
+            lines: [
+              { accountCode: pdcAccount.code, accountName: pdcAccount.name, description: 'Post-dated check cleared', debit: jeAmount, credit: 0 },
+              { accountCode: bankAcct.code,   accountName: bankAcct.name,   description: 'Check encashed — bank payment', debit: 0, credit: jeAmount },
+            ],
+            totalDebit: jeAmount, totalCredit: jeAmount,
+            createdAt: serverTimestamp(), createdBy: user,
+            updatedAt: serverTimestamp(), updatedBy: user,
+          });
+        }
+      }
+
+      if (!silent) showToast(`Check #${form.checkNumber} updated to ${form.status}.`);
     } catch(e) { console.error(e); alert('Update failed: ' + e.message); }
+    setSaving(false);
+  };
+
+  // ── Save mark modal (handles single or multiple checks in one pass) ────────
+  const saveMarkModal = async (items) => {
+    // Filter: must have a doc id, deduplicate shared docs (old-style single-doc for multi-check)
+    const seenIds = new Set();
+    const changed = items.filter(item => {
+      if (!item.id) return false;
+      if (seenIds.has(item.id)) return false;
+      if (item.newStatus === item.status) return false;
+      seenIds.add(item.id);
+      return true;
+    });
+    if (changed.length === 0) { alert('No status changes selected.'); return; }
+    for (const item of changed) {
+      if (item.newStatus === 'Voided' && !item.newVoidReason?.trim())
+        return alert(`Check #${item.checkNumber}: Void reason is required.`);
+    }
+    const batchClearedIds = new Set(changed.filter(i => i.newStatus === 'Cleared').map(i => i.id));
+    setSaving(true);
+    for (const item of changed) {
+      await updateStatus({
+        ...item,
+        status:       item.newStatus,
+        clearedDate:  item.newClearedDate,
+        voidedDate:   item.newVoidedDate,
+        voidReason:   item.newVoidReason,
+        stoppedDate:  item.newStoppedDate,
+        staleDate:    item.newStaleDate,
+      }, { batchClearedIds, silent: true });
+    }
+    setMarkModal(null);
+    showToast(`${changed.length} check${changed.length > 1 ? 's' : ''} updated.`);
     setSaving(false);
   };
 
@@ -570,6 +1037,8 @@ export default function CheckRegistryPage() {
 
   // ══ Tab: Check Register ════════════════════════════════════════════════════
   function RegisterTab() {
+    const menuCheck   = filtered.find(c => c.id === openMenu?.id) || null;
+    const menuVoucher = menuCheck ? vouchers.find(x => x.id === menuCheck.voucherDocId) : null;
     return (
       <div>
         {/* ── Primary KPI Scorecards ─────────────────────────────────────── */}
@@ -588,7 +1057,7 @@ export default function CheckRegistryPage() {
             </div>
             <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Cleared</div>
             <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{countsByStatus['Cleared']||0}</div>
-            {(() => { const pct = checks.length > 0 ? Math.round((countsByStatus['Cleared']||0)/checks.length*100) : 0; return (
+            {(() => { const pct = expandedChecks.length > 0 ? Math.round((countsByStatus['Cleared']||0)/expandedChecks.length*100) : 0; return (
               <div style={{marginTop:10}}><div style={{height:4,background:'rgba(255,255,255,.25)',borderRadius:99,marginBottom:5}}><div style={{height:'100%',width:`${pct}%`,background:'#fff',borderRadius:99}}/></div><div style={{fontSize:11,opacity:.8}}>{pct}% of all checks</div></div>
             ); })()}
           </div>
@@ -639,7 +1108,12 @@ export default function CheckRegistryPage() {
           />
           <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
             <option value="">All Statuses</option>
-            {CHECK_STATUSES.map(s => <option key={s}>{s}</option>)}
+            <optgroup label="Check Status">
+              {CHECK_STATUSES.map(s => <option key={s}>{s}</option>)}
+            </optgroup>
+            <optgroup label="Approval Status">
+              {['Pending','For Verification','Verified','For Approval','Approved','Paid','Rejected','Voided'].map(s => <option key={`v-${s}`} value={`v:${s}`}>{s}</option>)}
+            </optgroup>
           </select>
           <input placeholder="Search check #, payee, reference…" value={search} onChange={e => setSearch(e.target.value)} style={{ minWidth:200 }} />
           <span style={{ display:'flex', gap:4, alignItems:'center', borderLeft:'1px solid #e5e7eb', paddingLeft:8 }}>
@@ -665,49 +1139,116 @@ export default function CheckRegistryPage() {
             {filtered.length} check{filtered.length !== 1 ? 's' : ''} · Outstanding: <strong>{fmt(totalIssued)}</strong>
           </span>
         </div>
+        {selected.size > 0 && (
+          <div className="bulk-bar">
+            <strong style={{ fontSize:12 }}>{selected.size} selected</strong>
+            <button className="btn btn-ghost btn-sm" onClick={() => bulkSubmit(filtered.map(c=>c.id))}>↑ Submit for Approval</button>
+            <button className="btn btn-sm" style={{ background:'#fef2f2', color:'#dc2626', border:'1px solid #fecaca' }} onClick={() => bulkVoid(filtered.map(c=>c.id))}>Void</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setSelected(new Set())}>✕ Clear</button>
+          </div>
+        )}
         {filtered.length === 0 ? <div className="empty">No checks match your filters.</div> : (
           <div style={{ overflowX:'auto' }}>
             <table>
               <thead><tr>
+                <th style={{ width:32 }}>
+                  <input type="checkbox"
+                    checked={filtered.length > 0 && filtered.every(c => selected.has(c.id))}
+                    onChange={() => toggleAll(filtered.map(c => c.id))} />
+                </th>
                 <th>Check No.</th><th>Check ID</th><th>Issue Date</th><th>Bank</th>
                 <th>Payee</th><th style={{ textAlign:'right' }}>Amount</th>
-                <th>Reference</th><th>Status</th><th></th>
+                <th>Reference</th><th>Approval</th><th>Check Status</th><th>Actions</th>
               </tr></thead>
               <tbody>
                 {filtered.map(c => {
-                  const ss = STATUS_STYLES[c.status] || STATUS_STYLES.Issued;
+                  const checkSs   = STATUS_STYLES[c.status] || STATUS_STYLES.Issued;
+                  const voucher   = vouchers.find(v => v.id === c.voucherDocId);
+                  const vStatus   = voucher?.status || 'Pending';
+                  const vSs       = VOUCHER_STATUS_STYLES[vStatus] || VOUCHER_STATUS_STYLES['Pending'];
                   const bk = bankAccounts.find(a => a.code === c.bankCode || a.id === c.bankCode);
                   return (
-                    <tr key={c.id}>
-                      <td style={{ fontFamily:'monospace', fontWeight:700 }}>{c.checkNumber||'—'}</td>
+                    <tr key={c.id} style={{ background: selected.has(c.id) ? '#fff7ed' : undefined }}>
+                      <td><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSel(c.id)} /></td>
+                      <td style={{ fontFamily:'monospace', fontWeight:700 }}>
+                        {c.checkNumber||'—'}
+                        {c.isPartOfMultiple && <span style={{ marginLeft:5, fontSize:9, background:'#dbeafe', color:'#1d4ed8', padding:'1px 5px', borderRadius:4, fontWeight:800, verticalAlign:'middle' }}>M</span>}
+                      </td>
                       <td style={{ fontFamily:'monospace', fontSize:11, color:'#94a3b8' }}>{c.checkId||'—'}</td>
                       <td>{c.issueDate||'—'}</td>
                       <td style={{ fontSize:11, color:'#64748b' }}>{bk ? `${bk.code} — ${bk.name}` : (c.bankCode||'—')}</td>
                       <td style={{ fontWeight:600 }}>{c.payeeName||'—'}</td>
-                      <td style={{ textAlign:'right', fontWeight:700 }}>{fmt(c.amount)}</td>
-                      <td style={{ fontFamily:'monospace', fontSize:11, color:'#64748b' }}>{c.referenceId||'—'}</td>
-                      <td><span className="pill" style={ss}>{c.status||'Issued'}</span></td>
+                      <td style={{ textAlign:'right', fontWeight:700 }}>{fmt(checkDisplayAmt.get(c.id) ?? c.amount)}</td>
+                      <td style={{ fontFamily:'monospace', fontSize:11 }}>
+                        {c.voucherDocId ? (
+                          <button
+                            style={{ background:'none', border:'none', padding:0, cursor:'pointer', color:'#2563eb', fontFamily:'monospace', fontSize:11, fontWeight:700, textDecoration:'underline', textUnderlineOffset:2 }}
+                            onClick={() => {
+                              const v = vouchers.find(x => x.id === c.voucherDocId);
+                              if (v) setCvPdfModal({ voucher: v, relatedChecks: checks.filter(x => x.voucherDocId === v.id) });
+                            }}
+                          >{c.referenceId || '—'}</button>
+                        ) : (
+                          <span style={{ color:'#94a3b8' }}>{c.referenceId || '—'}</span>
+                        )}
+                      </td>
+                      <td><span className="pill" style={vSs}>{vStatus}</span></td>
+                      <td><span className="pill" style={checkSs}>{c.status||'Issued'}</span></td>
                       <td>
-                        <div style={{ display:'flex', gap:4 }}>
-                          {(c.status==='Issued'||c.status==='Stopped') && (
-                            <button className="btn btn-ghost btn-sm" onClick={() => setStatusModal({ ...c })} style={{ borderColor:'#bfdbfe', color:'#1d4ed8' }}>
-                              Update Status
-                            </button>
-                          )}
-                          <button onClick={() => deleteCheck(c.id)} style={{ background:'none', border:'none', color:'#dc2626', cursor:'pointer', fontWeight:900, fontSize:13, padding:'3px 5px' }} title="Delete">✕</button>
-                        </div>
+                        <button
+                          style={{ background:'none', border:'1px solid #e2e8f0', borderRadius:6, cursor:'pointer', padding:'3px 9px', fontSize:17, color:'#64748b', lineHeight:1 }}
+                          onClick={(e) => {
+                            if (openMenu?.id === c.id) { setOpenMenu(null); return; }
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setOpenMenu({ id: c.id, top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                          }}
+                        >⋮</button>
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
               <tfoot><tr>
-                <td colSpan={5} style={{ fontWeight:900 }}>TOTAL (filtered)</td>
-                <td style={{ textAlign:'right' }}>{fmt(filtered.reduce((s,c) => s+(parseFloat(c.amount)||0), 0))}</td>
-                <td colSpan={3}></td>
+                <td colSpan={6} style={{ fontWeight:900 }}>TOTAL (filtered)</td>
+                <td style={{ textAlign:'right' }}>{fmt(filtered.reduce((s,c) => s+(checkDisplayAmt.get(c.id) ?? parseFloat(c.amount) ?? 0), 0))}</td>
+                <td colSpan={4}></td>
               </tr></tfoot>
             </table>
           </div>
+        )}
+        {/* Action menu — fixed-position so it escapes table overflow */}
+        {openMenu && menuCheck && (
+          <>
+            <div style={{ position:'fixed', inset:0, zIndex:9998 }} onClick={() => setOpenMenu(null)} />
+            <div style={{ position:'fixed', top: openMenu.top, right: openMenu.right, zIndex:9999, background:'#fff', border:'1px solid #e2e8f0', borderRadius:10, boxShadow:'0 8px 24px rgba(0,0,0,.12)', minWidth:160, padding:4 }}>
+              {(menuCheck.status === 'Issued' || menuCheck.status === 'Stopped') && (
+                <button style={{ display:'block', width:'100%', textAlign:'left', padding:'8px 12px', fontSize:13, border:'none', background:'none', cursor:'pointer', borderRadius:6, color:'#0f172a', fontWeight:500 }}
+                  onClick={() => { setOpenMenu(null); openMarkModal(menuCheck); }}>
+                  Mark Status
+                </button>
+              )}
+              {menuVoucher?.status === 'Pending' && (
+                <button style={{ display:'block', width:'100%', textAlign:'left', padding:'8px 12px', fontSize:13, border:'none', background:'none', cursor:'pointer', borderRadius:6, color:'#0f172a', fontWeight:500 }}
+                  onClick={() => { setOpenMenu(null); openEditCv(menuCheck); }}>
+                  Edit Voucher
+                </button>
+              )}
+              {menuCheck?.voucherDocId && (
+                <button style={{ display:'block', width:'100%', textAlign:'left', padding:'8px 12px', fontSize:13, border:'none', background:'none', cursor:'pointer', borderRadius:6, color:'#0f172a', fontWeight:500 }}
+                  onClick={() => {
+                    setOpenMenu(null);
+                    const v = vouchers.find(x => x.id === menuCheck.voucherDocId);
+                    if (v) setCvPdfModal({ voucher: v, relatedChecks: checks.filter(c => c.voucherDocId === v.id) });
+                  }}>
+                  Download PDF
+                </button>
+              )}
+              <button style={{ display:'block', width:'100%', textAlign:'left', padding:'8px 12px', fontSize:13, border:'none', background:'none', cursor:'pointer', borderRadius:6, color:'#0f172a', fontWeight:500 }}
+                onClick={() => { setOpenMenu(null); deleteCheck(menuCheck.id); }}>
+                Delete
+              </button>
+            </div>
+          </>
         )}
       </div>
     );
@@ -715,8 +1256,8 @@ export default function CheckRegistryPage() {
 
   // ══ Tab: Analytics & Aging ═════════════════════════════════════════════════
   function AnalyticsTab() {
-    const totalIssuedCount = checks.filter(c => c.status === 'Issued').length;
-    const totalIssuedAmt   = checks.filter(c => c.status === 'Issued').reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+    const totalIssuedCount = expandedChecks.filter(c => c.status === 'Issued').length;
+    const totalIssuedAmt   = expandedChecks.filter(c => c.status === 'Issued').reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
     const agingTotalAmt    = aging['0-30'].a + aging['31-60'].a + aging['61-90'].a + aging['90+'].a;
 
     return (
@@ -821,7 +1362,7 @@ export default function CheckRegistryPage() {
             <tbody>
               {bankAccounts.map(b => {
                 const code = b.code || b.id;
-                const list = checks.filter(c => c.bankCode === code);
+                const list = expandedChecks.filter(c => c.bankCode === code);
                 if (list.length === 0) return null;
                 const out  = list.filter(c => c.status === 'Issued');
                 const outAmt = out.reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
@@ -978,8 +1519,8 @@ export default function CheckRegistryPage() {
         <div className="modal modal-fs">
           <div className="modal-h">
             <div>
-              <strong>New Check Voucher</strong>
-              <div style={{ fontSize:11, color:'#64748b', marginTop:2 }}>Creates a Check Voucher + Check Register entry atomically</div>
+              <strong>{cvModal._edit ? `Edit Check Voucher — ${cvModal._voucherId}` : 'New Check Voucher'}</strong>
+              <div style={{ fontSize:11, color:'#64748b', marginTop:2 }}>{cvModal._edit ? 'Updates voucher, journal entry, and check register amounts' : 'Creates a Check Voucher + Check Register entry atomically'}</div>
             </div>
             <button className="btn btn-ghost btn-sm" onClick={() => setCvModal(null)}>✕</button>
           </div>
@@ -990,17 +1531,24 @@ export default function CheckRegistryPage() {
                 <span>📋 <strong>Active Checkbook</strong></span>
                 <span style={{ color:'#1d4ed8' }}>{bankAccounts.find(a=>a.code===cb.bankCode||a.id===cb.bankCode)?.name||cb.bankCode}</span>
                 <span>Range: <strong>{cb.startingNumber}–{cb.endingNumber}</strong></span>
-                <span>Next: <strong style={{ color:'#f97316' }}>{cb.nextCheckNumber}</strong></span>
+                {(() => {
+                  // Show the effective next: first number >= Firestore next not already in the form
+                  const usedInForm = new Set(
+                    cvLines.map(l => parseInt(l.lineCheckNo || '0') || 0).filter(n => n > 0)
+                  );
+                  let effectiveNext = parseInt(cb.nextCheckNumber) || 1;
+                  while (usedInForm.has(effectiveNext)) effectiveNext++;
+                  const width = String(cb.nextCheckNumber).length;
+                  const display = String(effectiveNext).padStart(width, '0');
+                  return <span>Next: <strong style={{ color:'#f97316' }}>{display}</strong></span>;
+                })()}
                 <button className="btn btn-ghost btn-sm" onClick={() => {
                   if (cvForm.isMultipleChecks) {
+                    // Always assign sequential numbers to all rows from the current next —
+                    // never preserve existing values, which would create cursor jumps and gaps.
                     const width = String(cb.nextCheckNumber).length;
                     let cursor = parseInt(cb.nextCheckNumber) || 0;
                     setCvLines(prev => prev.map(l => {
-                      const existing = l.lineCheckNo ? parseInt(l.lineCheckNo) : NaN;
-                      if (!isNaN(existing)) {
-                        cursor = Math.max(cursor, existing + 1);
-                        return l; // keep manually-entered numbers
-                      }
                       const filled = { ...l, lineCheckNo: String(cursor).padStart(width, '0') };
                       cursor++;
                       return filled;
@@ -1053,7 +1601,14 @@ export default function CheckRegistryPage() {
             </div>
 
             {/* Payment Details */}
-            <div className="sec-title">Payment Details</div>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8 }}>
+              <div className="sec-title" style={{ margin:0 }}>Payment Details</div>
+              <label style={{ display:'flex', alignItems:'center', gap:6, cursor:'pointer', fontSize:12, fontWeight:700, color:'#64748b', userSelect:'none' }}>
+                <input type="checkbox" checked={!!cvForm.inclusive} onChange={e => handleInclusiveToggle(e.target.checked)}
+                  style={{ width:'auto', accentColor:'#f97316', cursor:'pointer' }} />
+                Tax amounts are inclusive
+              </label>
+            </div>
             <table className="lines-tbl" style={{ width:'100%' }}>
               <thead>
                 <tr>
@@ -1095,16 +1650,11 @@ export default function CheckRegistryPage() {
                     {cvForm.isMultipleChecks && <td><input value={l.lineCheckNo} onChange={e => setLine(i,'lineCheckNo',e.target.value)} placeholder="Check #" /></td>}
                     {cvForm.isMultipleChecks && <td><input type="date" value={l.lineCheckDate} onChange={e => setLine(i,'lineCheckDate',e.target.value)} /></td>}
                     <td style={{ minWidth:160 }}>
-                      <select value={l.taxRateId||''} onChange={e => setLine(i,'taxRateId',e.target.value)} style={{ marginBottom:3 }}>
+                      <select value={l.taxRateId||''} onChange={e => setLine(i,'taxRateId',e.target.value)}>
                         <option value="">N/A</option>
                         {taxRates.length > 0 && <optgroup label="— Rates —">{taxRates.map(r => <option key={r.id} value={r.id}>{r.name} ({(r.rate||0).toFixed(2)}%)</option>)}</optgroup>}
                         {taxGroups.length > 0 && <optgroup label="— Groups —">{taxGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</optgroup>}
                       </select>
-                      {l.taxRateId && (
-                        <label style={{ fontSize:10, display:'flex', alignItems:'center', gap:4, cursor:'pointer', marginTop:2 }}>
-                          <input type="checkbox" checked={!!l.inclusive} onChange={e => setLine(i,'inclusive',e.target.checked)} /> Inclusive
-                        </label>
-                      )}
                     </td>
                     <td><input type="number" style={{ textAlign:'right' }} value={l.amount} onChange={e => setLine(i,'amount',e.target.value)} placeholder="0.00" /></td>
                     <td style={{ textAlign:'right', color:'#7c3aed', fontWeight:700, fontSize:12 }}>{l.taxAmt > 0 ? fmtN(l.taxAmt) : '—'}</td>
@@ -1148,66 +1698,108 @@ export default function CheckRegistryPage() {
           </div>
           <div className="modal-f">
             <button className="btn btn-ghost" onClick={() => setCvModal(null)}>Cancel</button>
-            <button className="btn btn-primary" disabled={saving || !cb} onClick={createCheckVoucher}>
-              {saving ? 'Creating…' : 'Create Check Voucher'}
-            </button>
+            {cvModal._edit ? (
+              <button className="btn btn-primary" disabled={saving} onClick={updateCheckVoucher}>
+                {saving ? 'Saving…' : 'Save Changes'}
+              </button>
+            ) : (
+              <button className="btn btn-primary" disabled={saving || !cb} onClick={createCheckVoucher}>
+                {saving ? 'Creating…' : 'Create Check Voucher'}
+              </button>
+            )}
           </div>
         </div>
       </div>
     );
   }
 
-  // ══ Status Update Modal ════════════════════════════════════════════════════
-  function StatusUpdateModal() {
-    if (!statusModal) return null;
-    const [form, setF] = useState({ ...statusModal });
-    const upd = (k, v) => setF(f => ({ ...f, [k]:v }));
-    const next = statusModal.status === 'Issued'
-      ? ['Cleared','Voided','Stopped','Stale']
-      : statusModal.status === 'Stopped'
-      ? ['Cleared','Voided','Stale']
-      : [];
+  // ══ Mark Checks Modal (single or multi-check voucher) ═════════════════════
+  function MarkModal() {
+    if (!markModal) return null;
+    const [items, setItems] = useState(markModal.items);
+    const updItem = (idx, key, val) => setItems(prev => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], [key]: val };
+      return next;
+    });
+    const nextOptions = (st) =>
+      st === 'Issued'  ? ['Cleared','Voided','Stopped','Stale'] :
+      st === 'Stopped' ? ['Cleared','Voided','Stale'] : [];
     return (
-      <div className="backdrop" onClick={e => e.target === e.currentTarget && setStatusModal(null)}>
-        <div className="modal modal-sm">
-          <div className="modal-h"><strong>Update Check Status</strong><button className="btn btn-ghost btn-sm" onClick={() => setStatusModal(null)}>✕</button></div>
-          <div className="modal-b">
-            <div style={{ marginBottom:12, padding:'10px 12px', background:'#f8fafc', borderRadius:10, fontSize:12 }}>
-              <div style={{ fontWeight:700 }}>Check #{statusModal.checkNumber} — {statusModal.payeeName}</div>
-              <div style={{ color:'#64748b' }}>Amount: {fmt(statusModal.amount)} · Current: <strong>{statusModal.status}</strong></div>
-              {statusModal.referenceId && <div style={{ color:'#7c3aed', marginTop:2 }}>Linked Voucher: {statusModal.referenceId}</div>}
+      <div className="backdrop" onClick={e => e.target === e.currentTarget && setMarkModal(null)}>
+        <div className="modal" style={{ maxWidth:660 }}>
+          <div className="modal-h">
+            <div>
+              <strong>Mark Check Status</strong>
+              {markModal.referenceId && <span style={{ marginLeft:8, fontSize:12, color:'#7c3aed', fontWeight:600 }}>{markModal.referenceId}</span>}
             </div>
-            <div className="field" style={{ marginBottom:12 }}>
-              <label>New Status *</label>
-              <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-                {next.map(s => {
-                  const ss = STATUS_STYLES[s];
-                  return (
-                    <button key={s} className="btn btn-sm"
-                      style={{ background:form.status===s?ss.background:'#f8fafc', borderColor:form.status===s?ss.borderColor:'#e2e8f0', color:form.status===s?ss.color:'#64748b', border:'1px solid' }}
-                      onClick={() => upd('status', s)}>{s}</button>
-                  );
-                })}
-              </div>
-            </div>
-            {form.status==='Cleared' && <div className="field" style={{ marginBottom:10 }}><label>Cleared Date *</label><input type="date" value={form.clearedDate||today()} onChange={e=>upd('clearedDate',e.target.value)} /></div>}
-            {form.status==='Voided'  && (
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 2fr', gap:10, marginBottom:10 }}>
-                <div className="field"><label>Voided Date</label><input type="date" value={form.voidedDate||today()} onChange={e=>upd('voidedDate',e.target.value)} /></div>
-                <div className="field"><label>Void Reason *</label><input value={form.voidReason||''} onChange={e=>upd('voidReason',e.target.value)} placeholder="Required" /></div>
-              </div>
-            )}
-            {form.status==='Stopped' && <div className="field" style={{ marginBottom:10 }}><label>Stop Payment Date</label><input type="date" value={form.stoppedDate||today()} onChange={e=>upd('stoppedDate',e.target.value)} /></div>}
-            {form.status==='Stale'   && <div className="field" style={{ marginBottom:10 }}><label>Stale Date</label><input type="date" value={form.staleDate||today()} onChange={e=>upd('staleDate',e.target.value)} /></div>}
-            {(form.status==='Cleared'||form.status==='Voided') && statusModal.referenceId && (
-              <div style={{ fontSize:11, color:'#64748b', background:'#f0f9ff', border:'1px solid #bae6fd', borderRadius:8, padding:'8px 10px', marginTop:8 }}>
-                {form.status==='Cleared' ? '✓ Linked voucher will be automatically marked as Paid.' : '↩ Linked voucher will be reverted to Pending.'}
-              </div>
-            )}
+            <button className="btn btn-ghost btn-sm" onClick={() => setMarkModal(null)}>✕</button>
+          </div>
+          <div className="modal-b" style={{ display:'flex', flexDirection:'column', gap:10, maxHeight:420, overflowY:'auto' }}>
+            {items.map((item, idx) => {
+              const opts    = nextOptions(item.status);
+              const canMark = opts.length > 0 && !!item.id;
+              const ss      = STATUS_STYLES[item.status] || STATUS_STYLES.Issued;
+              return (
+                <div key={idx} style={{ border:'1px solid #e2e8f0', borderRadius:10, padding:12, background: canMark ? '#fff' : '#f8fafc' }}>
+                  {/* Check summary row */}
+                  <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom: canMark ? 10 : 0, flexWrap:'wrap' }}>
+                    <span style={{ fontFamily:'monospace', fontWeight:800, fontSize:13 }}>#{item.checkNumber}</span>
+                    <span style={{ color:'#94a3b8', fontSize:12 }}>{item.checkDate || item.issueDate}</span>
+                    <span style={{ fontWeight:700 }}>{fmt(item.amount)}</span>
+                    <span style={{ flex:1, color:'#475569', fontSize:12 }}>{item.payeeName}</span>
+                    <span className="pill" style={ss}>{item.status}</span>
+                  </div>
+                  {canMark && (
+                    <>
+                      {/* Status toggle buttons */}
+                      <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:8 }}>
+                        {opts.map(s => {
+                          const bss = STATUS_STYLES[s];
+                          return (
+                            <button key={s} className="btn btn-sm"
+                              style={{ background: item.newStatus===s ? bss.background : '#f8fafc', borderColor: item.newStatus===s ? bss.borderColor : '#e2e8f0', color: item.newStatus===s ? bss.color : '#64748b', border:'1px solid' }}
+                              onClick={() => updItem(idx, 'newStatus', s)}>{s}</button>
+                          );
+                        })}
+                      </div>
+                      {/* Context fields for chosen status */}
+                      {item.newStatus === 'Cleared' && (
+                        <div className="field" style={{ marginBottom:0 }}>
+                          <label>Cleared Date</label>
+                          <input type="date" value={item.newClearedDate} onChange={e => updItem(idx,'newClearedDate',e.target.value)} />
+                        </div>
+                      )}
+                      {item.newStatus === 'Voided' && (
+                        <div style={{ display:'grid', gridTemplateColumns:'1fr 2fr', gap:10 }}>
+                          <div className="field" style={{ marginBottom:0 }}><label>Voided Date</label><input type="date" value={item.newVoidedDate} onChange={e => updItem(idx,'newVoidedDate',e.target.value)} /></div>
+                          <div className="field" style={{ marginBottom:0 }}><label>Void Reason *</label><input value={item.newVoidReason} onChange={e => updItem(idx,'newVoidReason',e.target.value)} placeholder="Required" /></div>
+                        </div>
+                      )}
+                      {item.newStatus === 'Stopped' && (
+                        <div className="field" style={{ marginBottom:0 }}><label>Stop Date</label><input type="date" value={item.newStoppedDate} onChange={e => updItem(idx,'newStoppedDate',e.target.value)} /></div>
+                      )}
+                      {item.newStatus === 'Stale' && (
+                        <div className="field" style={{ marginBottom:0 }}><label>Stale Date</label><input type="date" value={item.newStaleDate} onChange={e => updItem(idx,'newStaleDate',e.target.value)} /></div>
+                      )}
+                      {/* Voucher note for Cleared / Voided */}
+                      {(item.newStatus === 'Cleared' || item.newStatus === 'Voided') && item.referenceId && (
+                        <div style={{ fontSize:11, color:'#64748b', background:'#f0f9ff', border:'1px solid #bae6fd', borderRadius:8, padding:'6px 10px', marginTop:8 }}>
+                          {item.newStatus === 'Cleared' ? '✓ Linked voucher will be marked Paid when all checks clear.' : '↩ Linked voucher will be reverted to Pending.'}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {!canMark && <div style={{ fontSize:11, color:'#94a3b8' }}>No further status changes available.</div>}
+                </div>
+              );
+            })}
           </div>
           <div className="modal-f">
-            <button className="btn btn-ghost" onClick={() => setStatusModal(null)}>Cancel</button>
-            <button className="btn btn-primary" disabled={saving} onClick={() => updateStatus(form)}>{saving ? 'Saving…' : 'Update Status'}</button>
+            <button className="btn btn-ghost" onClick={() => setMarkModal(null)}>Cancel</button>
+            <button className="btn btn-primary" disabled={saving} onClick={() => saveMarkModal(items)}>
+              {saving ? 'Saving…' : `Update Check${items.length > 1 ? 's' : ''}`}
+            </button>
           </div>
         </div>
       </div>
@@ -1221,7 +1813,7 @@ export default function CheckRegistryPage() {
     const initChecksCount = cbModal?.endingNumber && cbModal?.startingNumber
       ? String(parseInt(cbModal.endingNumber) - parseInt(cbModal.startingNumber) + 1)
       : '';
-    const [form, setF] = useState({ bankCode:'', checkbookType:'Loose', startingNumber:'', endingNumber:'', checksCount:'', nextCheckNumber:'', isActive:true, notes:'', checksCount: initChecksCount, ...cbModal });
+    const [form, setF] = useState({ bankCode:'', checkbookType:'Loose', startingNumber:'', endingNumber:'', nextCheckNumber:'', isActive:true, notes:'', checksCount: initChecksCount, ...cbModal });
     const upd = (k, v) => setF(f => ({ ...f, [k]:v }));
     return (
       <div className="backdrop" onClick={e => e.target === e.currentTarget && setCbModal(null)}>
@@ -1294,9 +1886,17 @@ export default function CheckRegistryPage() {
         {activeTab === 'analytics'  && <AnalyticsTab />}
         {activeTab === 'checkbooks' && <CheckbooksTab />}
       </div>
-      {cvModal     !== null && <CheckVoucherModal />}
+      {CheckVoucherModal()}
+      {cvPdfModal && (
+        <CheckVoucherPdfModal
+          voucher={cvPdfModal.voucher}
+          relatedChecks={cvPdfModal.relatedChecks}
+          bankAccounts={bankAccounts}
+          onClose={() => setCvPdfModal(null)}
+        />
+      )}
       {cbModal     !== null && <CheckbookModal />}
-      {statusModal !== null && <StatusUpdateModal />}
+      {markModal   !== null && <MarkModal />}
       {confirmModal && (
         <div className="backdrop" onClick={() => setConfirmModal(null)}>
           <div style={{ width:'min(400px,98vw)', background:'#fff', borderRadius:16, overflow:'hidden', boxShadow:'0 24px 64px rgba(0,0,0,.25)' }} onClick={e => e.stopPropagation()}>

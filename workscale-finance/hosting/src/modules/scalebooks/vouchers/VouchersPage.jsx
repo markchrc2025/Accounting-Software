@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
   serverTimestamp, getDoc, getDocs
@@ -55,6 +55,8 @@ const CSS = `
   .btn-dark    { background:#0b1220; color:#fff; }
   .btn-ghost   { background:#f1f5f9; color:#0b1220; }
   .btn-ghost:hover { background:#e2e8f0; }
+  .km-item     { display:block; width:100%; background:none; border:0; text-align:left; padding:9px 16px; font-size:13px; font-family:inherit; cursor:pointer; color:#0b1220; white-space:nowrap; }
+  .km-item:hover { background:#f1f5f9; }
   .btn-danger  { background:#ef4444; color:#fff; }
   .btn-sm      { padding:6px 12px; font-size:12px; }
   .btn-xs      { padding:4px 8px; font-size:11px; border-radius:8px; }
@@ -134,6 +136,24 @@ export default function VouchersPage() {
   const [showModal,    setShowModal]   = useState(false);
   const [viewModal,    setViewModal]   = useState(null);
   const [pdfModal,     setPdfModal]    = useState(null);
+  const [openMenuId,   setOpenMenuId]  = useState(null);
+  const [menuPos,      setMenuPos]     = useState({ top:0, right:0 });
+  const menuRef = useRef(null);
+
+  // Close kebab menu on outside click or scroll
+  useEffect(() => {
+    if (!openMenuId) return;
+    const close = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setOpenMenuId(null);
+    };
+    const closeScroll = () => setOpenMenuId(null);
+    document.addEventListener('mousedown', close);
+    document.addEventListener('scroll', closeScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('scroll', closeScroll, true);
+    };
+  }, [openMenuId]);
 
   const [newAcctModal, setNewAcctModal] = useState(null);
 
@@ -652,12 +672,46 @@ export default function VouchersPage() {
                     <td style={{maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{v.contactSummary||'—'}</td>
                     <td style={{textAlign:'right',fontWeight:700}}>{fmt(v.totalAmount)}</td>
                     <td><StatusPill status={v.status} /></td>
-                    <td style={{textAlign:'center'}}>
-                      <div style={{display:'flex',gap:4,justifyContent:'center'}}>
-                        <button className="btn btn-ghost btn-xs" onClick={()=>setViewModal(v)}>View</button>
-                        {canEdit(v) && <button className="btn btn-ghost btn-xs" onClick={()=>openEdit(v)}>Edit</button>}
-                        <button className="btn btn-ghost btn-xs" onClick={()=>duplicate(v)} title="Duplicate">📋</button>
-                        {v.status === 'Draft' && <button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>deleteVoucher(v)}>🗑</button>}
+                    <td style={{textAlign:'center'}} onClick={e=>e.stopPropagation()}>
+                      <div style={{display:'inline-block'}} ref={openMenuId===v.id ? menuRef : null}>
+                        <button
+                          className="btn btn-ghost btn-xs"
+                          style={{fontWeight:900,letterSpacing:2,padding:'4px 10px',fontSize:15,lineHeight:1}}
+                          onClick={(e)=>{
+                            if (openMenuId===v.id) { setOpenMenuId(null); return; }
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                            setOpenMenuId(v.id);
+                          }}
+                          title="Actions"
+                        >···</button>
+                        {openMenuId === v.id && (
+                          <div style={{
+                            position:'fixed',right:menuPos.right,top:menuPos.top,zIndex:9999,
+                            background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,
+                            boxShadow:'0 8px 24px rgba(0,0,0,.12)',minWidth:140,padding:'4px 0',
+                          }}>
+                            <button className="km-item" onClick={()=>{setViewModal(v);setOpenMenuId(null);}}>
+                              👁 View
+                            </button>
+                            <button className="km-item" onClick={()=>{setPdfModal(v);setOpenMenuId(null);}}>
+                              📄 Download PDF
+                            </button>
+                            {canEdit(v) && (
+                              <button className="km-item" onClick={()=>{openEdit(v);setOpenMenuId(null);}}>
+                                ✏️ Edit
+                              </button>
+                            )}
+                            <button className="km-item" onClick={()=>{duplicate(v);setOpenMenuId(null);}}>
+                              📋 Duplicate
+                            </button>
+                            {v.status === 'Draft' && (
+                              <button className="km-item" style={{color:'#dc2626'}} onClick={()=>{deleteVoucher(v);setOpenMenuId(null);}}>
+                                🗑 Delete
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>

@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
-import { getDoc, doc } from 'firebase/firestore';
+import { useState, useEffect } from 'react';
+import { getDoc, doc, getDocs, collection, query, where } from 'firebase/firestore';
 import { db } from '../../../firebase.js';
 import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
 
 const TYPE_LABELS = {
   PAYMENT:   'Payment Voucher',
@@ -24,149 +23,6 @@ function fmtN(n) {
   return new Intl.NumberFormat('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
 }
 
-// ── (buildPrintHtml removed — using html2canvas + jsPDF instead) ─────────
-function _unused({ voucher, jeLines, profile }) {
-  const typeLabel    = TYPE_LABELS[voucher.voucherType] || voucher.voucherType || 'Payment Voucher';
-  const companyName  = profile.companyName || 'Workscale Resources Inc.';
-  const logoUrl      = profile.logoUrl || '';
-  const totalDebit   = jeLines.reduce((s, l) => s + (Number(l.debit)  || 0), 0);
-  const totalCredit  = jeLines.reduce((s, l) => s + (Number(l.credit) || 0), 0);
-
-  const paymentRows = (voucher.lines || []).map(l => `
-    <tr>
-      <td>${l.contact || '—'}</td>
-      <td>${l.description || '—'}</td>
-      <td class="amt">&#8369;&nbsp;${fmtN(l.amount)}</td>
-    </tr>`).join('');
-
-  const jeRows = jeLines.map(l => `
-    <tr>
-      <td style="padding-left:${l.credit > 0 ? '28px' : '8px'}">${l.accountName || l.accountCode || '—'}</td>
-      <td class="amt">${l.debit  > 0 ? '&#8369;&nbsp;' + fmtN(l.debit)  : '-'}</td>
-      <td class="amt">${l.credit > 0 ? '&#8369;&nbsp;' + fmtN(l.credit) : '-'}</td>
-    </tr>`).join('');
-
-  const logoHtml = logoUrl
-    ? `<img src="${logoUrl}" style="width:60px;height:60px;object-fit:contain;border-radius:6px" alt="Logo" />`
-    : `<div style="width:60px;height:60px;background:#f97316;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:22px;color:#fff;border-radius:8px">W</div>`;
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>${voucher.voucherId || 'Voucher'}</title>
-  <style>
-    * { box-sizing:border-box; margin:0; padding:0; }
-    body { font-family:Arial,sans-serif; font-size:11px; color:#000; padding:32px 48px; }
-    .no-print { text-align:center; margin-bottom:20px; }
-    .hdr { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; }
-    .hdr-left { display:flex; align-items:center; gap:14px; }
-    .company-name { font-size:13px; font-weight:900; }
-    .doc-title { font-size:14px; font-weight:900; text-decoration:underline; text-transform:uppercase; letter-spacing:.06em; margin-top:6px; }
-    .hdr-right { text-align:right; font-size:11px; line-height:2; }
-    .sec-head { font-size:11px; font-weight:900; text-transform:uppercase; letter-spacing:.06em; margin:18px 0 6px; }
-    table { width:100%; border-collapse:collapse; }
-    th { font-size:10px; font-weight:900; text-transform:uppercase; background:#f0f0f0; border:1px solid #ccc; padding:6px 8px; text-align:left; }
-    td { border:1px solid #ccc; padding:6px 8px; font-size:11px; vertical-align:top; }
-    .amt { text-align:right; white-space:nowrap; }
-    .total-row td { font-weight:900; background:#f8f8f8; }
-    .je-total td { font-weight:900; background:#f0f0f0; }
-    .sig-block { display:flex; justify-content:space-around; margin-top:44px; }
-    .sig-col { text-align:center; min-width:120px; }
-    .sig-line { border-top:1px solid #000; margin-top:32px; margin-bottom:5px; }
-    .sig-name { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:.03em; }
-    .sig-label { font-size:9px; color:#555; margin-top:2px; }
-    @media print {
-      .no-print { display:none !important; }
-      body { padding:20px 32px; }
-    }
-  </style>
-</head>
-<body>
-  <div class="no-print">
-    <button onclick="window.print()" style="padding:9px 22px;font-size:13px;font-weight:700;background:#f97316;color:#fff;border:0;border-radius:8px;cursor:pointer">
-      🖨&nbsp; Print / Save as PDF
-    </button>
-  </div>
-
-  <div class="hdr">
-    <div class="hdr-left">
-      ${logoHtml}
-      <div>
-        <div class="company-name">${companyName}</div>
-        <div class="doc-title">${typeLabel}</div>
-      </div>
-    </div>
-    <div class="hdr-right">
-      <div><strong>Control No:</strong> ${voucher.voucherId || '—'}</div>
-      <div><strong>Date:</strong> ${fmtDate(voucher.preparationDate)}</div>
-      ${voucher.purposeCategory ? `<div><strong>Purpose:</strong> ${voucher.purposeCategory}</div>` : ''}
-    </div>
-  </div>
-
-  <div class="sec-head">Payment Details</div>
-  <table>
-    <thead>
-      <tr>
-        <th style="width:25%">Contact</th>
-        <th>Description</th>
-        <th class="amt" style="width:22%">Amount to Pay</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${paymentRows || '<tr><td colspan="3" style="text-align:center;color:#888;padding:10px">No lines recorded</td></tr>'}
-      <tr class="total-row">
-        <td colspan="2" style="text-align:right;font-weight:900">Grand Total</td>
-        <td class="amt">&#8369;&nbsp;${fmtN(voucher.totalAmount)}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="sec-head">Journal Entry</div>
-  <table>
-    <thead>
-      <tr>
-        <th>COA</th>
-        <th class="amt" style="width:22%">Debit</th>
-        <th class="amt" style="width:22%">Credit</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${jeRows || '<tr><td colspan="3" style="text-align:center;color:#888;padding:10px">No journal entry linked</td></tr>'}
-      <tr class="je-total">
-        <td style="text-align:right;font-weight:900">Total Debit / Credit</td>
-        <td class="amt">&#8369;&nbsp;${fmtN(totalDebit)}</td>
-        <td class="amt">&#8369;&nbsp;${fmtN(totalCredit)}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="sig-block">
-    <div class="sig-col">
-      <div class="sig-line"></div>
-      <div class="sig-name">${voucher.createdBy  || '&nbsp;'}</div>
-      <div class="sig-label">Prepared by</div>
-    </div>
-    <div class="sig-col">
-      <div class="sig-line"></div>
-      <div class="sig-name">${voucher.reviewedBy || '&nbsp;'}</div>
-      <div class="sig-label">Reviewed by</div>
-    </div>
-    <div class="sig-col">
-      <div class="sig-line"></div>
-      <div class="sig-name">${voucher.approvedBy || '&nbsp;'}</div>
-      <div class="sig-label">Approved by</div>
-    </div>
-    <div class="sig-col">
-      <div class="sig-line"></div>
-      <div class="sig-name">${voucher.notedBy || profile.notedBy || '&nbsp;'}</div>
-      <div class="sig-label">Noted by</div>
-    </div>
-  </div>
-</body>
-</html>`;
-}
-
 // ── Modal & paper styles ──────────────────────────────────────────────────
 const MODAL_CSS = `
   .vpdf-backdrop  { position:fixed; inset:0; background:rgba(15,23,42,.65); display:flex; align-items:center; justify-content:center; z-index:300; padding:16px; }
@@ -174,27 +30,24 @@ const MODAL_CSS = `
   .vpdf-hdr       { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1px solid #e5e7eb; background:#f8fafc; flex-shrink:0; }
   .vpdf-hdr strong{ font-size:14px; font-weight:900; color:#0b1220; }
   .vpdf-body      { flex:1; overflow-y:auto; background:#9ca3af; padding:20px; display:flex; justify-content:center; }
-  /* A4: 595pt wide × 842pt tall at 72dpi — exact canvas capture target */
-  .vpdf-paper     { background:#fff; width:595px; min-height:842px; padding:40px 52px; box-shadow:0 2px 20px rgba(0,0,0,.2); font-family:Arial,Helvetica,sans-serif; font-size:11px; color:#000; flex-shrink:0; box-sizing:border-box; }
-  .vpdf-doc-hdr   { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:22px; }
-  .vpdf-doc-left  { display:flex; align-items:center; gap:12px; }
-  .vpdf-logo      { width:52px; height:52px; object-fit:contain; border-radius:6px; }
-  .vpdf-logo-ph   { width:52px; height:52px; background:#f97316; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:19px; color:#fff; border-radius:8px; flex-shrink:0; }
-  .vpdf-co-name   { font-size:11px; font-weight:900; color:#000; }
-  .vpdf-doc-title { font-size:12px; font-weight:900; text-decoration:underline; text-transform:uppercase; letter-spacing:.07em; margin-top:5px; }
-  .vpdf-doc-right { text-align:right; font-size:10.5px; line-height:1.9; }
-  .vpdf-sec       { font-size:10px; font-weight:900; text-transform:uppercase; letter-spacing:.07em; margin:16px 0 6px; color:#000; }
-  .vpdf-tbl       { width:100%; border-collapse:collapse; margin-bottom:6px; }
-  .vpdf-tbl th    { font-size:9.5px; font-weight:900; text-transform:uppercase; background:#eeeeee; border:1px solid #bbb; padding:5px 7px; text-align:left; letter-spacing:.04em; }
-  .vpdf-tbl td    { border:1px solid #bbb; padding:5px 7px; font-size:10.5px; vertical-align:top; }
+  /* A4 — height is dynamic to fit content (always 1 page) */
+  /* NOTE: 1 CSS px = 1pt in the PDF output (html2canvas scale:2 + jsPDF A4 mapping) */
+  .vpdf-paper     { background:#fff; width:595px; min-height:841px; padding:28px 36px; box-shadow:0 2px 20px rgba(0,0,0,.2); font-family:"Courier New",Courier,monospace; font-size:11px; color:#000; flex-shrink:0; box-sizing:border-box; }
+  .vpdf-logo      { display:block; max-height:40px; max-width:150px; object-fit:contain; margin-bottom:3px; }
+  .vpdf-co-name   { font-weight:bold; font-size:9px; }
+  .vpdf-doc-title { font-weight:bold; text-decoration:underline; text-transform:uppercase; }
+  .vpdf-sec       { font-weight:bold; text-transform:uppercase; margin:12px 0 5px; border-bottom:1px dashed #000; padding-bottom:2px; }
+  .vpdf-tbl       { width:100%; border-collapse:collapse; margin-bottom:12px; border:1px solid #000; }
+  .vpdf-tbl th    { font-weight:bold; text-transform:uppercase; text-align:center; border:1px solid #000; border-bottom:2px solid #000; padding:4px 6px; background:#fff; color:#000; }
+  .vpdf-tbl td    { border:1px solid #000; padding:4px 6px; vertical-align:top; background:#fff; color:#000; }
   .vpdf-tbl .amt  { text-align:right; white-space:nowrap; }
-  .vpdf-tbl .tr-total td  { font-weight:900; background:#f2f2f2; }
-  .vpdf-tbl .tr-je-tot td { font-weight:900; background:#eeeeee; }
-  .vpdf-sigs      { display:flex; justify-content:space-around; margin-top:40px; }
-  .vpdf-sig-col   { text-align:center; min-width:100px; }
-  .vpdf-sig-line  { border-top:1px solid #000; margin-top:28px; margin-bottom:5px; }
-  .vpdf-sig-name  { font-size:9.5px; font-weight:900; text-transform:uppercase; letter-spacing:.03em; }
-  .vpdf-sig-lbl   { font-size:9px; color:#555; margin-top:2px; }
+  .vpdf-tbl .tr-total td  { font-weight:bold; border-top:2px solid #000; }
+  .vpdf-tbl .tr-je-tot td { font-weight:bold; border-top:2px solid #000; }
+  .vpdf-sigs      { width:100%; border-collapse:collapse; table-layout:fixed; margin-top:24px; }
+  .vpdf-sigs td   { border:none; padding-right:12px; vertical-align:top; }
+  .vpdf-sig-lbl   { font-weight:bold; margin-bottom:10px; text-align:left; }
+  .vpdf-sig-img   { height:40px; }
+  .vpdf-sig-line  { border-top:1px solid #000; padding-top:3px; font-weight:bold; text-transform:uppercase; text-align:center; }
   .vpdf-btn       { border:0; border-radius:10px; padding:9px 16px; font-weight:700; cursor:pointer; font-size:13px; font-family:inherit; transition:opacity .15s; display:inline-flex; align-items:center; gap:6px; }
   .vpdf-btn:disabled { opacity:.55; cursor:not-allowed; }
   .vpdf-btn-dl    { background:#f97316; color:#fff; }
@@ -206,57 +59,276 @@ const MODAL_CSS = `
 
 // ── Component ─────────────────────────────────────────────────────────────
 export default function VoucherPdfModal({ voucher, onClose }) {
-  const [jeLines,    setJeLines]    = useState([]);
-  const [profile,    setProfile]    = useState({});
-  const [loading,    setLoading]    = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const paperRef = useRef(null);
+  const [jeLines,        setJeLines]        = useState([]);
+  const [profile,        setProfile]        = useState({});
+  const [preparedByName, setPreparedByName] = useState('');
+  const [reviewedByName, setReviewedByName] = useState('');
+  const [approvedByName, setApprovedByName] = useState('');
+  const [loading,        setLoading]        = useState(true);
+  const [generating,     setGenerating]     = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const [profSnap, jeSnap] = await Promise.all([
+      const creatorEmail = voucher.createdBy || '__none__';
+      const [profSnap, jeSnap, userSnap, routingSnap] = await Promise.all([
         getDoc(doc(db, 'settings', 'profile')),
         voucher.linkedJeId
           ? getDoc(doc(db, 'journalEntries', voucher.linkedJeId))
           : Promise.resolve(null),
+        getDocs(query(collection(db, 'appUsers'), where('email', '==', creatorEmail))),
+        getDoc(doc(db, 'settings', 'approvalRouting')),
       ]);
       if (cancelled) return;
-      setProfile(profSnap.exists() ? profSnap.data() : {});
+      const profData = profSnap.exists() ? profSnap.data() : {};
+      setProfile(profData);
       setJeLines(jeSnap?.exists() ? (jeSnap.data().lines || []) : []);
+
+      const appUser = userSnap?.docs?.[0]?.data();
+      setPreparedByName(appUser?.fullName || appUser?.displayName || voucher.createdBy || '');
+
+      // Resolve verifier & approver from the routing rule for this maker
+      const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+      const route  = routes.find(r => r.documentType === 'Vouchers' && r.makerEmail === creatorEmail);
+      const verifierEmail = route?.verifierEmail || '';
+      const approverEmail = route?.approverEmail || '';
+
+      const [verSnap, apprSnap] = await Promise.all([
+        verifierEmail ? getDocs(query(collection(db, 'appUsers'), where('email', '==', verifierEmail))) : Promise.resolve(null),
+        approverEmail ? getDocs(query(collection(db, 'appUsers'), where('email', '==', approverEmail))) : Promise.resolve(null),
+      ]);
+      if (cancelled) return;
+      const verUser  = verSnap?.docs?.[0]?.data();
+      const apprUser = apprSnap?.docs?.[0]?.data();
+      setReviewedByName(verUser?.fullName  || verUser?.displayName  || verifierEmail  || '');
+      setApprovedByName(apprUser?.fullName || apprUser?.displayName || approverEmail || '');
       setLoading(false);
     }
     load();
     return () => { cancelled = true; };
-  }, [voucher.id, voucher.linkedJeId]);
+  }, [voucher.id, voucher.linkedJeId, voucher.createdBy]);
 
+  // ── Programmatic jsPDF generation (vector text + lines, no screenshot) ─────
   const handleDownload = async () => {
-    if (!paperRef.current) return;
     setGenerating(true);
     try {
-      const canvas = await html2canvas(paperRef.current, {
-        scale: 2,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        logging: false,
-      });
-      const pdf   = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      const pdfW  = pdf.internal.pageSize.getWidth();
-      const pdfH  = pdf.internal.pageSize.getHeight();
-      const ratio = pdfW / canvas.width;
-      const imgH  = canvas.height * ratio;
-      const img   = canvas.toDataURL('image/jpeg', 0.97);
-      // Multi-page support
-      let remaining = imgH;
-      let yOffset   = 0;
-      pdf.addImage(img, 'JPEG', 0, yOffset, pdfW, imgH);
-      remaining -= pdfH;
-      while (remaining > 0) {
-        yOffset -= pdfH;
-        pdf.addPage();
-        pdf.addImage(img, 'JPEG', 0, yOffset, pdfW, imgH);
-        remaining -= pdfH;
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+
+      // ── Layout constants ────────────────────────────────────────────────
+      const PW = 210, PH = 297;
+      const ML = 15, MT = 14;
+      const CW = PW - ML * 2;  // 180 mm content width
+
+      // ── Font helpers ─────────────────────────────────────────────────────
+      const reg  = (sz = 9)  => { pdf.setFont('courier', 'normal'); pdf.setFontSize(sz); };
+      const bold = (sz = 9)  => { pdf.setFont('courier', 'bold');   pdf.setFontSize(sz); };
+
+      // ── Line/shape helpers ────────────────────────────────────────────────
+      const hline = (y, lw = 0.2) => {
+        pdf.setLineWidth(lw);
+        pdf.line(ML, y, ML + CW, y);
+      };
+      const dashLine = (y) => {
+        pdf.setLineWidth(0.15);
+        pdf.setLineDashPattern([0.8, 0.8], 0);
+        pdf.line(ML, y, ML + CW, y);
+        pdf.setLineDashPattern([], 0);
+      };
+      // Draw inner vertical dividers for a row (skip last column = outer border)
+      const vlines = (y0, h, cols) => {
+        let x = ML;
+        cols.forEach((w, i) => {
+          x += w;
+          if (i < cols.length - 1) { pdf.setLineWidth(0.15); pdf.line(x, y0, x, y0 + h); }
+        });
+      };
+      // New page guard
+      let y = MT;
+      const need = (h) => {
+        if (y + h > PH - 15) { pdf.addPage(); y = MT; }
+      };
+
+      // ── HEADER ────────────────────────────────────────────────────────────
+      // Logo (left)
+      let logoBottomY = y;
+      if (profile.logoBase64) {
+        const fmt = (profile.logoBase64.match(/^data:image\/(\w+);/) || [])[1]?.toUpperCase() || 'PNG';
+        const imgEl = new Image();
+        await new Promise(r => { imgEl.onload = r; imgEl.onerror = r; imgEl.src = profile.logoBase64; });
+        const MAX_W = 38, MAX_H = 13;
+        const asp = (imgEl.naturalWidth || 1) / (imgEl.naturalHeight || 1);
+        const imgW = asp > MAX_W / MAX_H ? MAX_W : MAX_H * asp;
+        const imgH = asp > MAX_W / MAX_H ? MAX_W / asp : MAX_H;
+        pdf.addImage(profile.logoBase64, fmt, ML, y, imgW, imgH, '', 'FAST');
+        logoBottomY = y + imgH + 2;
       }
+      reg(7.5);
+      pdf.text(profile.companyName || 'Workscale Resources Inc.', ML, logoBottomY + 3.5);
+
+      // Document title (centred, bold, underlined)
+      const typeStr = (TYPE_LABELS[voucher.voucherType] || voucher.voucherType || 'Payment Voucher').toUpperCase();
+      bold(12);
+      pdf.text(typeStr, PW / 2, y + 8, { align: 'center' });
+      const titleW = pdf.getTextWidth(typeStr);
+      pdf.setLineWidth(0.35);
+      pdf.line(PW / 2 - titleW / 2, y + 9.3, PW / 2 + titleW / 2, y + 9.3);
+
+      // Control info (right-aligned)
+      reg(8.5);
+      const infoLines = [
+        `Control No: ${voucher.voucherId || '\u2014'}`,
+        `Date: ${fmtDate(voucher.preparationDate)}`,
+        ...(voucher.purposeCategory ? [`Purpose: ${voucher.purposeCategory}`] : []),
+      ];
+      infoLines.forEach((ln, i) => pdf.text(ln, ML + CW, y + 3.5 + i * 4.2, { align: 'right' }));
+
+      y += 22;
+      hline(y, 0.5);
+      y += 6;
+
+      // ── PAYMENT DETAILS TABLE ────────────────────────────────────────────
+      bold(8.5);
+      pdf.text('PAYMENT DETAILS', ML, y);
+      y += 2.5; dashLine(y); y += 4;
+
+      const C1 = 45, C2 = 96, C3 = 39;  // Contact | Desc | Amount
+      const PAY_COLS = [C1, C2, C3];
+      const ROW = 7, PAD = 2;
+
+      // Header row
+      need(ROW);
+      pdf.setLineWidth(0.15);
+      pdf.rect(ML, y, CW, ROW, 'S');
+      vlines(y, ROW, PAY_COLS);
+      pdf.setLineWidth(0.35); hline(y + ROW, 0.35);
+      bold(8);
+      pdf.text('CONTACT',       ML + C1 / 2,           y + 4.5, { align: 'center' });
+      pdf.text('DESCRIPTION',   ML + C1 + C2 / 2,      y + 4.5, { align: 'center' });
+      pdf.text('AMOUNT TO PAY', ML + C1 + C2 + C3 / 2, y + 4.5, { align: 'center' });
+      y += ROW;
+
+      // Data rows
+      reg(9);
+      const payLines = voucher.lines || [];
+      if (payLines.length === 0) {
+        need(ROW);
+        pdf.setLineWidth(0.15);
+        pdf.rect(ML, y, CW, ROW, 'S'); vlines(y, ROW, PAY_COLS);
+        pdf.text('\u2014', ML + CW / 2, y + 4.5, { align: 'center' });
+        y += ROW;
+      } else {
+        payLines.forEach(l => {
+          const cLines = pdf.splitTextToSize(l.contact     || '\u2014', C1 - 2 * PAD);
+          const dLines = pdf.splitTextToSize(l.description || '\u2014', C2 - 2 * PAD);
+          const rowH   = Math.max(ROW, Math.max(cLines.length, dLines.length) * 4 + 3);
+          need(rowH);
+          pdf.setLineWidth(0.15);
+          pdf.rect(ML, y, CW, rowH, 'S'); vlines(y, rowH, PAY_COLS);
+          cLines.forEach((t, i) => pdf.text(t, ML + PAD, y + 4 + i * 4));
+          dLines.forEach((t, i) => pdf.text(t, ML + C1 + PAD, y + 4 + i * 4));
+          pdf.text(`P ${fmtN(l.amount)}`, ML + CW - PAD, y + 4.5, { align: 'right' });
+          y += rowH;
+        });
+      }
+
+      // Grand Total row
+      need(ROW);
+      pdf.setLineWidth(0.35); hline(y, 0.35);
+      pdf.setLineWidth(0.15);
+      pdf.rect(ML, y, CW, ROW, 'S');
+      pdf.line(ML + C1 + C2, y, ML + C1 + C2, y + ROW);
+      bold(9);
+      pdf.text('Grand Total',             ML + C1 + C2 - PAD, y + 4.5, { align: 'right' });
+      pdf.text(`P ${fmtN(voucher.totalAmount)}`, ML + CW - PAD, y + 4.5, { align: 'right' });
+      y += ROW + 6;
+
+      // ── JOURNAL ENTRY TABLE ──────────────────────────────────────────────
+      bold(8.5);
+      pdf.text('JOURNAL ENTRY', ML, y);
+      y += 2.5; dashLine(y); y += 4;
+
+      const JC1 = 102, JC2 = 39, JC3 = 39;  // COA | Debit | Credit
+      const JE_COLS = [JC1, JC2, JC3];
+
+      // Header row
+      need(ROW);
+      pdf.setLineWidth(0.15);
+      pdf.rect(ML, y, CW, ROW, 'S'); vlines(y, ROW, JE_COLS);
+      pdf.setLineWidth(0.35); hline(y + ROW, 0.35);
+      bold(8);
+      pdf.text('COA',    ML + JC1 / 2,           y + 4.5, { align: 'center' });
+      pdf.text('DEBIT',  ML + JC1 + JC2 / 2,     y + 4.5, { align: 'center' });
+      pdf.text('CREDIT', ML + JC1 + JC2 + JC3/2, y + 4.5, { align: 'center' });
+      y += ROW;
+
+      // JE data rows
+      reg(9);
+      if (jeLines.length === 0) {
+        need(ROW);
+        pdf.setLineWidth(0.15);
+        pdf.rect(ML, y, CW, ROW, 'S'); vlines(y, ROW, JE_COLS);
+        pdf.text('No journal entry linked', ML + CW / 2, y + 4.5, { align: 'center' });
+        y += ROW;
+      } else {
+        jeLines.forEach(l => {
+          const indent  = l.credit > 0 ? 8 : PAD;
+          const acctTxt = l.accountName || l.accountCode || '\u2014';
+          const aLines  = pdf.splitTextToSize(acctTxt, JC1 - PAD - indent);
+          const rowH    = Math.max(ROW, aLines.length * 4 + 3);
+          need(rowH);
+          pdf.setLineWidth(0.15);
+          pdf.rect(ML, y, CW, rowH, 'S'); vlines(y, rowH, JE_COLS);
+          aLines.forEach((t, i) => pdf.text(t, ML + indent, y + 4 + i * 4));
+          const debitX  = ML + JC1 + JC2 - PAD;
+          const creditX = ML + CW - PAD;
+          const midD    = ML + JC1 + JC2 / 2;
+          const midC    = ML + JC1 + JC2 + JC3 / 2;
+          if (l.debit  > 0) pdf.text(`P ${fmtN(l.debit)}`,  debitX,  y + 4.5, { align: 'right' });
+          else              pdf.text('\u2014', midD,  y + 4.5, { align: 'center' });
+          if (l.credit > 0) pdf.text(`P ${fmtN(l.credit)}`, creditX, y + 4.5, { align: 'right' });
+          else              pdf.text('\u2014', midC,  y + 4.5, { align: 'center' });
+          y += rowH;
+        });
+      }
+
+      // JE Total row
+      need(ROW);
+      pdf.setLineWidth(0.35); hline(y, 0.35);
+      pdf.setLineWidth(0.15);
+      pdf.rect(ML, y, CW, ROW, 'S'); vlines(y, ROW, JE_COLS);
+      bold(8);
+      pdf.text('TOTAL DEBIT / CREDIT',    ML + JC1 - PAD,      y + 4.5, { align: 'right' });
+      pdf.text(`P ${fmtN(totalDebit)}`,   ML + JC1 + JC2 - PAD, y + 4.5, { align: 'right' });
+      pdf.text(`P ${fmtN(totalCredit)}`,  ML + CW - PAD,         y + 4.5, { align: 'right' });
+      y += ROW + 14;
+
+      // ── SIGNATURES ────────────────────────────────────────────────────────
+      const sigs = [
+        { label: 'Prepared by',  name: preparedByName },
+        { label: 'Reviewed by',  name: reviewedByName },
+        { label: 'Approved by',  name: approvedByName },
+        { label: 'Noted by',     name: profile.voucherNotedBy || profile.notedBy || '' },
+      ];
+      const sigW = CW / 4;  // 45 mm each
+
+      need(30);
+      bold(8.5);
+      sigs.forEach((s, i) => pdf.text(s.label, ML + i * sigW, y));
+      y += 20;  // space for physical signature
+
+      sigs.forEach((s, i) => {
+        const x0 = ML + i * sigW;
+        pdf.setLineWidth(0.3);
+        pdf.line(x0, y, x0 + sigW - 4, y);
+        if (s.name) {
+          bold(7.5);
+          const nLines = pdf.splitTextToSize(s.name.toUpperCase(), sigW - 5);
+          nLines.forEach((nl, ni) => {
+            pdf.text(nl, x0 + (sigW - 4) / 2, y + 4 + ni * 3.8, { align: 'center' });
+          });
+        }
+      });
+
       pdf.save(`${voucher.voucherId || voucher.id || 'voucher'}.pdf`);
     } catch (e) {
       console.error('PDF generation error:', e);
@@ -293,26 +365,29 @@ export default function VoucherPdfModal({ voucher, onClose }) {
             {loading ? (
               <div className="vpdf-loading">Loading document…</div>
             ) : (
-              <div className="vpdf-paper" ref={paperRef}>
+              <div className="vpdf-paper">
 
                 {/* Document header */}
-                <div className="vpdf-doc-hdr">
-                  <div className="vpdf-doc-left">
-                    {profile.logoUrl
-                      ? <img src={profile.logoUrl} className="vpdf-logo" alt="Logo" />
-                      : <div className="vpdf-logo-ph">W</div>
-                    }
-                    <div>
-                      <div className="vpdf-co-name">{profile.companyName || 'Workscale Resources Inc.'}</div>
-                      <div className="vpdf-doc-title">{typeLabel}</div>
-                    </div>
-                  </div>
-                  <div className="vpdf-doc-right">
-                    <div><strong>Control No:</strong> {voucher.voucherId || '—'}</div>
-                    <div><strong>Date:</strong> {fmtDate(voucher.preparationDate)}</div>
-                    {voucher.purposeCategory && <div><strong>Purpose:</strong> {voucher.purposeCategory}</div>}
-                  </div>
-                </div>
+                <table style={{width:'100%',borderCollapse:'collapse',marginBottom:20,borderBottom:'2px solid #000'}}>
+                  <tbody>
+                    <tr>
+                      <td style={{width:'160px',verticalAlign:'middle',border:'none',paddingBottom:6}}>
+                        {(profile.logoBase64 || profile.logoUrl)
+                          ? <><img src={profile.logoBase64 || profile.logoUrl} className="vpdf-logo" alt="Logo" /><div className="vpdf-co-name">{profile.companyName || 'Workscale Resources Inc.'}</div></>
+                          : <div className="vpdf-co-name">{profile.companyName || 'Workscale Resources Inc.'}</div>
+                        }
+                      </td>
+                      <td style={{textAlign:'center',verticalAlign:'middle',border:'none',paddingLeft:8,paddingRight:8}}>
+                        <div className="vpdf-doc-title">{typeLabel}</div>
+                      </td>
+                      <td style={{textAlign:'right',verticalAlign:'middle',border:'none',paddingBottom:6,whiteSpace:'nowrap',fontSize:'9px',lineHeight:'1.8'}}>
+                        <div>Control No: {voucher.voucherId || '—'}</div>
+                        <div>Date: {fmtDate(voucher.preparationDate)}</div>
+                        {voucher.purposeCategory && <div>Purpose: {voucher.purposeCategory}</div>}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
 
                 {/* Payment Details */}
                 <div className="vpdf-sec">Payment Details</div>
@@ -359,10 +434,10 @@ export default function VoucherPdfModal({ voucher, onClose }) {
                         <td style={{ paddingLeft: l.credit > 0 ? 28 : 8 }}>
                           {l.accountName || l.accountCode || '—'}
                         </td>
-                        <td className="amt" style={{ color: l.debit  > 0 ? '#166534' : '#94a3b8' }}>
+                        <td className="amt">
                           {l.debit  > 0 ? `₱ ${fmtN(l.debit)}`  : '—'}
                         </td>
-                        <td className="amt" style={{ color: l.credit > 0 ? '#dc2626' : '#94a3b8' }}>
+                        <td className="amt">
                           {l.credit > 0 ? `₱ ${fmtN(l.credit)}` : '—'}
                         </td>
                       </tr>
@@ -378,20 +453,23 @@ export default function VoucherPdfModal({ voucher, onClose }) {
                 </table>
 
                 {/* Signatures */}
-                <div className="vpdf-sigs">
-                  {[
-                    ['Prepared by',  voucher.createdBy],
-                    ['Reviewed by',  voucher.reviewedBy],
-                    ['Approved by',  voucher.approvedBy],
-                    ['Noted by',     voucher.notedBy || profile.notedBy],
-                  ].map(([label, name]) => (
-                    <div key={label} className="vpdf-sig-col">
-                      <div className="vpdf-sig-line" />
-                      <div className="vpdf-sig-name">{name || '\u00A0'}</div>
-                      <div className="vpdf-sig-lbl">{label}</div>
-                    </div>
-                  ))}
-                </div>
+                {(() => {
+                  const sigs = [
+                    ['Prepared by',  preparedByName],
+                    ['Reviewed by',  reviewedByName],
+                    ['Approved by',  approvedByName],
+                    ['Noted by',     profile.voucherNotedBy || profile.notedBy],
+                  ];
+                  return (
+                    <table className="vpdf-sigs">
+                      <tbody>
+                        <tr>{sigs.map(([lbl])    => <td key={lbl}><div className="vpdf-sig-lbl">{lbl}</div></td>)}</tr>
+                        <tr>{sigs.map(([lbl])    => <td key={lbl} className="vpdf-sig-img" />)}</tr>
+                        <tr>{sigs.map(([lbl, nm])=> <td key={lbl}><div className="vpdf-sig-line">{nm || '\u00A0'}</div></td>)}</tr>
+                      </tbody>
+                    </table>
+                  );
+                })()}
 
               </div>
             )}
