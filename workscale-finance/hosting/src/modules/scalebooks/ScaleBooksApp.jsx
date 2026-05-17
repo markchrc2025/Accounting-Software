@@ -22,6 +22,7 @@ import FixedAssetsPage     from './assets/FixedAssetsPage.jsx';
 import ServiceInvoicesPage from './invoices/ServiceInvoicesPage.jsx';
 import CollectionsPage     from './collections/CollectionsPage.jsx';
 import SettingsPage        from './settings/SettingsPage.jsx';
+import ReportBuilderPage   from './reports/ReportBuilderPage';
 
 import { PermissionsProvider, usePermissions } from '../../contexts/PermissionsContext.jsx';
 import AccessDenied from '../../components/AccessDenied.jsx';
@@ -46,7 +47,9 @@ const ICONS = {
   wallet:    <><path d="M21 12V7H5a2 2 0 010-4h14v4"/><path d="M3 5v14a2 2 0 002 2h16v-5"/><path d="M18 12a2 2 0 000 4h3v-4z"/></>,
   users:     <><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></>,
   settings:  <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></>,
+  reports:   <><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/></>,
   signout:   <><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></>,
+
   chevDown:  <polyline points="6 9 12 15 18 9"/>,
   chevLeft:  <polyline points="15 18 9 12 15 6"/>,
   chevRight: <polyline points="9 18 15 12 9 6"/>,
@@ -96,6 +99,7 @@ const NAV_GROUPS = [
       { label: 'Tax',               icon: 'tax',     path: 'tax',       module: 'Tax' },
       { label: 'Financial Mgmt',    icon: 'chart',   path: 'financial', module: 'Financial Management' },
       { label: 'Fixed Assets',      icon: 'assets',  path: 'assets',    module: 'Fixed Assets' },
+      { label: 'Reports',             icon: 'reports', path: 'reports',   module: 'Reports' },
     ],
   },
   {
@@ -454,6 +458,9 @@ function ScaleBooksAppInner() {
             <Route path="billing/:clientId" element={<ModuleGuard module="Billing Book"><BillingClientPage /></ModuleGuard>} />
             <Route path="invoices"          element={<ModuleGuard module="Service Invoices"><ServiceInvoicesPage /></ModuleGuard>} />
             <Route path="collections"       element={<ModuleGuard module="Collections"><CollectionsPage /></ModuleGuard>} />
+
+            {/* Reports */}
+            <Route path="reports/*" element={<ModuleGuard module="Reports"><ReportBuilderPage /></ModuleGuard>} />
 
             {/* System */}
             <Route path="contacts" element={<ModuleGuard module="Contacts"><ContactsPage /></ModuleGuard>} />

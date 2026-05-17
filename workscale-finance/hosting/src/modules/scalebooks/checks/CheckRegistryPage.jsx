@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc,
-  doc, serverTimestamp, writeBatch, getDocs,
+  doc, serverTimestamp, writeBatch, getDocs, getDoc,
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
 import { nextCheckVoucherId, nextJournalEntryId } from '../../../utils/documentIds.js';
+import { consumeSchedulePrefill } from '../../../utils/schedulePrefill.js';
 import CheckVoucherPdfModal from './CheckVoucherPdfModal.jsx';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -119,6 +120,7 @@ export default function CheckRegistryPage() {
   const [taxGroups,  setTaxGroups]  = useState([]);
   const [vouchers,   setVouchers]   = useState([]);
   const [purposeCategories, setPurposeCategories] = useState([]);
+  const [loans,          setLoans]          = useState([]);
 
   const [activeTab,    setActiveTab]    = useState('register');
   const [cvModal,      setCvModal]      = useState(null);
@@ -188,6 +190,10 @@ export default function CheckRegistryPage() {
     const u4 = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap => setTaxRates(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(r => r.isActive !== false)));
     const u5 = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap => setTaxGroups(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(g => g.isActive !== false)));
     getDocs(collection(db,'accounts')).then(s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
+    getDoc(doc(db,'finc','profile')).then(snap => {
+      const data = snap.exists() ? snap.data() : {};
+      setLoans(Array.isArray(data.loans) ? data.loans : []);
+    });
     const u6 = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
     const u7 = onSnapshot(query(collection(db,'purposeCategories'), orderBy('name')), snap => setPurposeCategories(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
     return () => { u1(); u2(); u3(); u4(); u5(); u6(); u7(); };
@@ -331,6 +337,10 @@ export default function CheckRegistryPage() {
     });
     return result;
   }, [checks, vouchers]);
+
+  // KPIs — uses expandedChecks so old-style multi-check vouchers (1 Firestore doc = N checks) count correctly
+  const countsByStatus = {};
+  CHECK_STATUSES.forEach(s => { countsByStatus[s] = expandedChecks.filter(c => c.status === s).length; });
 
   // Outstanding aging buckets (Issued only, by days since issueDate)
   const aging = useMemo(() => {
@@ -505,13 +515,53 @@ export default function CheckRegistryPage() {
   const jCredit = journalLines.reduce((s,j) => s+j.credit, 0);
 
   // ── Open Check Voucher modal ───────────────────────────────────────────────
-  const openNewCv = () => {
-    const defaultBank = bankAccounts[0]?.code || bankAccounts[0]?.id || '';
+  const openNewCv = (prefill) => {
+    const defaultBank = (prefill?.bankCode) || bankAccounts[0]?.code || bankAccounts[0]?.id || '';
     const cb = activeCheckbook(defaultBank);
-    setCvForm({ bankCode:defaultBank, issueDate:today(), purposeCategory:'', isMultipleChecks:false, globalCheckNo:cb?.nextCheckNumber||'', globalCheckDate:today(), notes:'', inclusive:false });
-    setCvLines([EMPTY_LINE()]);
+    setCvForm({
+      bankCode:         defaultBank,
+      issueDate:        prefill?.occurrenceDate || today(),
+      purposeCategory:  prefill?.purposeCategory || '',
+      isMultipleChecks: false,
+      globalCheckNo:    cb?.nextCheckNumber || '',
+      globalCheckDate:  prefill?.occurrenceDate || today(),
+      notes:            prefill?.notes || '',
+      inclusive:        false,
+      loanId:           '',
+      linkedScheduleId:    prefill?.scheduleId   || '',
+      linkedScheduleDate:  prefill?.occurrenceDate || '',
+      linkedScheduleTitle: prefill?.scheduleTitle || '',
+    });
+    if (prefill) {
+      setCvLines([{
+        ...EMPTY_LINE(),
+        contactId:      prefill.contactId || '',
+        contact:        prefill.contactName || prefill.contactId || '',
+        expenseAccount: prefill.expenseAccountCode || '',
+        description:    prefill.scheduleTitle || '',
+        amount:         prefill.amount ? Number(prefill.amount) : 0,
+        taxRateId:      prefill.taxRateId || '',
+      }]);
+    } else {
+      setCvLines([EMPTY_LINE()]);
+    }
     setCvModal({ _new:true });
   };
+
+  // Pending prefill (from Payment Schedule). Stashed on mount, then applied
+  // once bank accounts have loaded so openNewCv() can pick a default bank.
+  const [pendingPrefill, setPendingPrefill] = useState(null);
+  useEffect(() => {
+    const p = consumeSchedulePrefill('check');
+    if (p) setPendingPrefill(p);
+  }, []);
+  useEffect(() => {
+    if (pendingPrefill && bankAccounts.length > 0) {
+      openNewCv(pendingPrefill);
+      setPendingPrefill(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPrefill, bankAccounts.length]);
 
   const openEditCv = (check) => {
     if (!check.voucherDocId) return alert('No voucher linked to this check.');
@@ -529,6 +579,7 @@ export default function CheckRegistryPage() {
       globalCheckDate:  v.checkDate              || '',
       notes:            v.notes                  || '',
       inclusive:        isInclusive,
+      loanId:           v.loanId                 || '',
     });
     setCvLines((v.lines || []).map((l, i) => ({
       id:             Date.now() + i,
@@ -588,6 +639,7 @@ export default function CheckRegistryPage() {
         netCash,
         notes:           cvForm.notes || '',
         lines:           linesPayload,
+        ...(cvForm.loanId ? { loanId: cvForm.loanId } : {}),
         updatedAt:       serverTimestamp(), updatedBy: user,
       });
 
@@ -727,6 +779,9 @@ export default function CheckRegistryPage() {
         notes:                  cvForm.notes || '',
         lines:                  linesPayload,
         checkId, referenceType: 'Check Voucher',
+        ...(cvForm.loanId         ? { loanId:           cvForm.loanId }         : {}),
+        ...(cvForm.linkedScheduleId   ? { linkedScheduleId:   cvForm.linkedScheduleId }   : {}),
+        ...(cvForm.linkedScheduleDate ? { linkedScheduleDate: cvForm.linkedScheduleDate } : {}),
         createdAt:serverTimestamp(), createdBy:user,
         updatedAt:serverTimestamp(), updatedBy:user,
       });
@@ -928,7 +983,7 @@ export default function CheckRegistryPage() {
             description: `PDC Cleared — ${form.referenceId || form.checkId} · Check #${form.checkNumber}`,
             type: 'Check Cleared', reference: form.referenceId || form.checkId || '',
             sourceDocId: form.voucherDocId || '', sourceDocType: 'voucher',
-            status: 'Posted',
+            status: 'For Clearing',
             lines: [
               { accountCode: pdcAccount.code, accountName: pdcAccount.name, description: 'Post-dated check cleared', debit: jeAmount, credit: 0 },
               { accountCode: bankAcct.code,   accountName: bankAcct.name,   description: 'Check encashed — bank payment', debit: 0, credit: jeAmount },
@@ -936,6 +991,54 @@ export default function CheckRegistryPage() {
             totalDebit: jeAmount, totalCredit: jeAmount,
             createdAt: serverTimestamp(), createdBy: user,
             updatedAt: serverTimestamp(), updatedBy: user,
+          });
+        }
+      }
+
+      // Auto-post to loanPayments when check Cleared and linked voucher has a loanId
+      if (form.status === 'Cleared' && form.voucherDocId && !form.loanPaymentId) {
+        const vSnap = await getDoc(doc(db, 'vouchers', form.voucherDocId));
+        const vData = vSnap.exists() ? vSnap.data() : null;
+        if (vData?.loanId) {
+          const clearDate = form.clearedDate || today();
+          const total     = Number(form.netAmount || form.amount || 0);
+          // For multi-check CVs scope to this check's line; for single-check use all lines
+          const linesToParse = (vData.isMultipleChecks && form.lineNo)
+            ? (vData.lines || []).filter(l => l.lineNo === form.lineNo)
+            : (vData.lines || []);
+          // Best-effort interest / penalty split from voucher lines
+          let interest = 0; let penalty = 0;
+          linesToParse.forEach(l => {
+            const name = (l.accountName || l.description || '').toLowerCase();
+            const amt  = Math.abs(Number(l.debit || l.amount || 0));
+            if (name.includes('interest') || name.includes('finance cost')) interest += amt;
+            else if (name.includes('penalty'))                               penalty  += amt;
+          });
+          const principal = Math.max(0, total - interest - penalty);
+          const lpRef = await addDoc(collection(db, 'loanPayments'), {
+            loanId:          vData.loanId,
+            loanName:        vData.loanName || '',
+            date:            clearDate,
+            interest,
+            principal,
+            penalty,
+            total,
+            method:          'Check',
+            referenceNo:     form.checkNumber       || '',
+            bank:            form.bankCode          || '',
+            voucherId:       vData.voucherId        || '',
+            checkVoucherId:  vData.voucherId        || '',
+            checkId:         form.checkId           || '',
+            checkRegisterId: form.id                || '',
+            notes:           'Auto-posted from Check Registry upon check clearing.',
+            allocations:     [],
+            createdAt:       serverTimestamp(),
+            createdBy:       user,
+          });
+          await updateDoc(doc(db, 'checkRegister', form.id), {
+            loanPaymentId: lpRef.id,
+            updatedAt:     serverTimestamp(),
+            updatedBy:     user,
           });
         }
       }
@@ -1256,36 +1359,149 @@ export default function CheckRegistryPage() {
 
   // ══ Tab: Analytics & Aging ═════════════════════════════════════════════════
   function AnalyticsTab() {
+    const [drillBucket, setDrillBucket] = useState(null); // null = collapsed, or '0-30'|'31-60'|'61-90'|'90+'|'all'
+
     const totalIssuedCount = expandedChecks.filter(c => c.status === 'Issued').length;
     const totalIssuedAmt   = expandedChecks.filter(c => c.status === 'Issued').reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
     const agingTotalAmt    = aging['0-30'].a + aging['31-60'].a + aging['61-90'].a + aging['90+'].a;
 
+    const now = new Date();
+    const getAgeBucket = (c) => {
+      const d = new Date(c.issueDate); if (isNaN(d)) return null;
+      const days = Math.floor((now - d) / 86400000);
+      return days <= 30 ? '0-30' : days <= 60 ? '31-60' : days <= 90 ? '61-90' : '90+';
+    };
+
+    const allOutstanding = expandedChecks.filter(c => c.status === 'Issued');
+    const drillChecks = drillBucket === 'all'
+      ? allOutstanding
+      : drillBucket
+        ? allOutstanding.filter(c => getAgeBucket(c) === drillBucket)
+        : [];
+
+    const BUCKET_META = {
+      '0-30':  { label:'Current (0–30 days)', color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0' },
+      '31-60': { label:'31–60 days',          color:'#a16207', bg:'#fef9c3', border:'#fde68a' },
+      '61-90': { label:'61–90 days',          color:'#c2410c', bg:'#fff7ed', border:'#fed7aa' },
+      '90+':   { label:'Over 90 days',        color:'#b91c1c', bg:'#fef2f2', border:'#fecaca' },
+    };
+
     return (
       <div>
-        <div style={{ fontSize:13, fontWeight:900, marginBottom:8, color:'#0b1220' }}>
-          Outstanding Check Aging
-          <span style={{ marginLeft:8, fontSize:11, color:'#64748b', fontWeight:600 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
+          <span style={{ fontSize:13, fontWeight:900, color:'#0b1220' }}>
+            Outstanding Check Aging
+          </span>
+          <span style={{ fontSize:11, color:'#64748b', fontWeight:600 }}>
             {totalIssuedCount} outstanding · {fmt(totalIssuedAmt)}
           </span>
+          {totalIssuedCount > 0 && (
+            <button
+              className="btn btn-ghost btn-xs"
+              style={{ marginLeft:'auto', fontSize:11 }}
+              onClick={() => setDrillBucket(v => v === 'all' ? null : 'all')}
+            >
+              {drillBucket === 'all' ? '▲ Hide' : '☰ View All Outstanding'}
+            </button>
+          )}
         </div>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:10, marginBottom:18 }}>
-          {[
-            { k:'0-30',  label:'Current (0–30 days)', color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0' },
-            { k:'31-60', label:'31–60 days',          color:'#a16207', bg:'#fef9c3', border:'#fde68a' },
-            { k:'61-90', label:'61–90 days',          color:'#c2410c', bg:'#fff7ed', border:'#fed7aa' },
-            { k:'90+',   label:'Over 90 days',        color:'#b91c1c', bg:'#fef2f2', border:'#fecaca' },
-          ].map(b => {
-            const v = aging[b.k];
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:10, marginBottom: drillBucket ? 0 : 18 }}>
+          {Object.entries(BUCKET_META).map(([k, b]) => {
+            const v = aging[k];
             const pct = agingTotalAmt > 0 ? Math.round((v.a / agingTotalAmt) * 100) : 0;
+            const isActive = drillBucket === k;
             return (
-              <div key={b.k} style={{ background:b.bg, border:`1px solid ${b.border}`, borderRadius:12, padding:'14px 16px' }}>
+              <div
+                key={k}
+                onClick={() => v.n > 0 && setDrillBucket(cur => cur === k ? null : k)}
+                style={{
+                  background:b.bg, border:`2px solid ${isActive ? b.color : b.border}`,
+                  borderRadius:12, padding:'14px 16px',
+                  cursor: v.n > 0 ? 'pointer' : 'default',
+                  transition:'box-shadow .15s, border-color .15s',
+                  boxShadow: isActive ? `0 0 0 3px ${b.border}` : 'none',
+                  outline: 'none',
+                }}
+              >
                 <div style={{ fontSize:9, fontWeight:800, color:'#64748b', letterSpacing:'.07em', textTransform:'uppercase', marginBottom:6 }}>{b.label}</div>
                 <div style={{ fontSize:18, fontWeight:900, color:b.color }}>{fmt(v.a)}</div>
-                <div style={{ fontSize:11, color:'#64748b', marginTop:3 }}>{v.n} check{v.n!==1?'s':''} · {pct}% of outstanding</div>
+                <div style={{ fontSize:11, color:'#64748b', marginTop:3 }}>
+                  {v.n} check{v.n!==1?'s':''} · {pct}% of outstanding
+                  {v.n > 0 && <span style={{ marginLeft:5, color:b.color, fontWeight:700 }}>{isActive ? '▲' : '▼'}</span>}
+                </div>
               </div>
             );
           })}
         </div>
+
+        {/* ── Drill-down table ─────────────────────────────────────────── */}
+        {drillBucket && (
+          <div style={{
+            border: drillBucket !== 'all' ? `1.5px solid ${BUCKET_META[drillBucket]?.border || '#e5e7eb'}` : '1px solid #e5e7eb',
+            borderRadius:12, marginBottom:18, overflow:'hidden',
+            background: drillBucket !== 'all' ? BUCKET_META[drillBucket]?.bg || '#fff' : '#fff',
+          }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'10px 14px', borderBottom:'1px solid #e5e7eb' }}>
+              <span style={{ fontSize:12, fontWeight:800, color:'#0b1220' }}>
+                {drillBucket === 'all' ? 'All Outstanding Checks' : `Outstanding — ${BUCKET_META[drillBucket]?.label}`}
+                <span style={{ marginLeft:8, fontWeight:600, color:'#64748b' }}>
+                  {drillChecks.length} check{drillChecks.length!==1?'s':''} · {fmt(drillChecks.reduce((s,c)=>s+(parseFloat(c.amount)||0),0))}
+                </span>
+              </span>
+              <button className="btn btn-ghost btn-xs" onClick={() => setDrillBucket(null)}>✕ Close</button>
+            </div>
+            {drillChecks.length === 0 ? (
+              <div style={{ padding:'16px', fontSize:12, color:'#94a3b8', textAlign:'center' }}>No outstanding checks in this range.</div>
+            ) : (
+              <div style={{ overflowX:'auto' }}>
+                <table style={{ fontSize:12 }}>
+                  <thead><tr>
+                    <th>Check No.</th>
+                    <th>Issue Date</th>
+                    <th>Days Out</th>
+                    <th>Bank</th>
+                    <th>Payee</th>
+                    <th style={{ textAlign:'right' }}>Amount</th>
+                    <th>Reference</th>
+                  </tr></thead>
+                  <tbody>
+                    {drillChecks.map((c, i) => {
+                      const d = new Date(c.issueDate);
+                      const days = isNaN(d) ? '—' : Math.floor((now - d) / 86400000);
+                      const bank = bankAccounts.find(b => b.code === c.bankCode || b.id === c.bankCode);
+                      const bk = BUCKET_META[getAgeBucket(c)];
+                      return (
+                        <tr key={c.id || i}>
+                          <td style={{ fontFamily:'monospace', fontWeight:700 }}>{c.checkNumber}</td>
+                          <td>{c.issueDate || '—'}</td>
+                          <td>
+                            <span style={{ background: bk?.bg, color: bk?.color, border:`1px solid ${bk?.border}`, borderRadius:99, padding:'2px 7px', fontSize:10, fontWeight:700 }}>
+                              {days}d
+                            </span>
+                          </td>
+                          <td style={{ color:'#64748b' }}>{bank ? `${bank.code} — ${bank.name}` : c.bankCode || '—'}</td>
+                          <td style={{ fontWeight:600 }}>{c.payeeName || '—'}</td>
+                          <td style={{ textAlign:'right', fontWeight:700 }}>{fmt(c.amount)}</td>
+                          <td>
+                            {c.voucherDocId ? (
+                              <button
+                                style={{ background:'none', border:'none', color:'#f97316', fontWeight:700, cursor:'pointer', fontSize:12, padding:0, textDecoration:'underline' }}
+                                onClick={() => {
+                                  const v = vouchers.find(x => x.id === c.voucherDocId);
+                                  if (v) setCvPdfModal({ voucher: v, relatedChecks: checks.filter(x => x.voucherDocId === v.id) });
+                                }}
+                              >{c.referenceId || c.voucherDocId}</button>
+                            ) : (c.referenceId || '—')}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap', marginBottom:10 }}>
           <span style={{ fontSize:13, fontWeight:900 }}>Issued vs Cleared by Period</span>
@@ -1599,6 +1815,32 @@ export default function CheckRegistryPage() {
                 </div>
               </>)}
             </div>
+
+            {/* Linked Loan */}
+            {loans.filter(l => l.status !== 'Disposed').length > 0 && (
+              <div className="field col-full" style={{ background:'#fdf4ff', border:'1px solid #e9d5ff', borderRadius:10, padding:'10px 14px', marginBottom:12 }}>
+                <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap' }}>
+                  <div style={{ flex:'0 0 auto' }}>
+                    <label style={{ fontSize:11, fontWeight:700, color:'#7c3aed', marginBottom:4, display:'block' }}>Linked Loan (optional)</label>
+                    <select
+                      value={cvForm.loanId||''}
+                      onChange={e => upd('loanId', e.target.value)}
+                      style={{ fontSize:12, minWidth:260, padding:'6px 10px', borderRadius:7, border:'1px solid #d8b4fe', background:'#fff', color:'#0b1220' }}
+                    >
+                      <option value="">— None (skip auto-post) —</option>
+                      {loans.filter(l => l.status !== 'Disposed').map(l => (
+                        <option key={l.id} value={l.id}>{l.name || `Loan ${l.id}`} — {l.loanType || 'Loan'}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={{ fontSize:11, color:'#7c3aed', fontWeight:600, flex:1 }}>
+                    {cvForm.loanId
+                      ? <>&#x2705; When this check clears, a payment will auto-post to <strong>Loan Monitoring</strong>.</>
+                      : <span style={{ color:'#94a3b8' }}>&#x2139;&#xfe0f; Link a loan to enable auto-post when the check clears.</span>}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Payment Details */}
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8 }}>

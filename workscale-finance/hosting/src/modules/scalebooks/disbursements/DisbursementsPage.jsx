@@ -379,6 +379,7 @@ export default function DisbursementsPage() {
           bankCode:     v.paymentFromAccountCode || '',
           checkNo:      v.checkNumber || '',
           checkDate:    v.checkDate || '',
+          loanId:       v.loanId    || '',
           isPayrollLine:false,
           _preDisbStatus: v.preDisbursementStatus || v.status,
         };
@@ -1012,6 +1013,7 @@ export default function DisbursementsPage() {
                             <strong style={{color:'#f97316'}}>{item.voucherId}</strong>
                             {item.isPayrollLine && <span style={{marginLeft:6,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 5px',borderRadius:4,fontWeight:700}}>LINE {item.lineNo}</span>}
                             <span style={{marginLeft:8,color:'#64748b',fontSize:11}}>{item.voucherType}</span>
+                            {item.loanId && <span style={{marginLeft:6,fontSize:10,background:'#fdf4ff',color:'#7c3aed',padding:'1px 5px',borderRadius:4,fontWeight:700,border:'1px solid #e9d5ff'}}>LOAN</span>}
                             <span style={{marginLeft:8,color:'#0b1220'}}>{item.contact}</span>
                             {item.description && <span style={{marginLeft:8,color:'#94a3b8',fontSize:11}}>{item.description}</span>}
                           </div>
@@ -1047,6 +1049,7 @@ export default function DisbursementsPage() {
                           <strong style={{color:'#d97706'}}>{item.voucherId}</strong>
                           {item.isPayrollLine && <span style={{marginLeft:6,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 5px',borderRadius:4,fontWeight:700}}>LINE {item.lineNo}</span>}
                           <span style={{marginLeft:8,color:'#64748b',fontSize:11}}>{item.voucherType}</span>
+                          {item.loanId && <span style={{marginLeft:6,fontSize:10,background:'#fdf4ff',color:'#7c3aed',padding:'1px 5px',borderRadius:4,fontWeight:700,border:'1px solid #e9d5ff'}}>LOAN</span>}
                           <span style={{marginLeft:8,color:'#0b1220'}}>{item.contact}</span>
                         </div>
                         <span style={{fontSize:11,color:'#64748b',marginRight:8}}>{item.bankCode||'—'}</span>

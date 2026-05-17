@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
+  collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
   serverTimestamp, getDoc, getDocs
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
 import { nextVoucherId, previewVoucherId, nextJournalEntryId } from '../../../utils/documentIds.js';
+import { consumeSchedulePrefill } from '../../../utils/schedulePrefill.js';
 import VoucherPdfModal from './VoucherPdfModal.jsx';
 
 const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
@@ -173,7 +174,7 @@ export default function VouchersPage() {
   useEffect(() => {
     const unsub = onSnapshot(
       query(collection(db, 'vouchers'), orderBy('createdAt', 'desc')),
-      snap => setVouchers(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+      snap => setVouchers(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(v => v.voucherType !== 'CHECK'))
     );
     const unsubAccounts = onSnapshot(query(collection(db,'accounts'), orderBy('code')), s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
     const unsubContacts = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
@@ -272,19 +273,57 @@ export default function VouchersPage() {
     if (!selected.size) return;
     const count = selected.size;
     askConfirm(`Delete ${count} voucher(s)? This cannot be undone.`, async () => {
-      await Promise.all([...selected].map(id => deleteDoc(doc(db,'vouchers',id))));
+      const ids = [...selected];
+      await Promise.all(ids.map(async id => {
+        const jeSnap = await getDocs(query(collection(db,'journalEntries'), where('sourceDocId','==',id)));
+        await Promise.all(jeSnap.docs.map(d => deleteDoc(d.ref)));
+      }));
+      await Promise.all(ids.map(id => deleteDoc(doc(db,'vouchers',id))));
       setSelected(new Set());
       showToast(`${count} voucher(s) deleted.`);
     });
   };
 
   // Open create/edit modal
-  const openNew = () => {
+  const openNew = (prefill) => {
     setEditing(null);
-    setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'', inclusive:false, loanId:'' });
-    setLines([EMPTY_LINE()]);
+    if (prefill) {
+      const vt = (prefill.voucherType === 'LOAN') ? 'LOAN' : 'PAYMENT';
+      setForm({
+        voucherType: vt,
+        preparationDate: prefill.occurrenceDate || today(),
+        purposeCategory: prefill.purposeCategory || '',
+        paymentFrom: prefill.bankCode || '',
+        status: 'Pending',
+        notes: prefill.notes || '',
+        inclusive: false,
+        loanId: prefill.loanId || '',
+        linkedScheduleId: prefill.scheduleId || '',
+        linkedScheduleDate: prefill.occurrenceDate || '',
+        linkedScheduleTitle: prefill.scheduleTitle || '',
+      });
+      setLines([{
+        ...EMPTY_LINE(),
+        contactId:   prefill.contactId || '',
+        contact:     prefill.contactName || prefill.contactId || '',
+        expenseAccount: prefill.expenseAccountCode || '',
+        description: prefill.scheduleTitle || '',
+        amount:      prefill.amount ? String(prefill.amount) : '',
+        taxRateId:   prefill.taxRateId || '',
+      }]);
+    } else {
+      setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'', inclusive:false, loanId:'' });
+      setLines([EMPTY_LINE()]);
+    }
     setShowModal(true);
   };
+
+  // Auto-open the new-voucher modal when arriving from Payment Schedule via prefill
+  useEffect(() => {
+    const prefill = consumeSchedulePrefill('voucher');
+    if (prefill) openNew(prefill);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const openEdit = (v) => {
     setEditing(v);
@@ -309,6 +348,8 @@ export default function VouchersPage() {
 
   const deleteVoucher = (v) => {
     askConfirm(`Delete voucher ${v.voucherId||v.id}?`, async () => {
+      const jeSnap = await getDocs(query(collection(db,'journalEntries'), where('sourceDocId','==',v.id)));
+      await Promise.all(jeSnap.docs.map(d => deleteDoc(d.ref)));
       await deleteDoc(doc(db,'vouchers',v.id));
       showToast('Voucher deleted.');
     });
@@ -328,8 +369,10 @@ export default function VouchersPage() {
       totalAmount,
       status,
       notes:                 form.notes||'',
-      loanId: form.voucherType === 'LOAN' ? (form.loanId || '') : '',
+      loanId: isLoanLinked ? (form.loanId || '') : '',
       lines: lines.map((l,i) => ({ lineNo:i+1, contactId:l.contactId||'', contact:l.contact, expenseAccountCode:l.expenseAccount, description:l.description, amount:Number(l.amount)||0, category:l.category, taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:Number(l.taxRate)||0, taxAmt:Number(l.taxAmt)||0, inclusive:!!l.inclusive })),
+      ...(form.linkedScheduleId   ? { linkedScheduleId:   form.linkedScheduleId }   : {}),
+      ...(form.linkedScheduleDate ? { linkedScheduleDate: form.linkedScheduleDate } : {}),
       updatedAt: serverTimestamp(), updatedBy: user
     };
 
@@ -458,7 +501,8 @@ export default function VouchersPage() {
 
   // isAutoBank: hide Purpose/PaymentFrom for PAYROLL, FINAL_PAY (matches GAS toggleVoucherMode)
   const isAutoBank = AUTO_BANK_TYPES.includes(form.voucherType);
-  const isLoan = form.voucherType === 'LOAN';
+  const isLoan        = form.voucherType === 'LOAN';
+  const isLoanLinked  = form.voucherType === 'LOAN' || form.voucherType === 'PAYMENT';
   const showTax = TAX_VISIBLE_TYPES.includes(form.voucherType);
 
   const lineTotal = lines.reduce((s,l) => s + (Number(l.amount)||0), 0);
@@ -818,10 +862,12 @@ export default function VouchersPage() {
                     ℹ️ Final Pay Voucher — Payment bank is resolved per employee line. Add final pay lines manually.
                   </div>
                 )}
-                {isLoan && (
+                {isLoanLinked && (
                   <>
                     <div className="field col6" style={{background:'#fdf4ff',border:'1px solid #e9d5ff',borderRadius:10,padding:'10px 14px',fontSize:12,color:'#7c3aed',fontWeight:700}}>
-                      ℹ️ Loan Voucher — Used to record loan releases or amortization payments. When this voucher is paid through a Disbursement Report, a payment will auto-post to <strong>Loan Monitoring</strong>.
+                      {isLoan
+                        ? <>ℹ️ Loan Voucher — Used to record loan releases or amortization payments. When this voucher is paid through a Disbursement Report, a payment will auto-post to <strong>Loan Monitoring</strong>.</>
+                        : <>ℹ️ Check Voucher (CV) — Link to a loan so that when this check clears in the Check Registry, a payment is auto-posted to <strong>Loan Monitoring</strong>.</>}
                     </div>
                     <div className="field col3">
                       <label>Linked Loan</label>

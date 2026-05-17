@@ -35,6 +35,7 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
     bank: loan.pmBtBank || loan.pmAdaBank || '',
     voucherId: '',
     autoVoucher: true,
+    checkVoucherId: '',
     notes: nextRow ? `Payment for ${nextRow.label} (Period ${nextRow.period})` : '',
     appliedPeriod: nextRow ? nextRow.period : null,
   });
@@ -124,6 +125,7 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
           status:                 'Pending',
           notes:                  form.notes || '',
           loanId:                 loan.id,
+          checkVoucherId:         form.method === 'Check' ? (form.checkVoucherId || '') : '',
           lines:                  vLines,
           createdAt:              serverTimestamp(),
           createdBy:              user,
@@ -165,6 +167,7 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
         referenceNo: checkInfo?.checkNumber || form.referenceNo || '',
         bank: form.bank || '',
         voucherId: finalVoucherId,
+        checkVoucherId: form.method === 'Check' ? (form.checkVoucherId || '') : '',
         checkId:    checkInfo?.checkId        || '',
         checkRegisterId: checkInfo?.checkRegisterId || '',
         notes: form.notes || '',
@@ -263,7 +266,7 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               <label style={lblS}>Method</label>
-              <select style={inpS} value={form.method} onChange={e => setField('method', e.target.value)}>
+              <select style={inpS} value={form.method} onChange={e => setForm(f => ({ ...f, method: e.target.value, ...(e.target.value !== 'Check' ? { checkVoucherId: '' } : {}) }))}>
                 {PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
               </select>
             </div>
@@ -347,6 +350,25 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
               </label>
             </div>
           </div>
+
+          {/* Row 4: Linked Check Voucher (CV) — only for Check payments */}
+          {form.method === 'Check' && (
+          <div style={{ marginBottom: 12, padding: '10px 12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderLeft: '4px solid #64748b', borderRadius: 8 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <label style={{ ...lblS, color: '#475569' }}>Linked Check Voucher (CV) — Optional</label>
+              <input
+                style={inpS}
+                value={form.checkVoucherId}
+                onChange={e => setField('checkVoucherId', e.target.value)}
+                placeholder="e.g. CV202605-0001"
+              />
+              <span style={{ fontSize: 10, color: '#94a3b8', lineHeight: 1.5 }}>
+                Link the Check Voucher already issued by the disbursement team for this payment.
+                Both the LV (classification) and CV (instrument) will appear in Payment History.
+              </span>
+            </div>
+          </div>
+          )}
 
           {/* Notes */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 8 }}>

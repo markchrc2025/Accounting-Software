@@ -1,12 +1,18 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
 import {
-  collection, query, orderBy, onSnapshot,
+  collection, query, orderBy, where, onSnapshot,
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc, getDocs,
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import { nextPaymentScheduleId } from '../../../utils/documentIds.js';
 import { issueCheck, getActiveCheckbook } from '../../../utils/issueCheck.js';
 import { nextVoucherId } from '../../../utils/documentIds.js';
+import { setSchedulePrefill } from '../../../utils/schedulePrefill.js';
+import AccountCombobox from '../../../components/AccountCombobox.jsx';
+import ContactPicker from '../../../components/ContactPicker.jsx';
 
 const CATEGORIES = ['Rent','Utilities','Insurance','Salaries','Loan Payment','Subscription','Tax','Other'];
 const FREQS = ['Monthly','Quarterly','Semi-Annual','Annual','One-Time'];
@@ -27,6 +33,20 @@ function catStyle(cat) {
 
 const fmtPHP = n => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtCur = n => '₱' + fmtPHP(n);
+
+// Compute representative monthly installment for a loan (PMT or method-specific)
+function loanMonthlyPmt(loan) {
+  const P = loan.principal || 0;
+  const r = (loan.annualRate || 0) / 100 / 12;
+  const n = Math.max(loan.termMonths || 1, 1);
+  if (P <= 0) return 0;
+  if (loan.loanType === 'Revolving Credit') return Math.round(P * r * 100) / 100;
+  if (loan.interestMethod === 'Balloon') return Math.round(P * r * 100) / 100;
+  if (loan.interestMethod === 'Fixed') return Math.round((P / n + P * (loan.annualRate||0) / 100 / 12) * 100) / 100;
+  if (r === 0) return Math.round(P / n * 100) / 100;
+  const pmt = P * r * Math.pow(1+r,n) / (Math.pow(1+r,n)-1);
+  return Math.round(pmt * 100) / 100;
+}
 
 function nextOccurrence(s) {
   if (s.frequency === 'One-Time') return s.dueDate || null;
@@ -93,6 +113,8 @@ const CSS = `
   tr:last-child td{border-bottom:none;}
   tfoot td{background:#f8fafc;font-weight:900;border-top:2px solid #e5e7eb;}
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid;}
+  .loan-row td{background:#f5f3ff;}
+  .loan-row:hover td{background:#ede9fe;}
   .empty{padding:48px;text-align:center;color:#94a3b8;}
   .backdrop{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:100;}
   .modal{width:min(640px,98vw);max-height:92vh;background:#fff;border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.25);}
@@ -119,6 +141,8 @@ const CSS = `
 `;
 
 export default function PaymentSchedulePage() {
+  const navigate = useNavigate();
+  const { hasAccess } = usePermissions();
   const [schedules, setSchedules] = useState([]);
   const [activeTab, setActiveTab] = useState('list');
   const [search, setSearch] = useState('');
@@ -133,7 +157,42 @@ export default function PaymentSchedulePage() {
   const [confirmModal, setConfirmModal] = useState(null);
   const [calOffset, setCalOffset] = useState(0);
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [accounts, setAccounts] = useState([]);
+  const [taxRates, setTaxRates] = useState([]);
+  const [taxGroups, setTaxGroups] = useState([]);
+  const [vouchers, setVouchers] = useState([]);
+  const [openMenuId, setOpenMenuId] = useState(null);
+  const [openActionsId, setOpenActionsId] = useState(null);
+  const [menuRect, setMenuRect] = useState(null);
+  const [actionsRect, setActionsRect] = useState(null);
+
+  function toggleVoucherMenu(id, e) {
+    if (openMenuId === id) { setOpenMenuId(null); setMenuRect(null); return; }
+    const r = e.currentTarget.getBoundingClientRect();
+    setOpenActionsId(null); setActionsRect(null);
+    setOpenMenuId(id); setMenuRect(r);
+  }
+  function toggleActionsMenu(id, e) {
+    if (openActionsId === id) { setOpenActionsId(null); setActionsRect(null); return; }
+    const r = e.currentTarget.getBoundingClientRect();
+    setOpenMenuId(null); setMenuRect(null);
+    setOpenActionsId(id); setActionsRect(r);
+  }
+  const [contacts, setContacts] = useState([]);
+  const [purposeCategories, setPurposeCategories] = useState([]);
   const [payModal, setPayModal] = useState(null); // { schedule, dueDate }
+  const [loans, setLoans] = useState([]);
+  const [filterSource, setFilterSource] = useState('all'); // 'all' | 'expenses' | 'loans'
+  const [expandedLoanIds, setExpandedLoanIds] = useState(new Set());
+  const [checkbooks, setCheckbooks] = useState([]);
+
+  function toggleLoanExpand(loanId) {
+    setExpandedLoanIds(prev => {
+      const next = new Set(prev);
+      next.has(loanId) ? next.delete(loanId) : next.add(loanId);
+      return next;
+    });
+  }
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); }
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });;
@@ -143,30 +202,132 @@ export default function PaymentSchedulePage() {
     return onSnapshot(q, snap => setSchedules(snap.docs.map(d=>({id:d.id,...d.data()}))));
   }, []);
 
-  // Load bank/cash accounts for the pay modal
+  // Load COA accounts (used for bank list + expense-account picker) and tax rates.
   useEffect(() => {
-    (async () => {
-      try {
-        const s = await getDocs(collection(db,'coaAccounts'));
-        setBankAccounts(s.docs.map(d=>({id:d.id,...d.data()})).filter(a => /cash|bank/i.test(a.parentName||a.category||a.name||'')));
-      } catch { /* ignore */ }
-    })();
+    const u1 = onSnapshot(query(collection(db,'accounts'), orderBy('code')), snap => {
+      const list = snap.docs.map(d => ({ id:d.id, ...d.data() }));
+      setAccounts(list);
+      setBankAccounts(list.filter(a => ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) || /cash in bank/i.test(a.name||'')));
+    });
+    const u2 = onSnapshot(query(collection(db,'taxRates'), orderBy('name')), snap =>
+      setTaxRates(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(r => r.isActive !== false))
+    );
+    const u2g = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap =>
+      setTaxGroups(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(g => g.isActive !== false))
+    );
+    const u3 = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap =>
+      setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() })))
+    );
+    const u4 = onSnapshot(query(collection(db,'purposeCategories'), orderBy('name')), snap =>
+      setPurposeCategories(snap.docs.map(d => d.data().name).filter(Boolean))
+    );
+    return () => { u1(); u2(); u2g(); u3(); u4(); };
   }, []);
+
+  // Subscribe to vouchers linked to schedules so each row can show its derived status.
+  useEffect(() => {
+    const q = query(collection(db,'vouchers'), orderBy('preparationDate','desc'));
+    return onSnapshot(q, snap => setVouchers(
+      snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(v => v.linkedScheduleId)
+    ));
+  }, []);
+
+  // Load checkbooks for Check payment method
+  useEffect(() => {
+    return onSnapshot(query(collection(db,'checkbookMaster'), orderBy('bankCode')), snap =>
+      setCheckbooks(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(cb => cb.isActive !== false))
+    );
+  }, []);
+
+  // Live-load loan obligations from Financial Management (finc/profile)
+  useEffect(() => {
+    return onSnapshot(doc(db, 'finc', 'profile'), snap => {
+      const data = snap.data() || {};
+      setLoans(Array.isArray(data.loans) ? data.loans : []);
+    });
+  }, []);
+
+  // Close the row action menu on outside click / Escape.
+  useEffect(() => {
+    if (!openMenuId && !openActionsId) return;
+    const close = () => { setOpenMenuId(null); setOpenActionsId(null); setMenuRect(null); setActionsRect(null); };
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', e => e.key === 'Escape' && close());
+    return () => document.removeEventListener('click', close);
+  }, [openMenuId, openActionsId]);
+
+  /* ── Loan obligations derived from Financial Management ──────────────── */
+  // One row per exact payment date so every overdue installment is individually visible.
+  const loanSchedules = useMemo(() => {
+    const result = [];
+    loans.filter(l => l.disbursementDate && (l.termMonths||0) > 0).forEach(l => {
+      const start = new Date(l.disbursementDate);
+      if (isNaN(start.getTime())) return;
+      const baseAmt = loanMonthlyPmt(l);
+      const loanStatus = l.status === 'Disposed' ? 'Cancelled' : 'Active';
+      for (let i = 0; i < (l.termMonths || 0); i++) {
+        const m = new Date(start.getFullYear(), start.getMonth() + i, 1);
+        const key = m.getFullYear() + '-' + String(m.getMonth() + 1).padStart(2, '0');
+        const daysInM = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+        const addRow = (dayNum, suffix, amt) => {
+          const clamped = Math.min(Math.max(dayNum || 1, 1), daysInM);
+          const dueDate = key + '-' + String(clamped).padStart(2, '0');
+          result.push({
+            _isLoan: true, _loanId: l.id,
+            id: `loan-${l.id}-${key}${suffix}`,
+            title: l.name || `Loan ${l.id}`,
+            loanType: l.loanType || 'Term Loan',
+            contactName: l.name || '',
+            category: 'Loan Obligation',
+            frequency: 'One-Time',
+            paymentFrequency: l.paymentFrequency || 'Monthly',
+            dueDate,
+            amount: amt,
+            startDate: l.disbursementDate,
+            endDate: dueDate,
+            dueDay: clamped,
+            status: loanStatus,
+          });
+        };
+        if (l.paymentFrequency === 'Semi-Monthly') {
+          let d1 = 0, d2 = 0;
+          if (l.payDayMode === 'Variable per Month') {
+            const perMonth = (l.payDaysPerMonth || {})[key] || {};
+            d1 = parseInt(perMonth.d1) || parseInt(l.payDay1) || 15;
+            d2 = parseInt(perMonth.d2) || parseInt(l.payDay2) || 30;
+          } else {
+            d1 = parseInt(l.payDay1) || 15;
+            d2 = parseInt(l.payDay2) || 30;
+          }
+          const half = Math.round(baseAmt / 2 * 100) / 100;
+          addRow(d1, '-a', half);
+          addRow(d2, '-b', half);
+        } else {
+          addRow(parseInt(l.payDay1) || start.getDate(), '', baseAmt);
+        }
+      }
+    });
+    // Oldest (most overdue) first so past-due obligations appear at the top of the list
+    return result.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  }, [loans]);
 
   /* ── KPIs ────────────────────────────────────────────────────── */
   const today = new Date(); today.setHours(0,0,0,0);
   const cm = today.getMonth(), cy = today.getFullYear();
   const activeScheds = schedules.filter(s=>s.status!=='Cancelled');
-  const thisMonthTotal = activeScheds.reduce((sum,s)=>{
-    const occ = occurrencesInMonth(s, cy, cm);
-    return sum + occ.length * (parseFloat(s.amount)||0);
-  }, 0);
-  const pendingThisMonth = activeScheds.filter(s=>occurrencesInMonth(s,cy,cm).length>0).length;
-  const overdueCount = activeScheds.filter(s=>{
+  const activeLoanScheds = loanSchedules.filter(ls=>ls.status!=='Cancelled');
+  const allActive = [...activeScheds, ...activeLoanScheds];
+  const thisMonthTotal = allActive.reduce((sum,s)=>sum+occurrencesInMonth(s,cy,cm).length*(parseFloat(s.amount)||0),0);
+  const loanMonthTotal = activeLoanScheds.reduce((sum,s)=>sum+occurrencesInMonth(s,cy,cm).length*(parseFloat(s.amount)||0),0);
+  const pendingThisMonth = allActive.filter(s=>occurrencesInMonth(s,cy,cm).length>0).length;
+  const overdueCount = [
+    ...activeScheds,
+    ...activeLoanScheds,
+  ].filter(s=>{
     const nxt = nextOccurrence(s);
     return nxt && new Date(nxt) < today;
   }).length;
-  const annual12mo = activeScheds.reduce((sum,s)=>{
+  const annual12mo = allActive.reduce((sum,s)=>{
     let total=0;
     for(let i=0;i<12;i++){
       const m=(cm+i)%12, y=cy+Math.floor((cm+i)/12);
@@ -176,11 +337,45 @@ export default function PaymentSchedulePage() {
   }, 0);
 
   /* ── Filter ──────────────────────────────────────────────────── */
-  const filtered = schedules.filter(s=>{
+  const filtered = filterSource === 'loans' ? [] : schedules.filter(s=>{
     if (filterCat && s.category!==filterCat) return false;
     if (filterFreq && s.frequency!==filterFreq) return false;
     if (filterStatus && s.status!==filterStatus) return false;
-    if (search && !((s.title||'').toLowerCase().includes(search.toLowerCase())||(s.contactId||'').toLowerCase().includes(search.toLowerCase()))) return false;
+    if (search && !((s.title||'').toLowerCase().includes(search.toLowerCase())||(s.contactName||s.contactId||'').toLowerCase().includes(search.toLowerCase()))) return false;
+    return true;
+  });
+  // Grouped loan rows — one entry per loan for the list view
+  const groupedLoanRows = (() => {
+    const groups = {};
+    const todayMs = today.getTime();
+    (filterSource === 'expenses' ? [] : loanSchedules.filter(ls => {
+      if (filterStatus === 'Active' && ls.status !== 'Active') return false;
+      if (filterStatus === 'Cancelled' && ls.status !== 'Cancelled') return false;
+      if (search && !(ls.title.toLowerCase().includes(search.toLowerCase()) || ls.contactName.toLowerCase().includes(search.toLowerCase()))) return false;
+      return true;
+    })).forEach(ls => {
+      if (!groups[ls._loanId]) {
+        groups[ls._loanId] = { ...ls, id: `loan-group-${ls._loanId}`, _rows: [], _overdueCount: 0, _nextDue: null, _totalAmt: 0 };
+      }
+      const g = groups[ls._loanId];
+      g._rows.push(ls);
+      g._totalAmt = Math.round((g._totalAmt + (ls.amount || 0)) * 100) / 100;
+      if (new Date(ls.dueDate).getTime() < todayMs) {
+        g._overdueCount++;
+      } else if (!g._nextDue) {
+        g._nextDue = ls.dueDate; // rows are sorted asc — first non-overdue = soonest upcoming
+      }
+    });
+    return Object.values(groups).map(g => {
+      if (!g._nextDue && g._rows.length > 0) g._nextDue = g._rows[g._rows.length - 1].dueDate;
+      return g;
+    });
+  })();
+
+  const filteredLoans = filterSource === 'expenses' ? [] : loanSchedules.filter(ls=>{
+    if (filterStatus === 'Active' && ls.status !== 'Active') return false;
+    if (filterStatus === 'Cancelled' && ls.status !== 'Cancelled') return false;
+    if (search && !(ls.title.toLowerCase().includes(search.toLowerCase()) || ls.contactName.toLowerCase().includes(search.toLowerCase()))) return false;
     return true;
   });
 
@@ -190,17 +385,20 @@ export default function PaymentSchedulePage() {
   async function saveSchedule(form) {
     setSaving(true);
     try {
+      // Only the fields the create/edit modal owns. Payment-method fields
+      // (paymentMethod, pmCheckbookCode, pmChecks, pmBtBank, pmAdaDay, bankCode)
+      // are managed exclusively by PmModal / savePm so we don't overwrite them here.
       const payload = {
-        title: form.title||'', contactId: form.contactId||'', category: form.category||'',
+        title: form.title||'', contactId: form.contactId||'', contactName: form.contactName||'',
+        category: form.category||'',
         frequency: form.frequency||'Monthly', amount: parseFloat(form.amount)||0,
-        bankCode: form.bankCode||'', dueDate: form.dueDate||'',
+        dueDate: form.dueDate||'',
         startDate: form.startDate||'', endDate: form.endDate||'',
         dueDay: parseInt(form.dueDay)||0, status: form.status||'Active',
         notes: form.notes||'',
-        paymentMethod: form.paymentMethod||'',
-        pmCheckbookCode: form.pmCheckbookCode||'', pmCheckNo: form.pmCheckNo||'',
-        pmCheckBank: form.pmCheckBank||'', pmChecks: form.pmChecks||[],
-        pmBtBank: form.pmBtBank||'', pmAdaDay: form.pmAdaDay||'',
+        // Voucher pre-fill defaults (used by the “Create Voucher” action)
+        defaultExpenseAccountCode: form.defaultExpenseAccountCode||'',
+        defaultTaxRateId:          form.defaultTaxRateId||'',
         updatedAt: serverTimestamp(), updatedBy: auth.currentUser?.email||'',
       };
       if (form.id) {
@@ -231,12 +429,37 @@ export default function PaymentSchedulePage() {
     });
   }
 
+  function cancelAndDeleteSchedule(id) {
+    askConfirm('Cancel and permanently delete this schedule? This cannot be undone.', async () => {
+      await deleteDoc(doc(db,'paymentSchedules',id));
+      if (detailId===id) setDetailId(null);
+      showToast('Schedule cancelled and deleted.');
+    });
+  }
+
+  function endSchedule(id) {
+    askConfirm('End this schedule today? No future occurrences will be generated.', async () => {
+      const todayStr = new Date().toISOString().substring(0,10);
+      await updateDoc(doc(db,'paymentSchedules',id), {endDate: todayStr, updatedAt:serverTimestamp()});
+      showToast('Schedule ended.');
+    });
+  }
+
   async function savePm(form) {
     await updateDoc(doc(db,'paymentSchedules',form.id), {
       paymentMethod: form.paymentMethod||'',
-      pmCheckbookCode:form.pmCheckbookCode||'', pmCheckNo:form.pmCheckNo||'',
-      pmCheckBank:form.pmCheckBank||'', pmChecks:form.pmChecks||[],
-      pmBtBank:form.pmBtBank||'', pmAdaDay:form.pmAdaDay||'',
+      // Bank Transfer
+      pmBtBankName:      form.pmBtBankName||'',
+      pmBtAccountName:   form.pmBtAccountName||'',
+      pmBtAccountNumber: form.pmBtAccountNumber||'',
+      // Auto-Debit
+      pmAdaAccountCode: form.pmAdaAccountCode||'',
+      pmAdaDay:         form.pmAdaDay||'',
+      // Check
+      pmCheckbookCode: form.pmCheckbookCode||'',
+      pmChecks: (form.pmChecks||[]).map(c =>
+        typeof c === 'object' ? c : { checkNo:c, checkDate:'', amount:'' }
+      ),
       updatedAt:serverTimestamp(),
     });
     setPmModal(null); showToast('Payment method saved.');
@@ -245,66 +468,301 @@ export default function PaymentSchedulePage() {
   const detailSched = detailId ? schedules.find(s=>s.id===detailId) : null;
   const TABS = [{key:'list',label:'Schedules'},{key:'paymentmethod',label:'Payment Method'},{key:'calendar',label:'Calendar'},{key:'history',label:'History'}];
 
+  /* ── Derived per-row payment status ─────────────────────────────
+   *   Upcoming  — no linked voucher, due in future
+   *   Due       — no linked voucher, due today
+   *   Drafted   — linked voucher exists, not yet Paid / Disbursed
+   *   Paid      — linked voucher is Paid or Disbursed
+   *   Overdue   — no linked voucher and due date passed
+   *   Cancelled — schedule cancelled
+   * The match is by linkedScheduleId + linkedScheduleDate (or by id alone
+   * for one-time schedules where the next-occurrence date equals dueDate).
+   */
+  function scheduleVoucher(scheduleId, occurrenceDate) {
+    if (!scheduleId) return null;
+    return vouchers.find(v => v.linkedScheduleId === scheduleId &&
+      (!occurrenceDate || !v.linkedScheduleDate || v.linkedScheduleDate === occurrenceDate));
+  }
+  function rowStatus(s, nxt) {
+    if (s.status === 'Cancelled') return { key:'Cancelled', label:'Cancelled', style:{background:'#f8fafc',borderColor:'#e2e8f0',color:'#94a3b8'} };
+    const v = scheduleVoucher(s.id, nxt);
+    if (v) {
+      const paid = ['Paid','Disbursed','Approved'].includes(v.status);
+      return paid
+        ? { key:'Paid', label:'Paid', style:{background:'#f0fdf4',borderColor:'#bbf7d0',color:'#15803d'}, voucher:v }
+        : { key:'Drafted', label:`${v.voucherType||'CV'} ${v.status||'Draft'}`, style:{background:'#eff6ff',borderColor:'#bfdbfe',color:'#1d4ed8'}, voucher:v };
+    }
+    if (!nxt) return { key:'None', label:'—', style:{background:'#f8fafc',borderColor:'#e2e8f0',color:'#94a3b8'} };
+    const d = new Date(nxt); d.setHours(0,0,0,0);
+    if (d < today) return { key:'Overdue', label:'Overdue', style:{background:'#fef2f2',borderColor:'#fecaca',color:'#b91c1c'} };
+    if (d.getTime() === today.getTime()) return { key:'Due', label:'Due today', style:{background:'#fff7ed',borderColor:'#fed7aa',color:'#c2410c'} };
+    return { key:'Upcoming', label:'Upcoming', style:{background:'#f0f9ff',borderColor:'#bae6fd',color:'#0369a1'} };
+  }
+
+  /* ── Hand off to Vouchers / Check Registry with prefill ───────── */
+  function launchVoucher(s, kind /* 'PAYMENT' | 'CHECK' | 'LOAN' */, occurrenceDate) {
+    const payload = {
+      target: kind === 'CHECK' ? 'check' : 'voucher',
+      voucherType: kind === 'CHECK' ? 'CV' : kind, // PAYMENT | LOAN
+      scheduleId:     s.id,
+      scheduleTitle:  s.title || '',
+      scheduleSource: 'manual',
+      occurrenceDate: occurrenceDate || nextOccurrence(s) || s.dueDate || '',
+      contactId:   s.contactId || '',
+      contactName: s.contactName || s.contactId || s.title || '',
+      amount: parseFloat(s.amount) || 0,
+      expenseAccountCode: s.defaultExpenseAccountCode || '',
+      taxRateId:          s.defaultTaxRateId || '',
+      bankCode:           s.bankCode || s.pmBtBank || s.pmCheckBank || '',
+      purposeCategory:    s.category || '',
+      notes: `${s.title || ''} — ${occurrenceDate || s.dueDate || ''}`.trim(),
+    };
+    setSchedulePrefill(payload);
+    if (kind === 'CHECK') navigate('/scalebooks/checks');
+    else                  navigate('/scalebooks/vouchers');
+  }
+
   /* ══ Tab: List ═══════════════════════════════════════════════ */
   function ListTab() {
+    const totalRows = filtered.length + groupedLoanRows.length;
     return (
       <div>
         <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center',flexWrap:'wrap'}}>
           <button className="btn btn-primary btn-sm" onClick={()=>setModal({})}>+ New Schedule</button>
-          <span style={{marginLeft:'auto',fontSize:12,color:'#64748b'}}>{filtered.length} result{filtered.length!==1?'s':''}</span>
+          <span style={{marginLeft:'auto',fontSize:12,color:'#64748b'}}>{totalRows} result{totalRows!==1?'s':''}</span>
         </div>
-        {filtered.length===0?<div className="empty">No payment schedules match your filters.</div>:(
+        {totalRows===0?<div className="empty">No schedules match your filters.</div>:(
           <div style={{overflowX:'auto'}}>
             <table>
               <thead><tr>
-                <th>Title</th><th>Vendor</th><th>Category</th><th>Frequency</th>
-                <th style={{textAlign:'right'}}>Amount</th><th>Next Due</th>
-                <th>Bank</th><th>Method</th><th>Status</th><th></th>
+                <th>Title</th><th>Vendor / Lender</th><th>Category</th><th>Frequency</th>
+                <th style={{textAlign:'right'}}>Amount</th><th style={{minWidth:110,whiteSpace:'nowrap'}}>Next Due</th>
+                <th>Method</th><th>Payment</th><th>Status</th><th style={{minWidth:160}}></th>
               </tr></thead>
               <tbody>
                 {filtered.map(s=>{
                   const nxt=nextOccurrence(s);
                   const overdue=nxt&&new Date(nxt)<today;
                   const cs=catStyle(s.category);
+                  const rs=rowStatus(s,nxt);
+                  const defaultKind = s.paymentMethod==='Check' ? 'CHECK' : 'PAYMENT';
                   return (
-                    <tr key={s.id}>
+                    <React.Fragment key={s.id}>
+                    <tr>
                       <td>
                         <button onClick={()=>setDetailId(s.id===detailId?null:s.id)} style={{background:'none',border:'none',cursor:'pointer',fontWeight:700,color:'#0b1220',fontSize:12,padding:0,textAlign:'left'}}>
                           {s.title||'—'}
                           {s.frequency!=='One-Time'&&<span style={{marginLeft:5,fontSize:10}}>🔁</span>}
                         </button>
                       </td>
-                      <td style={{color:'#64748b'}}>{s.contactId||'—'}</td>
+                      <td style={{color:'#64748b'}}>{s.contactName||s.contactId||'—'}</td>
                       <td><span className="pill" style={cs}>{s.category||'—'}</span></td>
                       <td style={{color:'#64748b'}}>{s.frequency}</td>
                       <td style={{textAlign:'right',fontWeight:700}}>{fmtCur(s.amount)}</td>
-                      <td style={{color:overdue?'#dc2626':'#0b1220',fontWeight:overdue?700:400}}>
+                      <td style={{color:overdue?'#dc2626':'#0b1220',fontWeight:overdue?700:400,whiteSpace:'nowrap'}}>
                         {nxt||<span style={{color:'#94a3b8'}}>—</span>}
                         {overdue&&<span style={{marginLeft:4,fontSize:10}}>⚠</span>}
                       </td>
-                      <td style={{color:'#64748b',fontFamily:'monospace',fontSize:11}}>{s.bankCode||'—'}</td>
                       <td style={{color:'#64748b',fontSize:11}}>{s.paymentMethod||<span style={{color:'#e5e7eb'}}>—</span>}</td>
+                      <td>
+                        {rs.voucher
+                          ? <button onClick={()=>navigate('/scalebooks/vouchers')} className="pill" style={{...rs.style,border:`1px solid ${rs.style.borderColor}`,cursor:'pointer'}} title={`Voucher ${rs.voucher.voucherId||rs.voucher.id}`}>{rs.label}</button>
+                          : <span className="pill" style={rs.style}>{rs.label}</span>}
+                      </td>
                       <td><span className={`pill ${s.status==='Cancelled'?'':'pill-active'}`} style={s.status==='Cancelled'?{background:'#f8fafc',borderColor:'#e2e8f0',color:'#94a3b8'}:{}}>{s.status||'Active'}</span></td>
                       <td>
-                        <div style={{display:'flex',gap:4}}>
-                          <button className="btn btn-ghost btn-sm" onClick={()=>setModal({...s})}>Edit</button>
-                          <button className="btn btn-ghost btn-sm" title="Set payment method" onClick={()=>setPmModal({...s})}>💳</button>
-                          <button onClick={()=>cancelSchedule(s.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}} title="Cancel">✕</button>
+                        <div style={{display:'flex',gap:4,alignItems:'center',position:'relative',whiteSpace:'nowrap'}}>
+                          {!rs.voucher && s.status!=='Cancelled' && (
+                            <div style={{position:'relative'}} onClick={e=>e.stopPropagation()}>
+                              <button className="btn btn-primary btn-sm" onClick={e=>toggleVoucherMenu(s.id,e)} title="Create voucher for this schedule">+ Voucher ▾</button>
+                              {openMenuId===s.id && menuRect && createPortal((
+                                <div onClick={e=>e.stopPropagation()} style={{position:'fixed',top:menuRect.bottom+4,right:Math.max(8,window.innerWidth-menuRect.right),background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,boxShadow:'0 12px 32px rgba(0,0,0,.15)',zIndex:9999,minWidth:200,overflow:'hidden'}}>
+                                  {[
+                                    {k:'PAYMENT', label:'Payment Voucher', sub:'Bank transfer / cash'},
+                                    {k:'CHECK',   label:'Check Voucher',   sub:'Issue check (incl. PDC)'},
+                                    {k:'LOAN',    label:'Loan Voucher',    sub:'Loan principal/interest'},
+                                  ].map(opt => (
+                                    <button key={opt.k} onClick={()=>{setOpenMenuId(null);setMenuRect(null);launchVoucher(s,opt.k,nxt);}} style={{display:'block',width:'100%',textAlign:'left',background:opt.k===defaultKind?'#fff7ed':'none',border:0,padding:'9px 12px',cursor:'pointer',fontSize:12,fontFamily:'inherit'}}>
+                                      <div style={{fontWeight:700,color:'#0b1220'}}>{opt.label}{opt.k===defaultKind?' ★':''}</div>
+                                      <div style={{fontSize:10,color:'#64748b'}}>{opt.sub}</div>
+                                    </button>
+                                  ))}
+                                </div>
+                              ), document.body)}
+                            </div>
+                          )}
+                          <div style={{position:'relative'}} onClick={e=>e.stopPropagation()}>
+                            <button
+                              onClick={e=>toggleActionsMenu(s.id,e)}
+                              title="More actions"
+                              style={{background:'none',border:'1px solid #e5e7eb',borderRadius:6,cursor:'pointer',fontSize:16,lineHeight:1,padding:'2px 8px',color:'#64748b',fontWeight:900}}
+                            >⋮</button>
+                            {openActionsId===s.id && actionsRect && createPortal((
+                              <div onClick={e=>e.stopPropagation()} style={{position:'fixed',top:actionsRect.bottom+4,right:Math.max(8,window.innerWidth-actionsRect.right),background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,boxShadow:'0 12px 32px rgba(0,0,0,.15)',zIndex:9999,minWidth:200,overflow:'hidden'}}>
+                                {[
+                                  {k:'edit',   label:'Edit',              color:'#0b1220', onClick:()=>setModal({...s})},
+                                  {k:'cancel', label:'Cancel',            color:'#b45309', onClick:()=>cancelSchedule(s.id), disabled:s.status==='Cancelled'},
+                                  {k:'cdel',   label:'Cancel and Delete', color:'#dc2626', onClick:()=>cancelAndDeleteSchedule(s.id)},
+                                  {k:'end',    label:'End Schedule',      color:'#0b1220', onClick:()=>endSchedule(s.id), disabled:s.frequency==='One-Time'},
+                                ].map(opt => (
+                                  <button
+                                    key={opt.k}
+                                    disabled={opt.disabled}
+                                    onClick={()=>{setOpenActionsId(null);setActionsRect(null);opt.onClick();}}
+                                    style={{display:'block',width:'100%',textAlign:'left',background:'none',border:0,padding:'9px 12px',cursor:opt.disabled?'not-allowed':'pointer',fontSize:12,fontFamily:'inherit',color:opt.disabled?'#cbd5e1':opt.color,fontWeight:600}}
+                                  >{opt.label}</button>
+                                ))}
+                              </div>
+                            ), document.body)}
+                          </div>
                         </div>
                       </td>
                     </tr>
+                    {detailId===s.id&&<tr><td colSpan={10} style={{padding:'0 0 8px 0',background:'#f8fafc'}}><DetailPanel s={s} /></td></tr>}
+                    </React.Fragment>
+                  );
+                })}
+                {filtered.length > 0 && groupedLoanRows.length > 0 && (
+                  <tr>
+                    <td colSpan={10} style={{background:'#eef2ff',color:'#4338ca',fontWeight:800,fontSize:10,letterSpacing:'.07em',textTransform:'uppercase',padding:'6px 10px',borderTop:'2px solid #c7d2fe'}}>
+                      Loan Obligations — Financial Management
+                    </td>
+                  </tr>
+                )}
+                {/* Loan obligation rows (read-only, grouped by loan) */}
+                {groupedLoanRows.map(g => {
+                  const nxtDue = g._nextDue;
+                  const allOverdue = g._overdueCount === g._rows.length;
+                  const hasOverdue = g._overdueCount > 0;
+                  const nxtIsOverdue = nxtDue && new Date(nxtDue) < today;
+                  const isExpanded = expandedLoanIds.has(g._loanId);
+                  return (
+                    <React.Fragment key={g.id}>
+                      <tr className="loan-row" style={{cursor:'pointer'}} onClick={()=>toggleLoanExpand(g._loanId)}>
+                        <td>
+                          <span style={{fontWeight:700,color:'#0b1220',fontSize:12}}>
+                            <span style={{display:'inline-block',width:14,color:'#6366f1',fontSize:10,marginRight:4,fontWeight:900}}>{isExpanded ? '▾' : '▸'}</span>
+                            {g.title}
+                          </span>
+                          <span style={{marginLeft:6,fontSize:10,fontWeight:700,color:'#4338ca',background:'#eef2ff',border:'1px solid #c7d2fe',borderRadius:4,padding:'1px 5px'}}>Loan</span>
+                        </td>
+                        <td style={{color:'#64748b'}}>{g.contactName||'—'}</td>
+                        <td><span className="pill" style={{background:'#f5f3ff',borderColor:'#ddd6fe',color:'#7c3aed'}}>{g.loanType||'Loan'}</span></td>
+                        <td style={{color:'#64748b'}}>{g.paymentFrequency||'Monthly'}</td>
+                        <td style={{textAlign:'right',fontWeight:700}}>
+                          {fmtCur(g.amount)}
+                          <div style={{fontSize:10,color:'#94a3b8',fontWeight:400}}>{g._rows.length} payment{g._rows.length!==1?'s':''}</div>
+                        </td>
+                        <td style={{color: allOverdue||nxtIsOverdue ? '#dc2626' : '#0b1220', fontWeight: allOverdue||nxtIsOverdue ? 700 : 400, whiteSpace:'nowrap'}}>
+                          {nxtDue || <span style={{color:'#94a3b8'}}>—</span>}
+                          {(allOverdue || nxtIsOverdue) && <span style={{marginLeft:4,fontSize:10}}>⚠</span>}
+                          {hasOverdue && (
+                            <div style={{fontSize:10,color:'#dc2626',fontWeight:700}}>
+                              {g._overdueCount} overdue
+                            </div>
+                          )}
+                        </td>
+                        <td style={{color:'#94a3b8',fontSize:11}}>—</td>
+                        <td><span className="pill" style={{background:'#f5f3ff',borderColor:'#ddd6fe',color:'#7c3aed'}}>Loan Obligation</span></td>
+                        <td><span className="pill" style={g.status==='Cancelled'?{background:'#f8fafc',borderColor:'#e2e8f0',color:'#94a3b8'}:{background:'#f0fdf4',borderColor:'#bbf7d0',color:'#15803d'}}>{g.status}</span></td>
+                        <td onClick={e=>e.stopPropagation()}>
+                          <div style={{display:'flex',gap:4,alignItems:'center'}}>
+                            {g.status !== 'Cancelled' && (
+                              <div style={{position:'relative'}} onClick={e=>e.stopPropagation()}>
+                                <button className="btn btn-primary btn-sm" onClick={e=>toggleVoucherMenu(g.id,e)}>+ Voucher ▾</button>
+                                {openMenuId===g.id && menuRect && createPortal((
+                                  <div onClick={e=>e.stopPropagation()} style={{position:'fixed',top:menuRect.bottom+4,right:Math.max(8,window.innerWidth-menuRect.right),background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,boxShadow:'0 12px 32px rgba(0,0,0,.15)',zIndex:9999,minWidth:200,overflow:'hidden'}}>
+                                    {[
+                                      {k:'PAYMENT', label:'Payment Voucher', sub:'Bank transfer / cash'},
+                                      {k:'CHECK',   label:'Check Voucher',   sub:'Issue check (incl. PDC)'},
+                                      {k:'LOAN',    label:'Loan Voucher',    sub:'Loan principal/interest'},
+                                    ].map(opt => (
+                                      <button key={opt.k} onClick={()=>{setOpenMenuId(null);setMenuRect(null);launchVoucher(g, opt.k, g._nextDue);}} style={{display:'block',width:'100%',textAlign:'left',background:'none',border:0,padding:'9px 12px',cursor:'pointer',fontSize:12,fontFamily:'inherit'}}>
+                                        <div style={{fontWeight:700,color:'#0b1220'}}>{opt.label}</div>
+                                        <div style={{fontSize:10,color:'#64748b'}}>{opt.sub}</div>
+                                      </button>
+                                    ))}
+                                  </div>
+                                ), document.body)}
+                              </div>
+                            )}
+                            {hasAccess('Financial Management')
+                              ? <button className="btn btn-ghost btn-sm" onClick={()=>navigate('/scalebooks/financial')} title="Manage in Financial Management">View</button>
+                              : <span title="You do not have access to Financial Management" style={{fontSize:11,color:'#94a3b8',cursor:'not-allowed',padding:'3px 8px',border:'1px solid #e5e7eb',borderRadius:6,display:'inline-block'}}>No access</span>
+                            }
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded && g._rows.map((row, ri) => {
+                        const rowOverdue = row.dueDate && new Date(row.dueDate) < today;
+                        return (
+                          <tr key={row.id} style={{background: rowOverdue ? '#fef2f2' : '#f9f8ff'}}>
+                            <td style={{paddingLeft:28,fontSize:11,color:'#64748b'}}>Payment {ri + 1}</td>
+                            <td style={{color:'#94a3b8',fontSize:11}}>—</td>
+                            <td></td>
+                            <td style={{fontSize:11,color:'#94a3b8'}}>One-Time</td>
+                            <td style={{textAlign:'right',fontWeight:600,fontSize:12}}>{fmtCur(row.amount)}</td>
+                            <td style={{fontSize:12,color:rowOverdue?'#dc2626':'#374151',fontWeight:rowOverdue?700:400,whiteSpace:'nowrap'}}>
+                              {row.dueDate}
+                              {rowOverdue && <span style={{marginLeft:4,fontSize:10}}>⚠</span>}
+                            </td>
+                            <td></td><td></td><td></td>
+                            <td>
+                              <div style={{position:'relative'}} onClick={e=>e.stopPropagation()}>
+                                <button className="btn btn-primary btn-sm" onClick={e=>toggleVoucherMenu(row.id,e)}>+ Voucher ▾</button>
+                                {openMenuId===row.id && menuRect && createPortal((
+                                  <div onClick={e=>e.stopPropagation()} style={{position:'fixed',top:menuRect.bottom+4,right:Math.max(8,window.innerWidth-menuRect.right),background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,boxShadow:'0 12px 32px rgba(0,0,0,.15)',zIndex:9999,minWidth:200,overflow:'hidden'}}>
+                                    {[
+                                      {k:'PAYMENT', label:'Payment Voucher', sub:'Bank transfer / cash'},
+                                      {k:'CHECK',   label:'Check Voucher',   sub:'Issue check (incl. PDC)'},
+                                      {k:'LOAN',    label:'Loan Voucher',    sub:'Loan principal/interest'},
+                                    ].map(opt => (
+                                      <button key={opt.k} onClick={()=>{setOpenMenuId(null);setMenuRect(null);launchVoucher(row, opt.k, row.dueDate);}} style={{display:'block',width:'100%',textAlign:'left',background:'none',border:0,padding:'9px 12px',cursor:'pointer',fontSize:12,fontFamily:'inherit'}}>
+                                        <div style={{fontWeight:700,color:'#0b1220'}}>{opt.label}</div>
+                                        <div style={{fontSize:10,color:'#64748b'}}>{opt.sub}</div>
+                                      </button>
+                                    ))}
+                                  </div>
+                                ), document.body)}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
-              <tfoot><tr>
-                <td colSpan={4} style={{fontWeight:900}}>TOTAL (filtered)</td>
-                <td style={{textAlign:'right'}}>{fmtCur(filtered.reduce((s,r)=>s+(parseFloat(r.amount)||0),0))}</td>
-                <td colSpan={5}></td>
-              </tr></tfoot>
+              <tfoot>
+                {filterSource === 'all' && filtered.length > 0 && groupedLoanRows.length > 0 ? (
+                  <>
+                    <tr>
+                      <td colSpan={4} style={{fontWeight:700,color:'#64748b'}}>Expense Schedules</td>
+                      <td style={{textAlign:'right',fontWeight:700,color:'#64748b'}}>{fmtCur(filtered.reduce((s,r)=>s+(parseFloat(r.amount)||0),0))}</td>
+                      <td colSpan={5}></td>
+                    </tr>
+                    <tr>
+                      <td colSpan={4} style={{fontWeight:700,color:'#7c3aed'}}>Loan Obligations</td>
+                      <td style={{textAlign:'right',fontWeight:700,color:'#7c3aed'}}>{fmtCur(filteredLoans.reduce((s,r)=>s+(parseFloat(r.amount)||0),0))}</td>
+                      <td colSpan={5}></td>
+                    </tr>
+                    <tr style={{borderTop:'2px solid #e5e7eb'}}>
+                      <td colSpan={4} style={{fontWeight:900}}>COMBINED TOTAL</td>
+                      <td style={{textAlign:'right',fontWeight:900}}>{fmtCur([...filtered,...filteredLoans].reduce((s,r)=>s+(parseFloat(r.amount)||0),0))}</td>
+                      <td colSpan={5}></td>
+                    </tr>
+                  </>
+                ) : (
+                  <tr>
+                    <td colSpan={4} style={{fontWeight:900}}>TOTAL (filtered)</td>
+                    <td style={{textAlign:'right'}}>{fmtCur([...filtered,...filteredLoans].reduce((s,r)=>s+(parseFloat(r.amount)||0),0))}</td>
+                    <td colSpan={5}></td>
+                  </tr>
+                )}
+              </tfoot>
             </table>
           </div>
         )}
-        {detailSched&&<DetailPanel s={detailSched} />}
       </div>
     );
   }
@@ -345,7 +803,7 @@ export default function PaymentSchedulePage() {
                           <td style={{color:'#64748b'}}>{s.frequency}</td>
                           <td style={{textAlign:'right',fontWeight:700}}>{fmtCur(s.amount)}</td>
                           <td style={{color:overdue?'#dc2626':'#0b1220'}}>{nxt||'—'}</td>
-                          <td style={{fontFamily:'monospace',fontSize:11,color:'#64748b'}}>{s.bankCode||'—'}</td>
+                          <td style={{fontSize:11,color:'#64748b'}}>{s.paymentMethod==='Bank Transfer'?(s.pmBtBankName||'—'):s.paymentMethod==='Auto-Debit'?(s.pmAdaAccountCode||'—'):s.paymentMethod==='Check'?(s.pmCheckbookCode?`CB: ${s.pmCheckbookCode.slice(0,8)}…`:'—'):'—'}</td>
                           <td>
                             <div style={{display:'flex',gap:4}}>
                               <button className="btn btn-ghost btn-sm" onClick={()=>setModal({...s})}>Edit</button>
@@ -392,11 +850,18 @@ export default function PaymentSchedulePage() {
           while(cells.length%7) cells.push(null);
           const weeks=Array.from({length:cells.length/7},(_,i)=>cells.slice(i*7,i*7+7));
           const dayEvents={};
-          filtered.filter(s=>s.status!=='Cancelled').forEach(s=>{
+          (filterSource !== 'loans' ? filtered : []).filter(s=>s.status!=='Cancelled').forEach(s=>{
             occurrencesInMonth(s,year,month).forEach(dateStr=>{
               const d=parseInt(dateStr.split('-')[2]);
               if(!dayEvents[d]) dayEvents[d]=[];
               dayEvents[d].push(s);
+            });
+          });
+          (filterSource !== 'expenses' ? filteredLoans : []).filter(ls=>ls.status!=='Cancelled').forEach(ls=>{
+            occurrencesInMonth(ls,year,month).forEach(dateStr=>{
+              const d=parseInt(dateStr.split('-')[2]);
+              if(!dayEvents[d]) dayEvents[d]=[];
+              dayEvents[d].push({...ls, _calIsLoan: true});
             });
           });
           return (
@@ -409,7 +874,7 @@ export default function PaymentSchedulePage() {
                     {day&&(<>
                       <div className="cal-day" style={{color:day===today.getDate()&&month===today.getMonth()&&year===today.getFullYear()?'#f97316':'#0b1220'}}>{day}</div>
                       {(dayEvents[day]||[]).slice(0,3).map((s,i)=>(
-                        <div key={i} className="cal-ev" style={catStyle(s.category)}>
+                        <div key={i} className="cal-ev" style={s._calIsLoan ? {background:'#f5f3ff',borderColor:'#ddd6fe',color:'#7c3aed'} : catStyle(s.category)}>
                           <div style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:700}}>{s.title}</div>
                           <div>{fmtCur(s.amount)}</div>
                         </div>
@@ -473,9 +938,16 @@ export default function PaymentSchedulePage() {
     const cs=catStyle(s.category);
     const PM_ICONS={'Check':'✏️','Bank Transfer':'🏦','Auto-Debit':'🔁'};
     let pmDetails='';
-    if(s.paymentMethod==='Check'){pmDetails=(s.pmChecks||[]).join(', ')||s.pmCheckNo||'—';}
-    else if(s.paymentMethod==='Bank Transfer'){pmDetails=s.pmBtBank||'—';}
-    else if(s.paymentMethod==='Auto-Debit'){pmDetails=`Day ${s.pmAdaDay||'—'}`;}
+    if(s.paymentMethod==='Check'){
+      const cnt=(s.pmChecks||[]).length;
+      pmDetails=cnt?`${cnt} check${cnt!==1?'s':''} queued`:'—';
+    } else if(s.paymentMethod==='Bank Transfer'){
+      const parts=[s.pmBtBankName, s.pmBtAccountName, s.pmBtAccountNumber].filter(Boolean);
+      pmDetails=parts.join(' · ')||'—';
+    } else if(s.paymentMethod==='Auto-Debit'){
+      const acct=s.pmAdaAccountCode?bankAccounts.find(a=>a.code===s.pmAdaAccountCode):null;
+      pmDetails=`${acct?acct.name:s.pmAdaAccountCode||'?'}${s.pmAdaDay?` · Day ${s.pmAdaDay}`:''}` || '—';
+    }
     return (
       <div style={{marginTop:16,background:'#f8fafc',border:'1px solid #e5e7eb',borderRadius:12,padding:16}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
@@ -491,7 +963,7 @@ export default function PaymentSchedulePage() {
           </div>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:'8px 16px',fontSize:12}}>
-          {[['Vendor',s.contactId||'—'],['Frequency',s.frequency],['Amount',fmtCur(s.amount)],['Bank / Fund',s.bankCode||'—'],['Due Day',s.dueDay||'—'],['Start Date',s.startDate||s.dueDate||'—'],['End Date',s.endDate||'—'],['Next Due', <span style={{color:overdue?'#dc2626':'inherit'}}>{nxt||(s.status==='Cancelled'?'N/A':'—')}{overdue?' ⚠':''}</span>],['Payment Method',`${PM_ICONS[s.paymentMethod]||'❓'} ${s.paymentMethod||'Unspecified'}`],['PM Details',pmDetails]].map(([lbl,val])=>(
+          {[['Vendor',s.contactName||s.contactId||'—'],['Frequency',s.frequency],['Amount',fmtCur(s.amount)],['Bank / Fund',s.bankCode||'—'],['Due Day',s.dueDay||'—'],['Start Date',s.startDate||s.dueDate||'—'],['End Date',s.endDate||'—'],['Next Due', <span style={{color:overdue?'#dc2626':'inherit'}}>{nxt||(s.status==='Cancelled'?'N/A':'—')}{overdue?' ⚠':''}</span>],['Payment Method',`${PM_ICONS[s.paymentMethod]||'❓'} ${s.paymentMethod||'Unspecified'}`],['PM Details',pmDetails]].map(([lbl,val])=>(
             <div key={lbl}><div style={{fontSize:9,fontWeight:800,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:2}}>{lbl}</div><div style={{fontWeight:600}}>{val}</div></div>
           ))}
         </div>
@@ -500,10 +972,16 @@ export default function PaymentSchedulePage() {
     );
   }
 
-  /* ══ Schedule Form Modal ════════════════════════════════════ */
+  /* ══ Schedule Form Modal ════════════════════════════════════
+   *  Captures only the essentials needed for a recurring/one-time
+   *  payable reminder. Payment Method is configured separately via
+   *  the 💳 row action (see PmModal). Voucher pre-fill defaults
+   *  (account + tax) are kept inline because they're trivial picks
+   *  that materially improve the “Create Voucher” hand-off.
+   */
   function ScheduleModal() {
     const isEdit=!!(modal&&modal.id);
-    const [form,setForm]=useState({title:'',contactId:'',category:'',frequency:'Monthly',amount:'',bankCode:'',dueDate:'',startDate:'',endDate:'',dueDay:'',status:'Active',notes:'',paymentMethod:'',pmCheckbookCode:'',pmCheckNo:'',pmCheckBank:'',pmChecks:[],pmBtBank:'',pmAdaDay:'',...modal});
+    const [form,setForm]=useState({title:'',contactId:'',category:'',frequency:'Monthly',amount:'',dueDate:'',startDate:'',endDate:'',dueDay:'',status:'Active',notes:'',defaultExpenseAccountCode:'',defaultTaxRateId:'',...modal});
     const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
     const isRecurring=form.frequency!=='One-Time';
     return (
@@ -513,11 +991,26 @@ export default function PaymentSchedulePage() {
           <div className="modal-b">
             <div className="grid3">
               <div className="field col3"><label>Title *</label><input value={form.title} onChange={e=>upd('title',e.target.value)} /></div>
-              <div className="field"><label>Vendor / Contact</label><input value={form.contactId} onChange={e=>upd('contactId',e.target.value)} /></div>
-              <div className="field"><label>Category</label><select value={form.category} onChange={e=>upd('category',e.target.value)}><option value="">— None —</option>{CATEGORIES.map(c=><option key={c}>{c}</option>)}{!CATEGORIES.includes(form.category)&&form.category&&<option>{form.category}</option>}</select></div>
+              <div className="field col2">
+                <label>Vendor / Contact</label>
+                <ContactPicker
+                  contacts={contacts}
+                  value={form.contactId||''}
+                  displayName={form.contactName||''}
+                  onChange={({contactId,contactName})=>setForm(f=>({...f,contactId:contactId||'',contactName:contactName||''}))}
+                  placeholder="Search vendor…"
+                />
+              </div>
+              <div className="field">
+                <label>Category</label>
+                <select value={form.category} onChange={e=>upd('category',e.target.value)}>
+                  <option value="">— None —</option>
+                  {purposeCategories.map(c=><option key={c} value={c}>{c}</option>)}
+                  {form.category && !purposeCategories.includes(form.category) && <option value={form.category}>{form.category}</option>}
+                </select>
+              </div>
               <div className="field"><label>Frequency</label><select value={form.frequency} onChange={e=>upd('frequency',e.target.value)}>{FREQS.map(f=><option key={f}>{f}</option>)}</select></div>
               <div className="field"><label>Amount *</label><input type="number" step="0.01" value={form.amount} onChange={e=>upd('amount',e.target.value)} /></div>
-              <div className="field"><label>Bank / Fund</label><input value={form.bankCode} onChange={e=>upd('bankCode',e.target.value)} placeholder="e.g. BDO-001" /></div>
               <div className="field"><label>Status</label><select value={form.status} onChange={e=>upd('status',e.target.value)}>{STATUSES.map(s=><option key={s}>{s}</option>)}</select></div>
             </div>
             {!isRecurring&&<div className="field" style={{marginBottom:10}}><label>Due Date</label><input type="date" value={form.dueDate} onChange={e=>upd('dueDate',e.target.value)} /></div>}
@@ -526,14 +1019,27 @@ export default function PaymentSchedulePage() {
               <div className="field"><label>End Date</label><input type="date" value={form.endDate} onChange={e=>upd('endDate',e.target.value)} /></div>
               <div className="field"><label>Due Day of Month</label><input type="number" min="1" max="31" value={form.dueDay} onChange={e=>upd('dueDay',e.target.value)} /></div>
             </div>}
-            <div className="sec-hdr">Payment Method</div>
-            <div style={{display:'flex',gap:8,marginBottom:10}}>
-              {['','Check','Bank Transfer','Auto-Debit'].map(pm=><button key={pm||'none'} className={`btn btn-sm ${form.paymentMethod===pm?'btn-primary':'btn-ghost'}`} onClick={()=>upd('paymentMethod',pm)}>{pm||'None'}</button>)}
+            <div className="grid3">
+              <div className="field col2">
+                <label>Expense / COA Account</label>
+                <AccountCombobox
+                  rawAccounts={accounts}
+                  value={form.defaultExpenseAccountCode||''}
+                  onChange={v=>upd('defaultExpenseAccountCode',v)}
+                  placeholder="— Select account —"
+                />
+              </div>
+              <div className="field">
+                <label>Tax Rate</label>
+                <select value={form.defaultTaxRateId||''} onChange={e=>upd('defaultTaxRateId',e.target.value)}>
+                  <option value="">— None —</option>
+                  {taxRates.length > 0 && <optgroup label="— Rates —">{taxRates.map(r=><option key={r.id} value={r.id}>{r.name} ({r.rate||0}%)</option>)}</optgroup>}
+                  {taxGroups.length > 0 && <optgroup label="— Groups —">{taxGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}</optgroup>}
+                </select>
+              </div>
             </div>
-            {form.paymentMethod==='Check'&&<div className="field" style={{marginBottom:10}}><label>Check Numbers / Series</label><input value={(form.pmChecks||[]).join(', ')} onChange={e=>upd('pmChecks',e.target.value.split(',').map(s=>s.trim()).filter(Boolean))} placeholder="BDO-0001, BDO-0002" /></div>}
-            {form.paymentMethod==='Bank Transfer'&&<div className="field" style={{marginBottom:10}}><label>Bank Account</label><input value={form.pmBtBank} onChange={e=>upd('pmBtBank',e.target.value)} /></div>}
-            {form.paymentMethod==='Auto-Debit'&&<div className="field" style={{marginBottom:10}}><label>Auto-Debit Day</label><input type="number" min="1" max="31" value={form.pmAdaDay} onChange={e=>upd('pmAdaDay',e.target.value)} /></div>}
             <div className="field" style={{marginTop:10}}><label>Notes</label><textarea rows={2} value={form.notes} onChange={e=>upd('notes',e.target.value)} style={{resize:'vertical'}} /></div>
+            {!isEdit && <div style={{marginTop:10,padding:'8px 10px',background:'#f8fafc',border:'1px solid #e5e7eb',borderRadius:8,fontSize:11,color:'#64748b'}}>💡 Set the Payment Method (Check / Bank Transfer / Auto-Debit) from the row's 💳 action after creating the schedule.</div>}
           </div>
           <div className="modal-f">
             <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
@@ -547,23 +1053,207 @@ export default function PaymentSchedulePage() {
   /* ══ PM Modal ════════════════════════════════════════════════ */
   function PmModal() {
     if(!pmModal) return null;
-    const [form,setForm]=useState({...pmModal});
+    const [form,setForm]=useState({
+      ...pmModal,
+      pmChecks: Array.isArray(pmModal.pmChecks)
+        ? pmModal.pmChecks.map(c => typeof c==='object' ? c : {checkNo:c,checkDate:'',amount:''})
+        : [],
+    });
     const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
+
+    // Load already-issued check numbers for the selected checkbook
+    const [issuedNums, setIssuedNums] = useState(new Set());
+    const [numsLoading, setNumsLoading] = useState(false);
+    useEffect(() => {
+      if (!form.pmCheckbookCode) { setIssuedNums(new Set()); return; }
+      setNumsLoading(true);
+      getDocs(query(collection(db,'checkRegister'), where('checkbookId','==',form.pmCheckbookCode)))
+        .then(snap => setIssuedNums(new Set(snap.docs.map(d => d.data().checkNumber).filter(Boolean))))
+        .catch(() => setIssuedNums(new Set()))
+        .finally(() => setNumsLoading(false));
+    }, [form.pmCheckbookCode]);
+
+    function checkError(checkNo, idx) {
+      if (!checkNo) return null;
+      if (issuedNums.has(String(checkNo))) return 'Already issued';
+      const dupe = (form.pmChecks||[]).some((c,i) => i!==idx && c.checkNo && c.checkNo===checkNo);
+      if (dupe) return 'Duplicate';
+      return null;
+    }
+    const hasCheckErrors = form.paymentMethod==='Check' &&
+      (form.pmChecks||[]).some((c,i) => !!checkError(c.checkNo, i));
+
+    function addCheck() {
+      const cb = checkbooks.find(c=>c.id===form.pmCheckbookCode);
+      let nextNo = '';
+      if (cb) {
+        const padLen = String(cb.endingNumber||'').length || 6;
+        const end = parseInt(cb.endingNumber) || Infinity;
+        // All numbers already taken: issued in checkRegister + already queued in this list
+        const taken = new Set([
+          ...Array.from(issuedNums),
+          ...(form.pmChecks||[]).map(c=>c.checkNo).filter(Boolean),
+        ]);
+        let candidate = parseInt(cb.nextCheckNumber||cb.startingNumber||1);
+        while (candidate <= end && taken.has(String(candidate).padStart(padLen,'0'))) candidate++;
+        if (candidate <= end) nextNo = String(candidate).padStart(padLen,'0');
+      }
+      upd('pmChecks',[...(form.pmChecks||[]),{checkNo:nextNo,checkDate:new Date().toISOString().slice(0,10),amount:form.amount||''}]);
+    }
+    function updateCheck(idx,field,val) {
+      upd('pmChecks',(form.pmChecks||[]).map((c,i)=>i===idx?{...c,[field]:val}:c));
+    }
+    function removeCheck(idx) {
+      upd('pmChecks',(form.pmChecks||[]).filter((_,i)=>i!==idx));
+    }
+    const selectedCb = checkbooks.find(c=>c.id===form.pmCheckbookCode);
+    const pendingTotal = (form.pmChecks||[]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
+
     return (
       <div className="backdrop" onClick={e=>e.target===e.currentTarget&&setPmModal(null)}>
-        <div className="modal modal-sm">
-          <div className="modal-h"><strong>Payment Method — {pmModal.title}</strong><button className="btn btn-ghost btn-sm" onClick={()=>setPmModal(null)}>✕</button></div>
-          <div className="modal-b">
-            <div style={{display:'flex',gap:8,marginBottom:14}}>
-              {['','Check','Bank Transfer','Auto-Debit'].map(pm=><button key={pm||'none'} className={`btn btn-sm ${form.paymentMethod===pm?'btn-primary':'btn-ghost'}`} onClick={()=>upd('paymentMethod',pm)}>{pm||'None'}</button>)}
+        <div className="modal" style={{maxWidth:520}}>
+          <div className="modal-h">
+            <strong>Payment Method — {pmModal.title}</strong>
+            <button className="btn btn-ghost btn-sm" onClick={()=>setPmModal(null)}>✕</button>
+          </div>
+          <div className="modal-b" style={{display:'flex',flexDirection:'column',gap:14}}>
+            {/* Method selector */}
+            <div style={{display:'flex',gap:8}}>
+              {['','Check','Bank Transfer','Auto-Debit'].map(pm=>(
+                <button key={pm||'none'}
+                  className={`btn btn-sm ${form.paymentMethod===pm?'btn-primary':'btn-ghost'}`}
+                  onClick={()=>upd('paymentMethod',pm)}>
+                  {pm||'None'}
+                </button>
+              ))}
             </div>
-            {form.paymentMethod==='Check'&&<div className="field"><label>Check Numbers / Series</label><input value={(form.pmChecks||[]).join(', ')} onChange={e=>upd('pmChecks',e.target.value.split(',').map(s=>s.trim()).filter(Boolean))} /></div>}
-            {form.paymentMethod==='Bank Transfer'&&<div className="field"><label>Bank Account</label><input value={form.pmBtBank||''} onChange={e=>upd('pmBtBank',e.target.value)} /></div>}
-            {form.paymentMethod==='Auto-Debit'&&<div className="field"><label>Auto-Debit Day</label><input type="number" min="1" max="31" value={form.pmAdaDay||''} onChange={e=>upd('pmAdaDay',e.target.value)} /></div>}
+
+            {/* Bank Transfer */}
+            {form.paymentMethod==='Bank Transfer'&&(
+              <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                <div className="field">
+                  <label>Bank Name</label>
+                  <input value={form.pmBtBankName||''} onChange={e=>upd('pmBtBankName',e.target.value)} placeholder="e.g. BDO, BPI, Metrobank" />
+                </div>
+                <div className="field">
+                  <label>Account Name</label>
+                  <input value={form.pmBtAccountName||''} onChange={e=>upd('pmBtAccountName',e.target.value)} placeholder="Name on the bank account" />
+                </div>
+                <div className="field">
+                  <label>Account Number</label>
+                  <input value={form.pmBtAccountNumber||''} onChange={e=>upd('pmBtAccountNumber',e.target.value)} placeholder="Vendor's account number" />
+                </div>
+              </div>
+            )}
+
+            {/* Auto-Debit */}
+            {form.paymentMethod==='Auto-Debit'&&(
+              <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                <div className="field">
+                  <label>Bank Account (COA)</label>
+                  <select value={form.pmAdaAccountCode||''} onChange={e=>upd('pmAdaAccountCode',e.target.value)} style={{width:'100%'}}>
+                    <option value="">— select account —</option>
+                    {bankAccounts.map(a=><option key={a.id} value={a.code}>{a.code} · {a.name}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Debit Day of Month</label>
+                  <input type="number" min="1" max="31" value={form.pmAdaDay||''} onChange={e=>upd('pmAdaDay',e.target.value)} style={{width:80}} placeholder="1–31" />
+                </div>
+              </div>
+            )}
+
+            {/* Check */}
+            {form.paymentMethod==='Check'&&(
+              <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                <div className="field">
+                  <label>Issuing Checkbook</label>
+                  <select value={form.pmCheckbookCode||''} onChange={e=>upd('pmCheckbookCode',e.target.value)} style={{width:'100%'}}>
+                    <option value="">— select checkbook —</option>
+                    {checkbooks.map(cb=>{
+                      const cbAcct = bankAccounts.find(a=>a.code===cb.bankCode);
+                      const cbLabel = cbAcct ? cbAcct.name : cb.bankCode;
+                      return (
+                        <option key={cb.id} value={cb.id}>
+                          {cb.bankCode} · {cbLabel} · Next: #{String(cb.nextCheckNumber||cb.startingNumber||'').padStart(6,'0')}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+                {selectedCb&&(()=>{
+                  const cbAcct = bankAccounts.find(a=>a.code===selectedCb.bankCode);
+                  return (
+                    <div style={{background:'#f8fafc',border:'1px solid #e5e7eb',borderRadius:8,padding:'6px 12px',fontSize:12,color:'#64748b'}}>
+                      {cbAcct&&<span style={{fontWeight:700,color:'#0b1220'}}>{cbAcct.name}</span>}{cbAcct&&' · '}
+                      Series #{selectedCb.startingNumber}–#{selectedCb.endingNumber} · Next: #{selectedCb.nextCheckNumber}
+                    </div>
+                  );
+                })()}
+                <div>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+                    <label style={{fontWeight:700,fontSize:12,margin:0}}>Pending Checks</label>
+                    <button className="btn btn-ghost btn-sm" onClick={addCheck} style={{fontSize:11}}>+ Add Check</button>
+                  </div>
+                  {(form.pmChecks||[]).length===0
+                    ? <div style={{color:'#94a3b8',fontSize:12,padding:'4px 0'}}>No checks queued.</div>
+                    : (
+                      <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+                        <thead>
+                          <tr style={{background:'#f1f5f9'}}>
+                            <th style={{padding:'4px 8px',textAlign:'left',fontWeight:700}}>CHECK NO.</th>
+                            <th style={{padding:'4px 8px',textAlign:'left',fontWeight:700}}>CHECK DATE</th>
+                            <th style={{padding:'4px 8px',textAlign:'right',fontWeight:700}}>AMOUNT</th>
+                            <th style={{width:28}}></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(form.pmChecks||[]).map((c,i)=>{
+                            const err = checkError(c.checkNo, i);
+                            return (
+                            <tr key={i} style={{borderTop:'1px solid #e5e7eb',background:err?'#fef2f2':undefined}}>
+                              <td style={{padding:'4px 8px'}}>
+                                <input value={c.checkNo||''} onChange={e=>updateCheck(i,'checkNo',e.target.value)}
+                                  style={{width:'100%',border:`1px solid ${err?'#fca5a5':'#e5e7eb'}`,borderRadius:4,padding:'2px 6px',fontFamily:'monospace'}} />
+                                {err&&<div style={{color:'#dc2626',fontSize:10,marginTop:1}}>{err}</div>}
+                              </td>
+                              <td style={{padding:'4px 8px'}}>
+                                <input type="date" value={c.checkDate||''} onChange={e=>updateCheck(i,'checkDate',e.target.value)}
+                                  style={{border:'1px solid #e5e7eb',borderRadius:4,padding:'2px 4px'}} />
+                              </td>
+                              <td style={{padding:'4px 8px'}}>
+                                <input type="number" value={c.amount||''} onChange={e=>updateCheck(i,'amount',e.target.value)}
+                                  style={{width:90,border:'1px solid #e5e7eb',borderRadius:4,padding:'2px 6px',textAlign:'right'}} />
+                              </td>
+                              <td style={{padding:'4px 4px'}}>
+                                <button className="btn btn-ghost btn-sm" onClick={()=>removeCheck(i)}
+                                  style={{color:'#dc2626',padding:'2px 6px'}}>✕</button>
+                              </td>
+                            </tr>
+                            );
+                          })}
+                        </tbody>
+                        <tfoot>
+                          <tr style={{borderTop:'2px solid #e5e7eb'}}>
+                            <td colSpan={2} style={{padding:'4px 8px',fontWeight:700,fontSize:12}}>
+                              PENDING · {(form.pmChecks||[]).length} CHECK{(form.pmChecks||[]).length!==1?'S':''}
+                            </td>
+                            <td style={{padding:'4px 8px',textAlign:'right',fontWeight:700}}>{fmtCur(pendingTotal)}</td>
+                            <td></td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    )
+                  }
+                </div>
+              </div>
+            )}
           </div>
           <div className="modal-f">
             <button className="btn btn-ghost" onClick={()=>setPmModal(null)}>Cancel</button>
-            <button className="btn btn-primary" onClick={()=>savePm(form)}>Save</button>
+            <button className="btn btn-primary" onClick={()=>savePm(form)} disabled={hasCheckErrors}>
+              {hasCheckErrors ? '⚠ Fix check errors' : 'Save'}
+            </button>
           </div>
         </div>
       </div>
@@ -576,7 +1266,7 @@ export default function PaymentSchedulePage() {
       <div className="ps-topbar">
         <div>
           <h1 style={{margin:0,fontSize:18,fontWeight:900}}>Payment Schedule</h1>
-          <p style={{margin:0,fontSize:12,color:'#64748b'}}>{schedules.length} schedule{schedules.length!==1?'s':''} · {activeScheds.length} active</p>
+          <p style={{margin:0,fontSize:12,color:'#64748b'}}>{schedules.length} expense schedule{schedules.length!==1?'s':''} · {activeLoanScheds.length} loan obligation{activeLoanScheds.length!==1?'s':''} · {activeScheds.length + activeLoanScheds.length} active</p>
         </div>
       </div>
       <div style={{padding:'10px 22px 0',flexShrink:0,background:'#fff'}}>
@@ -588,7 +1278,7 @@ export default function PaymentSchedulePage() {
             </div>
             <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>This Month Total</div>
             <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(thisMonthTotal)}</div>
-            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{pendingThisMonth} schedule{pendingThisMonth!==1?'s':''} due this month</div>
+            <div style={{marginTop:10,fontSize:11,opacity:.8}}>{pendingThisMonth} obligation{pendingThisMonth!==1?'s':''} due this month{loanMonthTotal>0?` · Loans: ${fmtCur(loanMonthTotal)}`:''}</div>
           </div>
           <div style={{background:'linear-gradient(135deg,#1e3a5f 0%,#1d4ed8 100%)',borderRadius:14,padding:'18px 20px',color:'#fff',position:'relative',overflow:'hidden'}}>
             <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
@@ -631,7 +1321,12 @@ export default function PaymentSchedulePage() {
           <select value={filterCat} onChange={e=>setFilterCat(e.target.value)}><option value="">All Categories</option>{[...new Set([...CATEGORIES,...allCategories])].map(c=><option key={c}>{c}</option>)}</select>
           <select value={filterFreq} onChange={e=>setFilterFreq(e.target.value)}><option value="">All Frequencies</option>{FREQS.map(f=><option key={f}>{f}</option>)}</select>
           <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}><option value="">All Statuses</option><option>Active</option><option>Cancelled</option></select>
-          {(search||filterCat||filterFreq||filterStatus)&&<button className="btn btn-ghost btn-sm" onClick={()=>{setSearch('');setFilterCat('');setFilterFreq('');setFilterStatus('');}}>Clear</button>}
+          <select value={filterSource} onChange={e=>setFilterSource(e.target.value)} style={{fontWeight:600}}>
+            <option value="all">All Sources</option>
+            <option value="expenses">Expense Schedules</option>
+            <option value="loans">Loan Obligations</option>
+          </select>
+          {(search||filterCat||filterFreq||filterStatus||filterSource!=='all')&&<button className="btn btn-ghost btn-sm" onClick={()=>{setSearch('');setFilterCat('');setFilterFreq('');setFilterStatus('');setFilterSource('all');}}>Clear</button>}
         </div>
       </div>
       <div className="ps-tabs">

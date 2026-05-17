@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs, onSnapshot, query, orderBy, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs, onSnapshot, query, orderBy, where, deleteDoc } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import { nextVoucherId } from '../../../utils/documentIds.js';
@@ -204,7 +204,11 @@ export default function FinancialPage() {
   const [voucherDocs,   setVoucherDocs]   = useState([]);
   const [checkbooks,    setCheckbooks]    = useState([]);
   const [payModal,      setPayModal]      = useState(null);  // loan.id
-  const [pmForm,        setPmForm]        = useState({ checkbookId:'', checks:[] });
+  const [pmForm, setPmForm] = useState({
+    paymentMethod: 'Check', checkbookId: '', checks: [],
+    pmBtBankName: '', pmBtAccountName: '', pmBtAccountNumber: '',
+    pmAdaAccountCode: '', pmAdaDay: ''
+  });
   // pmForm.checks: [{id, checkNo, checkDate, amount}]
   const [monitorFilter, setMonitorFilter] = useState('outstanding'); // outstanding | paidoff | atrisk | all
   const [historyLoanFilter, setHistoryLoanFilter] = useState('all');
@@ -242,6 +246,15 @@ export default function FinancialPage() {
     );
     return () => { unsub(); unsubV(); unsubCb(); };
   }, []);
+
+  // Load already-issued check numbers when selected checkbook changes
+  const [issuedNums, setIssuedNums] = useState(new Set());
+  useEffect(() => {
+    if (!pmForm.checkbookId) { setIssuedNums(new Set()); return; }
+    getDocs(query(collection(db,'checkRegister'), where('checkbookId','==',pmForm.checkbookId)))
+      .then(snap => setIssuedNums(new Set(snap.docs.map(d => d.data().checkNumber).filter(Boolean))))
+      .catch(() => setIssuedNums(new Set()));
+  }, [pmForm.checkbookId]);
 
   /* ── Voucher lookup map (by human-readable voucherId string) ──── */  const voucherMap = useMemo(() => {
     const m = {};
@@ -313,7 +326,7 @@ export default function FinancialPage() {
         status: 'Active', paymentFrequency: 'Monthly',
         payDayMode: 'Fixed', payDays: '', payDaysPerMonth: {},
         paymentMethod: 'Check', pmChecks: [],
-        pmAdaDay: '', pmAdaBank: '', pmBtBank: '', pmAutoVoucher: false,
+        pmAdaDay: '', pmAdaBank: '', pmBtBank: ''
       };
       return [...prev, newLoan];
     });
@@ -1092,7 +1105,8 @@ export default function FinancialPage() {
                   <th>Loan</th>
                   <th>Method</th>
                   <th>Reference</th>
-                  <th>Voucher</th>
+                  <th>Loan Voucher (LV)</th>
+                  <th>Check Voucher (CV)</th>
                   <th style={{textAlign:'right'}}>Interest</th>
                   <th style={{textAlign:'right'}}>Principal</th>
                   <th style={{textAlign:'right'}}>Penalty</th>
@@ -1125,6 +1139,23 @@ export default function FinancialPage() {
                         );
                       })() : <span style={{ color:'#94a3b8' }}>—</span>}
                     </td>
+                    <td>
+                      {p.checkVoucherId ? (() => {
+                        const cvDoc = voucherMap[p.checkVoucherId];
+                        const st    = cvDoc?.status || null;
+                        const sty   = st ? VOUCHER_STATUS_STYLE[st] : null;
+                        return (
+                          <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+                            <span style={{ fontSize:11, fontWeight:700, color:'#0b1220', fontFamily:'monospace' }}>{p.checkVoucherId}</span>
+                            {st ? (
+                              <span style={{ display:'inline-block', padding:'2px 7px', borderRadius:999, fontSize:10, fontWeight:800, border:'1px solid', whiteSpace:'nowrap', ...sty }}>{st}</span>
+                            ) : (
+                              <span style={{ fontSize:10, color:'#94a3b8' }}>loading…</span>
+                            )}
+                          </div>
+                        );
+                      })() : <span style={{ color:'#94a3b8' }}>—</span>}
+                    </td>
                     <td style={{ textAlign:'right', color:'#dc2626' }}>{p.interest ? fmtCur(p.interest) : '—'}</td>
                     <td style={{ textAlign:'right', color:'#2563eb' }}>{p.principal ? fmtCur(p.principal) : '—'}</td>
                     <td style={{ textAlign:'right', color:'#7c2d12' }}>{p.penalty ? fmtCur(p.penalty) : '—'}</td>
@@ -1140,7 +1171,7 @@ export default function FinancialPage() {
               </tbody>
               <tfoot>
                 <tr>
-                  <td colSpan={5}>TOTALS</td>
+                  <td colSpan={6}>TOTALS</td>
                   <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(totals.interest)}</td>
                   <td style={{ textAlign:'right', color:'#2563eb' }}>{fmtCur(totals.principal)}</td>
                   <td style={{ textAlign:'right', color:'#7c2d12' }}>{fmtCur(totals.penalty)}</td>
@@ -1583,7 +1614,6 @@ export default function FinancialPage() {
               <th>Loan Type</th>
               <th>Payment Method</th>
               <th>Details</th>
-              <th>Auto-Voucher</th>
               <th></th>
             </tr>
           </thead>
@@ -1596,8 +1626,14 @@ export default function FinancialPage() {
                 const chks = l.pmChecks || [];
                 details = chks.map(c => typeof c === 'string' ? c : c.checkNo).filter(Boolean).join(', ') || '—';
               }
-              else if (pm === 'Auto-Debit') details = `Day ${l.pmAdaDay||'—'} · ${l.pmAdaBank||'—'}`;
-              else if (pm === 'Bank Transfer') details = l.pmBtBank||'—';
+              else if (pm === 'Auto-Debit') {
+                const adaAcct = calAccounts.find(a => a.code === l.pmAdaAccountCode);
+                details = `${adaAcct ? adaAcct.name : l.pmAdaAccountCode || '—'}${l.pmAdaDay ? ` · Day ${l.pmAdaDay}` : ''}`;
+              }
+              else if (pm === 'Bank Transfer') {
+                const parts = [l.pmBtBankName, l.pmBtAccountName, l.pmBtAccountNumber].filter(Boolean);
+                details = parts.join(' · ') || '—';
+              }
               return (
                 <tr key={l.id}>
                   <td style={{ color:'#94a3b8', fontSize:10 }}>{idx+1}</td>
@@ -1608,10 +1644,19 @@ export default function FinancialPage() {
                   </td>
                   <td style={{ fontSize:11, color:'#64748b' }}>{details||'—'}</td>
                   <td>
-                    <span className={`pill ${l.pmAutoVoucher?'pill-active':'pill-disposed'}`}>{l.pmAutoVoucher?'On':'Off'}</span>
-                  </td>
-                  <td>
-                    <button className="btn btn-ghost btn-sm" onClick={()=>setPmModal(l.id)}>Edit</button>
+                    <button className="btn btn-ghost btn-sm" onClick={()=>{
+                      setPmModal(l.id);
+                      setPmForm({
+                        paymentMethod:    l.paymentMethod    || 'Check',
+                        checkbookId:      l.pmCheckbookId    || '',
+                        checks:           l.pmChecks         || [],
+                        pmBtBankName:     l.pmBtBankName     || '',
+                        pmBtAccountName:  l.pmBtAccountName  || '',
+                        pmBtAccountNumber:l.pmBtAccountNumber|| '',
+                        pmAdaAccountCode: l.pmAdaAccountCode || '',
+                        pmAdaDay:         l.pmAdaDay         || '',
+                      });
+                    }}>Edit</button>
                   </td>
                 </tr>
               );
@@ -1674,48 +1719,88 @@ export default function FinancialPage() {
       })()}
 
       {/* Payment Method Modal */}
-      {pmLoan && (
-        <div className="backdrop" onClick={e=>{ if(e.target===e.currentTarget){ setPmModal(null); setPmForm({checkbookId:'',checks:[]}); } }}>
-          <div className="modal">
-            <div className="modal-h">
-              <strong>Payment Method — {pmLoan.name||`Loan ${pmLoan.id}`}</strong>
-              <button className="btn btn-ghost btn-sm" onClick={()=>{ setPmModal(null); setPmForm({checkbookId:'',checks:[]}); }}>✕</button>
-            </div>
-            <div className="modal-b">
-              <div style={{ display:'flex', gap:8, marginBottom:16 }}>
-                {['Check','Auto-Debit','Bank Transfer'].map(pm => (
-                  <button key={pm} className={`btn btn-sm ${(pmLoan.paymentMethod||'Check')===pm?'btn-primary':'btn-ghost'}`}
-                    onClick={()=>updateLoan(pmLoan.id,'paymentMethod',pm)}>{pm}</button>
-                ))}
+      {pmLoan && (() => {
+        const bankAccounts = calAccounts.filter(a =>
+          ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) ||
+          /cash in bank/i.test(a.name||'')
+        );
+        const activeCbs = checkbooks.filter(c => c.isActive !== false);
+        const selCb = activeCbs.find(c => c.id === pmForm.checkbookId);
+        const pendingTotal = pmForm.checks.reduce((s,c) => s + (Number(c.amount)||0), 0);
+
+        function addCheck() {
+          let nextNo = '';
+          if (selCb) {
+            const padLen = String(selCb.endingNumber||'').length || 6;
+            const end = parseInt(selCb.endingNumber) || Infinity;
+            const taken = new Set([
+              ...Array.from(issuedNums),
+              ...pmForm.checks.map(c => c.checkNo).filter(Boolean),
+            ]);
+            let candidate = parseInt(selCb.nextCheckNumber||selCb.startingNumber||1);
+            while (candidate <= end && taken.has(String(candidate).padStart(padLen,'0'))) candidate++;
+            if (candidate <= end) nextNo = String(candidate).padStart(padLen,'0');
+          }
+          setPmForm(f => ({ ...f, checks: [...f.checks, { id: Date.now(), checkNo: nextNo, checkDate: new Date().toISOString().slice(0,10), amount: '' }] }));
+        }
+        function updCheck(id, key, val) {
+          setPmForm(f => ({ ...f, checks: f.checks.map(c => c.id===id ? {...c,[key]:val} : c) }));
+        }
+        function delCheck(id) {
+          setPmForm(f => ({ ...f, checks: f.checks.filter(c => c.id !== id) }));
+        }
+        function checkError(checkNo, idx) {
+          if (!checkNo) return null;
+          if (issuedNums.has(String(checkNo))) return 'Already issued';
+          if (pmForm.checks.some((c,i) => i!==idx && c.checkNo && c.checkNo===checkNo)) return 'Duplicate';
+          return null;
+        }
+        const hasCheckErrors = pmForm.paymentMethod==='Check' &&
+          pmForm.checks.some((c,i) => !!checkError(c.checkNo,i));
+        const closeModal = () => {
+          setPmModal(null);
+          setPmForm({ paymentMethod:'Check', checkbookId:'', checks:[], pmBtBankName:'', pmBtAccountName:'', pmBtAccountNumber:'', pmAdaAccountCode:'', pmAdaDay:'' });
+        };
+        return (
+          <div className="backdrop" onClick={e=>{ if(e.target===e.currentTarget) closeModal(); }}>
+            <div className="modal" style={{maxWidth:560}}>
+              <div className="modal-h">
+                <strong>Payment Method — {pmLoan.name||`Loan ${pmLoan.id}`}</strong>
+                <button className="btn btn-ghost btn-sm" onClick={closeModal}>✕</button>
               </div>
-              {(pmLoan.paymentMethod||'Check') === 'Check' && (() => {
-                const selCb = checkbooks.find(c => c.id === pmForm.checkbookId);
-                const activeCbs = checkbooks.filter(c => c.isActive !== false);
-                const pendingTotal = pmForm.checks.reduce((s,c) => s + (Number(c.amount)||0), 0);
-                const addCheck = () => {
-                  const existingNums = pmForm.checks.map(c => parseInt(c.checkNo)).filter(n => !isNaN(n));
-                  const base = parseInt(selCb?.nextCheckNumber || selCb?.startingNumber || 0);
-                  const width = String(selCb?.nextCheckNumber || selCb?.startingNumber || '').length || 0;
-                  const maxNum = existingNums.length > 0 ? Math.max(...existingNums) : base - 1;
-                  const nextNo = selCb ? String(maxNum + 1).padStart(width, '0') : '';
-                  setPmForm(f => ({ ...f, checks: [...f.checks, { id: Date.now(), checkNo: nextNo, checkDate: '', amount: 0 }] }));
-                };
-                const updCheck = (id, key, val) => setPmForm(f => ({ ...f, checks: f.checks.map(c => c.id===id ? {...c,[key]:val} : c) }));
-                const delCheck = (id) => setPmForm(f => ({ ...f, checks: f.checks.filter(c => c.id !== id) }));
-                return (
+              <div className="modal-b" style={{display:'flex',flexDirection:'column',gap:14}}>
+                {/* Method selector */}
+                <div style={{ display:'flex', gap:8 }}>
+                  {['Check','Auto-Debit','Bank Transfer'].map(pm => (
+                    <button key={pm} className={`btn btn-sm ${pmForm.paymentMethod===pm?'btn-primary':'btn-ghost'}`}
+                      onClick={()=>setPmForm(f=>({...f,paymentMethod:pm}))}>{pm}</button>
+                  ))}
+                </div>
+
+                {/* Check */}
+                {pmForm.paymentMethod === 'Check' && (
                   <>
-                    <div className="field" style={{marginBottom:12}}>
-                      <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Checkbook / Issuing Bank</label>
+                    <div className="field">
+                      <label style={{fontSize:10,fontWeight:800,color:'#64748b',textTransform:'uppercase',letterSpacing:'.06em'}}>Issuing Checkbook</label>
                       <select value={pmForm.checkbookId} onChange={e=>setPmForm(f=>({...f,checkbookId:e.target.value}))} style={{width:'100%',border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',fontSize:13}}>
                         <option value="">— Select checkbook —</option>
                         {activeCbs.map(cb => {
-                          const acct = calAccounts.find(a => a.code === cb.bankCode || a.id === cb.bankCode);
+                          const acct = calAccounts.find(a => a.code === cb.bankCode);
                           const label = acct ? acct.name : cb.bankCode;
-                          return <option key={cb.id} value={cb.id}>{label} · {cb.checkbookType||'Loose'} · {cb.startingNumber}–{cb.endingNumber} (next: {cb.nextCheckNumber})</option>;
+                          return <option key={cb.id} value={cb.id}>{cb.bankCode} · {label} · Next: #{String(cb.nextCheckNumber||cb.startingNumber||'').padStart(6,'0')}</option>;
                         })}
                       </select>
                     </div>
-                    <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,marginBottom:8}}>
+                    {selCb && (() => {
+                      const acct = calAccounts.find(a => a.code === selCb.bankCode);
+                      return (
+                        <div style={{background:'#f8fafc',border:'1px solid #e5e7eb',borderRadius:8,padding:'6px 12px',fontSize:12,color:'#64748b'}}>
+                          {acct&&<span style={{fontWeight:700,color:'#0b1220'}}>{acct.name}</span>}{acct&&' · '}
+                          Series #{selCb.startingNumber}–#{selCb.endingNumber} · Next: #{selCb.nextCheckNumber}
+                        </div>
+                      );
+                    })()}
+                    <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
                       <thead>
                         <tr style={{background:'#f8fafc'}}>
                           <th style={{padding:'7px 10px',textAlign:'left',fontWeight:800,fontSize:10,textTransform:'uppercase',letterSpacing:'.06em',color:'#64748b',borderBottom:'2px solid #e5e7eb'}}>Check No.</th>
@@ -1728,68 +1813,95 @@ export default function FinancialPage() {
                         {pmForm.checks.length === 0 && (
                           <tr><td colSpan={4} style={{padding:'18px',textAlign:'center',color:'#94a3b8',fontSize:12}}>No pending checks. Click "+ Add Check" to queue one.</td></tr>
                         )}
-                        {pmForm.checks.map(c => (
-                          <tr key={c.id} style={{borderBottom:'1px solid #f1f5f9'}}>
-                            <td style={{padding:'5px 6px'}}><input value={c.checkNo} onChange={e=>updCheck(c.id,'checkNo',e.target.value)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%'}} placeholder="Check #" /></td>
-                            <td style={{padding:'5px 6px'}}><input type="date" value={c.checkDate} onChange={e=>updCheck(c.id,'checkDate',e.target.value)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%'}} /></td>
-                            <td style={{padding:'5px 6px'}}><input type="number" step="0.01" value={c.amount||''} onChange={e=>updCheck(c.id,'amount',parseFloat(e.target.value)||0)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%',textAlign:'right'}} placeholder="0.00" /></td>
-                            <td style={{padding:'5px 4px',textAlign:'center'}}><button onClick={()=>delCheck(c.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'2px 4px'}}>✕</button></td>
-                          </tr>
-                        ))}
+                        {pmForm.checks.map((c,i) => {
+                          const err = checkError(c.checkNo, i);
+                          return (
+                            <tr key={c.id} style={{borderBottom:'1px solid #f1f5f9',background:err?'#fef2f2':undefined}}>
+                              <td style={{padding:'5px 6px'}}>
+                                <input value={c.checkNo||''} onChange={e=>updCheck(c.id,'checkNo',e.target.value)}
+                                  style={{border:`1px solid ${err?'#fca5a5':'#e5e7eb'}`,borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%'}} placeholder="Check #" />
+                                {err&&<div style={{color:'#dc2626',fontSize:10,marginTop:1}}>{err}</div>}
+                              </td>
+                              <td style={{padding:'5px 6px'}}><input type="date" value={c.checkDate||''} onChange={e=>updCheck(c.id,'checkDate',e.target.value)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%'}} /></td>
+                              <td style={{padding:'5px 6px'}}><input type="number" step="0.01" value={c.amount||''} onChange={e=>updCheck(c.id,'amount',e.target.value)} style={{border:'1px solid #e5e7eb',borderRadius:6,padding:'5px 7px',fontSize:12,width:'100%',textAlign:'right'}} placeholder="0.00" /></td>
+                              <td style={{padding:'5px 4px',textAlign:'center'}}><button onClick={()=>delCheck(c.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'2px 4px'}}>✕</button></td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 0',borderTop:'2px solid #e5e7eb'}}>
                       <button className="btn btn-ghost btn-sm" onClick={addCheck} disabled={!pmForm.checkbookId}>+ Add Check</button>
-                      <span style={{fontSize:12,fontWeight:800,color:'#0f172a'}}>PENDING · {pmForm.checks.length} CHECK{pmForm.checks.length!==1?'S':''} &nbsp;<span style={{color:'#dc2626'}}>₱{pendingTotal.toLocaleString('en-PH',{minimumFractionDigits:2})}</span></span>
+                      <span style={{fontSize:12,fontWeight:800,color:'#0f172a'}}>
+                        PENDING · {pmForm.checks.length} CHECK{pmForm.checks.length!==1?'S':''}&nbsp;
+                        <span style={{color:'#dc2626'}}>₱{pendingTotal.toLocaleString('en-PH',{minimumFractionDigits:2})}</span>
+                      </span>
                     </div>
                   </>
-                );
-              })()}
-              {pmLoan.paymentMethod === 'Auto-Debit' && (
-                <div className="grid4">
-                  <div className="field col2">
-                    <label>Debit Day of Month</label>
-                    <input type="number" min="1" max="31" value={pmLoan.pmAdaDay||''} onChange={e=>updateLoan(pmLoan.id,'pmAdaDay',e.target.value)} />
+                )}
+
+                {/* Auto-Debit */}
+                {pmForm.paymentMethod === 'Auto-Debit' && (
+                  <div className="grid4">
+                    <div className="field col2">
+                      <label>Bank Account (COA)</label>
+                      <select value={pmForm.pmAdaAccountCode||''} onChange={e=>setPmForm(f=>({...f,pmAdaAccountCode:e.target.value}))} style={{width:'100%'}}>
+                        <option value="">— select account —</option>
+                        {bankAccounts.map(a=><option key={a.id} value={a.code}>{a.code} · {a.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="field col2">
+                      <label>Debit Day of Month</label>
+                      <input type="number" min="1" max="31" value={pmForm.pmAdaDay||''} onChange={e=>setPmForm(f=>({...f,pmAdaDay:e.target.value}))} placeholder="1–31" />
+                    </div>
                   </div>
-                  <div className="field col2">
-                    <label>Bank / Account</label>
-                    <input value={pmLoan.pmAdaBank||''} onChange={e=>updateLoan(pmLoan.id,'pmAdaBank',e.target.value)} />
+                )}
+
+                {/* Bank Transfer */}
+                {pmForm.paymentMethod === 'Bank Transfer' && (
+                  <div className="grid4">
+                    <div className="field col4">
+                      <label>Bank Name</label>
+                      <input value={pmForm.pmBtBankName||''} onChange={e=>setPmForm(f=>({...f,pmBtBankName:e.target.value}))} placeholder="e.g. BDO, BPI, Metrobank" />
+                    </div>
+                    <div className="field col2">
+                      <label>Account Name</label>
+                      <input value={pmForm.pmBtAccountName||''} onChange={e=>setPmForm(f=>({...f,pmBtAccountName:e.target.value}))} placeholder="Name on the bank account" />
+                    </div>
+                    <div className="field col2">
+                      <label>Account Number</label>
+                      <input value={pmForm.pmBtAccountNumber||''} onChange={e=>setPmForm(f=>({...f,pmBtAccountNumber:e.target.value}))} placeholder="Vendor's account number" />
+                    </div>
                   </div>
-                </div>
-              )}
-              {pmLoan.paymentMethod === 'Bank Transfer' && (
-                <div className="field">
-                  <label>Bank / Account for Transfer</label>
-                  <input value={pmLoan.pmBtBank||''} onChange={e=>updateLoan(pmLoan.id,'pmBtBank',e.target.value)} />
-                </div>
-              )}
-              <div style={{ marginTop:16, display:'flex', alignItems:'center', gap:10 }}>
-                <input type="checkbox" id="fpAutoVoucher" checked={!!pmLoan.pmAutoVoucher}
-                  onChange={e=>updateLoan(pmLoan.id,'pmAutoVoucher',e.target.checked)} />
-                <label htmlFor="fpAutoVoucher" style={{ fontSize:13, fontWeight:600, cursor:'pointer' }}>
-                  Auto-Voucher (auto-generate payment voucher on due date)
-                </label>
+                )}
+
+
+              </div>
+              <div className="modal-f">
+                <button className="btn btn-ghost" onClick={closeModal}>Close</button>
+                <button className="btn btn-primary" disabled={hasCheckErrors} onClick={()=>{
+                  const updatedLoans = loans.map(l => l.id !== pmLoan.id ? l : {
+                    ...l,
+                    paymentMethod:     pmForm.paymentMethod,
+                    pmCheckbookId:     pmForm.checkbookId,
+                    pmCheckbookCode:   checkbooks.find(c=>c.id===pmForm.checkbookId)?.bankCode || '',
+                    pmChecks:          pmForm.checks,
+                    pmBtBankName:      pmForm.pmBtBankName,
+                    pmBtAccountName:   pmForm.pmBtAccountName,
+                    pmBtAccountNumber: pmForm.pmBtAccountNumber,
+                    pmAdaAccountCode:  pmForm.pmAdaAccountCode,
+                    pmAdaDay:          pmForm.pmAdaDay,
+                  });
+                  setLoans(updatedLoans);
+                  saveToFirestore(updatedLoans);
+                  closeModal();
+                  showToast('Payment method saved.');
+                }}>{hasCheckErrors ? '⚠ Fix check errors' : 'Save'}</button>
               </div>
             </div>
-            <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>{ setPmModal(null); setPmForm({checkbookId:'',checks:[]}); }}>Close</button>
-              <button className="btn btn-primary" onClick={()=>{
-                const updatedLoans = loans.map(l => l.id !== pmLoan.id ? l : {
-                  ...l,
-                  pmCheckbookId:   pmForm.checkbookId,
-                  pmCheckbookCode: checkbooks.find(c=>c.id===pmForm.checkbookId)?.bankCode || '',
-                  pmChecks:        pmForm.checks,
-                });
-                setLoans(updatedLoans);
-                saveToFirestore(updatedLoans);
-                setPmModal(null);
-                setPmForm({checkbookId:'',checks:[]});
-                showToast('Payment method saved.');
-              }}>Save</button>
-            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Pay Days Modal */}
       {payDaysLoan && (() => {

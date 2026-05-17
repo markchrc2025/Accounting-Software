@@ -28,7 +28,7 @@ const CSS = `
   .jp-wrap{display:flex;flex-direction:column;height:100%;overflow:hidden;font-family:Inter,system-ui,sans-serif;}
   .jp-topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 22px 10px;flex-shrink:0;border-bottom:1px solid #e5e7eb;background:#fff;gap:12px;flex-wrap:wrap;}
   .jp-body{flex:1;overflow-y:auto;padding:16px 22px;}
-  .stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;}
+  .stats-bar{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px;}
   .stat{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:12px 16px;}
   .stat-lbl{font-size:9px;font-weight:800;color:#94a3b8;letter-spacing:.07em;text-transform:uppercase;margin-bottom:3px;}
   .stat-val{font-size:18px;font-weight:900;}
@@ -92,6 +92,7 @@ export default function JournalPage() {
   const [confirmModal, setConfirmModal] = useState(null);
   const [page, setPage]         = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [selected, setSelected] = useState(new Set());
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
@@ -124,7 +125,8 @@ export default function JournalPage() {
   const totalPosted     = entries.filter(e=>e.status==='Posted').length;
   const totalCleared    = entries.filter(e=>e.status==='Cleared').length;
   const totalForClearing = entries.filter(e=>e.status==='For Clearing').length;
-  const totalDraft      = entries.filter(e=>['Draft','For Clearing','For Posting'].includes(e.status)).length;
+  const totalDraft      = entries.filter(e=>e.status==='Draft').length;
+  const totalForPosting = entries.filter(e=>e.status==='For Posting').length;
   const totalEntries = entries.length;
 
   /* ── Toggle expand ──────────────────────────────────────────── */
@@ -145,7 +147,7 @@ export default function JournalPage() {
   }
 
   /* ── Save ──────────────────────────────────────────────────── */
-  async function saveJE(form, postNow) {
+  async function saveJE(form) {
     setSaving(true);
     try {
       const validLines = lines.filter(l=>l.accountCode||(parseFloat(l.debit)>0)||(parseFloat(l.credit)>0));
@@ -156,17 +158,17 @@ export default function JournalPage() {
       const payload = {
         jeId, date: form.date||'', description: form.description||'',
         type: form.type||'Manual', reference: form.reference||'',
-        status: postNow?'Posted':(form.status||'Draft'),
+        status: form.status||'Draft',
         lines: validLines.map(l=>({accountCode:l.accountCode||'',accountName:l.accountName||'',description:l.description||'',debit:parseFloat(l.debit)||0,credit:parseFloat(l.credit)||0})),
         totalDebit, totalCredit,
         updatedAt: serverTimestamp(), updatedBy: auth.currentUser?.email||'',
       };
       if (form.id) {
         await updateDoc(doc(db,'journalEntries',form.id), payload);
-        showToast(postNow?'Posted!':'JE updated.');
+        showToast('JE updated.');
       } else {
         await addDoc(collection(db,'journalEntries'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
-        showToast(postNow?'JE created and posted!':'JE saved as draft.');
+        showToast('JE saved as draft.');
       }
       setModal(null);
     } catch(e) { console.error(e); alert('Save failed.'); }
@@ -174,8 +176,13 @@ export default function JournalPage() {
   }
 
   async function postEntry(id) {
-    await updateDoc(doc(db,'journalEntries',id),{status:'Posted',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
-    showToast('Posted.');
+    await updateDoc(doc(db,'journalEntries',id),{status:'For Posting',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
+    showToast('Submitted for posting.');
+  }
+
+  async function clearEntry(id) {
+    await updateDoc(doc(db,'journalEntries',id),{status:'Cleared',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
+    showToast('Journal Entry cleared.');
   }
 
   async function requestPost(id) {
@@ -205,6 +212,36 @@ export default function JournalPage() {
   function deleteEntry(id) {
     askConfirm('Delete this journal entry?', async () => {
       await deleteDoc(doc(db,'journalEntries',id));
+    });
+  }
+
+  async function bulkClear() {
+    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'For Clearing'));
+    if (!ids.length) return showToast('No "For Clearing" entries selected.');
+    askConfirm(`Clear ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'}?`, async () => {
+      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'Cleared', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
+      setSelected(new Set());
+      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} cleared.`);
+    });
+  }
+
+  async function bulkSubmitForPosting() {
+    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'Cleared'));
+    if (!ids.length) return showToast('No "Cleared" entries selected.');
+    askConfirm(`Submit ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'} for posting?`, async () => {
+      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'For Posting', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
+      setSelected(new Set());
+      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} submitted for posting.`);
+    });
+  }
+
+  async function bulkPost() {
+    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'For Posting'));
+    if (!ids.length) return showToast('No "For Posting" entries selected.');
+    askConfirm(`Post ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'}? This finalizes them in the General Ledger.`, async () => {
+      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'Posted', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
+      setSelected(new Set());
+      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} posted.`);
     });
   }
 
@@ -277,8 +314,7 @@ export default function JournalPage() {
             <div style={{fontSize:12,color:'#64748b'}}>{lines.length} line{lines.length!==1?'s':''}</div>
             <div style={{display:'flex',gap:8}}>
               <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
-              {modal.status!=='Posted'&&<button className="btn btn-ghost" disabled={saving} onClick={()=>saveJE(modal,false)}>Save Draft</button>}
-              <button className="btn btn-primary" disabled={saving||!isBalanced} onClick={()=>saveJE(modal,true)} title={isBalanced?'':'Balance debits and credits first'}>{saving?'Saving…':modal.status==='Posted'?'Update':'Post JE'}</button>
+              <button className="btn btn-primary" disabled={saving||!isBalanced} onClick={()=>saveJE(modal)} title={isBalanced?'':'Balance debits and credits first'}>{saving?'Saving…':'Save'}</button>
             </div>
           </div>
         </div>
@@ -292,7 +328,7 @@ export default function JournalPage() {
       <div className="jp-topbar">
         <div>
           <h1 style={{margin:0,fontSize:18,fontWeight:900}}>Journal Entries</h1>
-          <p style={{margin:0,fontSize:12,color:'#64748b'}}>{totalEntries} entries · {totalPosted} posted · {totalForClearing} for clearing · {totalDraft} pending</p>
+          <p style={{margin:0,fontSize:12,color:'#64748b'}}>{totalEntries} entries · {totalForClearing} for clearing · {totalCleared} cleared · {totalForPosting} for posting · {totalPosted} posted</p>
         </div>
         <button className="btn btn-primary" onClick={openNew}>+ New JE</button>
       </div>
@@ -300,10 +336,10 @@ export default function JournalPage() {
         {/* Stats */}
         <div className="stats-bar">
           <div className="stat"><div className="stat-lbl">Total Entries</div><div className="stat-val">{totalEntries}</div></div>
-          <div className="stat"><div className="stat-lbl">Posted</div><div className="stat-val" style={{color:'#15803d'}}>{totalPosted}</div></div>
-          <div className="stat"><div className="stat-lbl">Cleared</div><div className="stat-val" style={{color:'#065f46'}}>{totalCleared}</div></div>
           <div className="stat"><div className="stat-lbl">For Clearing</div><div className="stat-val" style={{color:'#1d4ed8'}}>{totalForClearing}</div></div>
-          <div className="stat"><div className="stat-lbl">Total Debits (Posted)</div><div className="stat-val">{fmtCur(entries.filter(e=>e.status==='Posted').reduce((s,e)=>s+(parseFloat(e.totalDebit)||0),0))}</div></div>
+          <div className="stat"><div className="stat-lbl">Cleared</div><div className="stat-val" style={{color:'#065f46'}}>{totalCleared}</div></div>
+          <div className="stat"><div className="stat-lbl">For Posting</div><div className="stat-val" style={{color:'#c2410c'}}>{totalForPosting}</div></div>
+          <div className="stat"><div className="stat-lbl">Posted</div><div className="stat-val" style={{color:'#15803d'}}>{totalPosted}</div></div>
         </div>
         {/* Filters */}
         <div className="filters">
@@ -324,6 +360,22 @@ export default function JournalPage() {
           </select>
           <span style={{fontSize:12,color:'#64748b'}}>{filtered.length} result{filtered.length!==1?'s':''}</span>
         </div>
+        {/* Bulk action bar */}
+        {selected.size > 0 && (
+          <div style={{display:'flex',alignItems:'center',gap:10,padding:'8px 14px',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10,marginBottom:10,flexWrap:'wrap'}}>
+            <span style={{fontSize:13,fontWeight:700,color:'#1d4ed8'}}>{selected.size} selected</span>
+            {[...selected].some(id=>entries.find(e=>e.id===id&&e.status==='For Clearing'))&&canPost&&(
+              <button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={bulkClear}>Bulk Clear</button>
+            )}
+            {[...selected].some(id=>entries.find(e=>e.id===id&&e.status==='Cleared'))&&canPost&&(
+              <button className="btn btn-ghost btn-sm" style={{borderColor:'#bfdbfe',color:'#1d4ed8'}} onClick={bulkSubmitForPosting}>Bulk Submit for Posting</button>
+            )}
+            {[...selected].some(id=>entries.find(e=>e.id===id&&e.status==='For Posting'))&&canApprovePost&&(
+              <button className="btn btn-ghost btn-sm" style={{borderColor:'#bbf7d0',color:'#15803d'}} onClick={bulkPost}>Batch Post</button>
+            )}
+            <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}} onClick={()=>setSelected(new Set())}>Deselect All</button>
+          </div>
+        )}
         {/* List */}
         {filtered.length===0?<div className="empty">No journal entries match your filters.</div>:(
           <>
@@ -333,6 +385,7 @@ export default function JournalPage() {
               return (
                 <div key={e.id} className="je-row">
                   <div className="je-hdr" onClick={()=>toggleExpand(e.id)}>
+                    <input type="checkbox" checked={selected.has(e.id)} onChange={()=>setSelected(prev=>{const n=new Set(prev);n.has(e.id)?n.delete(e.id):n.add(e.id);return n;})} onClick={ev=>ev.stopPropagation()} style={{marginRight:4,flexShrink:0,cursor:'pointer',width:15,height:15}} />
                     <div style={{display:'flex',gap:10,alignItems:'center',flex:1,flexWrap:'wrap'}}>
                       <span style={{fontFamily:'monospace',fontWeight:800,color:'#f97316',fontSize:12}}>{e.jeId||'—'}</span>
                       <span style={{fontWeight:600,fontSize:12}}>{e.date||'—'}</span>
@@ -343,8 +396,9 @@ export default function JournalPage() {
                     <div style={{display:'flex',gap:6,alignItems:'center',flexShrink:0}}>
                       <span style={{fontWeight:700,fontSize:12,color:'#64748b'}}>{fmtCur(e.totalDebit||0)}</span>
                       <button className="btn btn-ghost btn-sm" onClick={ev=>{ev.stopPropagation();openEdit(e);}}>Edit</button>
-                      {e.status==='Draft'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bbf7d0',color:'#15803d'}} onClick={ev=>{ev.stopPropagation();postEntry(e.id);}}>Post</button>}
-                      {e.status==='Cleared'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bfdbfe',color:'#1d4ed8'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for posting?',()=>requestPost(e.id));}}>Post</button>}
+                      {e.status==='For Clearing'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={ev=>{ev.stopPropagation();askConfirm('Mark this Journal Entry as Cleared?',()=>clearEntry(e.id));}}>Clear</button>}
+                      {e.status==='Draft'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for posting?',()=>postEntry(e.id));}}>Submit for Posting</button>}
+                      {e.status==='Cleared'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bfdbfe',color:'#1d4ed8'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for posting?',()=>requestPost(e.id));}}>Submit for Posting</button>}
                       {e.status==='For Posting'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={ev=>{ev.stopPropagation();askConfirm('Approve and post this Journal Entry?',()=>approvePost(e.id));}}>Approve &amp; Post</button>}
                       {e.status==='Posted'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();reverseEntry(e);}}>Reverse</button>}
                       {e.status==='Draft'&&<button onClick={ev=>{ev.stopPropagation();deleteEntry(e.id);}} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>}

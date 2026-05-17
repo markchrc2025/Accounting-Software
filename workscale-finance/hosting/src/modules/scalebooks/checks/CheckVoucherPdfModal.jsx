@@ -374,10 +374,10 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
       ];
       const sigW = CW / 4;
 
-      need(34);
+      need(22);
       bold(8.5);
       sigs.forEach((s, i) => pdf.text(s.label, ML + i * sigW, y));
-      y += 22;
+      y += 10;
 
       sigs.forEach((s, i) => {
         const x0 = ML + i * sigW;

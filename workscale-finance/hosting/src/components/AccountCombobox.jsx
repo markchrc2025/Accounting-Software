@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 
 /**
  * AccountCombobox — searchable combobox for COA account selection.
@@ -26,6 +27,7 @@ export default function AccountCombobox({
   const [open, setOpen]               = useState(false);
   const [query, setQuery]             = useState('');
   const [highlighted, setHighlighted] = useState(0);
+  const [dropRect, setDropRect]       = useState(null);
 
   const wrapRef  = useRef(null);
   const inputRef = useRef(null);
@@ -136,9 +138,13 @@ export default function AccountCombobox({
     else if (e.key === 'Tab') { close_(); }
   };
 
-  // Close on outside click
+  // Close on outside click (ignore clicks inside the portaled dropdown)
   useEffect(() => {
-    const handler = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) close_(); };
+    const handler = (e) => {
+      if (wrapRef.current && wrapRef.current.contains(e.target)) return;
+      if (listRef.current && listRef.current.contains(e.target)) return;
+      close_();
+    };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
@@ -150,6 +156,21 @@ export default function AccountCombobox({
     const item = items[highlighted];
     if (item) item.scrollIntoView({ block: 'nearest' });
   }, [highlighted, open]);
+
+  // Track wrapper rect so portal dropdown can position itself; update on scroll/resize
+  useEffect(() => {
+    if (!open) { setDropRect(null); return; }
+    const update = () => {
+      if (wrapRef.current) setDropRect(wrapRef.current.getBoundingClientRect());
+    };
+    update();
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [open]);
 
   // ── Styles ───────────────────────────────────────────────────
   const wrapS = { position: 'relative', ...style };
@@ -174,12 +195,15 @@ export default function AccountCombobox({
     transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s',
   };
 
-  const dropS = {
-    position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+  const dropS = dropRect ? {
+    position: 'fixed',
+    top: dropRect.bottom + 4,
+    left: dropRect.left,
+    width: dropRect.width,
     background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10,
-    boxShadow: '0 8px 24px rgba(0,0,0,.12)', zIndex: 9999,
+    boxShadow: '0 8px 24px rgba(0,0,0,.12)', zIndex: 10000,
     maxHeight: 280, overflowY: 'auto',
-  };
+  } : { display: 'none' };
 
   const itemS = (isActive, isSelected, isChild) => ({
     padding: isChild ? '7px 12px 7px 26px' : '7px 12px',
@@ -208,7 +232,7 @@ export default function AccountCombobox({
         <span style={chevronS} onMouseDown={e => { e.preventDefault(); if (open) close_(); else inputRef.current?.focus(); }}>▾</span>
       </div>
 
-      {open && (
+      {open && dropRect && createPortal((
         <div ref={listRef} style={dropS}>
           {/* none / clear option */}
           <div
@@ -285,7 +309,7 @@ export default function AccountCombobox({
             </div>
           )}
         </div>
-      )}
+      ), document.body)}
     </div>
   );
 }

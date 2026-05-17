@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── ScaleBooks global design tokens ───────────────────────────────────────── */
+@layer base {
+  :root {
+    /* Brand & semantic colors */
+    --color-primary:           #F97316;
+    --color-primary-hover:     #EA580C;
+    --color-primary-subtle:    #FFF7ED;
+    --color-text:              #1F2937;
+    --color-text-muted:        #6B7280;
+    --color-text-placeholder:  #9CA3AF;
+    --color-border:            #E5E7EB;
+    --color-border-subtle:     #F3F4F6;
+    --color-surface:           #FFFFFF;
+    --color-bg:                #F9FAFB;
+    --color-info:              #2563EB;
+    --color-success:           #16A34A;
+    --color-warning:           #D97706;
+    --color-danger:            #DC2626;
+
+    /* shadcn/ui HSL tokens — updated to orange primary */
+    --background:              0 0% 100%;
+    --foreground:              220 13% 13%;
+    --card:                    0 0% 100%;
+    --card-foreground:         220 13% 13%;
+    --popover:                 0 0% 100%;
+    --popover-foreground:      220 13% 13%;
+    --primary:                 24.6 94.9% 53.1%;   /* #F97316 */
+    --primary-foreground:      0 0% 100%;
+    --secondary:               220 14.3% 95.9%;
+    --secondary-foreground:    220 13% 13%;
+    --muted:                   220 14.3% 95.9%;
+    --muted-foreground:        220 8.9% 46.1%;
+    --accent:                  220 14.3% 95.9%;
+    --accent-foreground:       220 13% 13%;
+    --destructive:             0 84.2% 60.2%;
+    --destructive-foreground:  0 0% 100%;
+    --border:                  220 13% 91%;
+    --input:                   220 13% 91%;
+    --ring:                    24.6 94.9% 53.1%;   /* orange focus ring */
+    --radius:                  0.5rem;
+  }
+}
+
+/* ── Global resets & base styles ────────────────────────────────────────────── */
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    width: 100%;
+    overflow-x: hidden;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: Inter, system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  #root {
+    height: 100vh;
+    width: 100%;
+    display: flex;
+    overflow: hidden;
+  }
+}
