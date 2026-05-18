@@ -98,15 +98,10 @@ export function FilterToolbar({
     <div style={{ background: '#fff', borderBottom: '1px solid #e5e7eb', flexShrink: 0 }}>
       {/* ── Top micro-row ── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 16, padding: '6px 16px 4px' }}>
-        <a href="#" style={{ fontSize: 12, color: '#2CA01C', textDecoration: 'none', fontWeight: 500 }}
+        <a href="#" style={{ fontSize: 12, color: '#F97316', textDecoration: 'none', fontWeight: 500 }}
           onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
           onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>
           Learn more
-        </a>
-        <a href="#" style={{ fontSize: 12, color: '#2CA01C', textDecoration: 'none', fontWeight: 500 }}
-          onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-          onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>
-          Give feedback
         </a>
         <button
           onClick={() => setCollapsed(c => !c)}
@@ -158,7 +153,7 @@ export function FilterToolbar({
                   onClick={() => onMethodChange(m)}
                   style={{
                     padding: '0 14px', fontSize: 13, fontWeight: 500, cursor: 'pointer', border: 'none',
-                    background: filters.method === m ? '#2CA01C' : '#fff',
+                    background: filters.method === m ? '#F97316' : '#fff',
                     color:      filters.method === m ? '#fff'    : '#6b7280',
                     transition: 'background 0.15s, color 0.15s',
                   }}

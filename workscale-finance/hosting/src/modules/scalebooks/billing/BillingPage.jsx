@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy, getDocs, where
 } from 'firebase/firestore';
@@ -125,6 +126,12 @@ export default function BillingPage() {
     periodStart:'', periodEnd:'', description:'', grossAmount:0, taxGroupName:'VAT', totalVatInclusive:0,
     netDue:0, balance:0, incomeAccount:'', notes:'', status:'Draft', lines:[]
   });
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); openNew(); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async (statusOverride) => {
     if (!modal) return;

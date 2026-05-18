@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import { collection, doc, onSnapshot, setDoc, addDoc, getDocs, serverTimestamp, query, orderBy, writeBatch } from 'firebase/firestore';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import { db, auth } from '../../../firebase.js';
@@ -189,6 +190,12 @@ export default function FixedAssetsPage() {
   const saveTimerRef = useRef(null);
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); setAssetModal({}); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db,'fixedAssets','profile'), snap => {

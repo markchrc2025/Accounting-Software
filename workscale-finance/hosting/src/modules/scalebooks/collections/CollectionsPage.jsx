@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy
 } from 'firebase/firestore';
@@ -75,6 +76,12 @@ export default function CollectionsPage() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({...EMPTY,collectionId:'',collectionDate:today()}); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const u1 = onSnapshot(query(collection(db,'collections'), orderBy('createdAt','desc')), s => setCollections(s.docs.map(d=>({id:d.id,...d.data()}))));

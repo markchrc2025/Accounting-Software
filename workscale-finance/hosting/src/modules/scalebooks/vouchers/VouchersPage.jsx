@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
   serverTimestamp, getDoc, getDocs
@@ -324,6 +325,12 @@ export default function VouchersPage() {
     if (prefill) openNew(prefill);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); openNew(); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openEdit = (v) => {
     setEditing(v);

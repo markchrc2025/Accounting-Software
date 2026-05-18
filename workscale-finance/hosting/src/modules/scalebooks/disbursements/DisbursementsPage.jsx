@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
   serverTimestamp, getDocs, where
@@ -479,6 +480,12 @@ export default function DisbursementsPage() {
     setDrLines([]);
     setShowModal(true);
   };
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); openNew(); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Open Edit modal ───────────────────────────────────────────────────────────
   const openEdit = (r) => {

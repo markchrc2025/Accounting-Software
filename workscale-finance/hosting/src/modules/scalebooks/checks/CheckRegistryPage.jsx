@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc,
   doc, serverTimestamp, writeBatch, getDocs, getDoc,
@@ -562,6 +563,12 @@ export default function CheckRegistryPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPrefill, bankAccounts.length]);
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); openNewCv(); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openEditCv = (check) => {
     if (!check.voucherDocId) return alert('No voucher linked to this check.');
@@ -1133,8 +1140,26 @@ export default function CheckRegistryPage() {
 
   const deleteCheck = (id) => {
     askConfirm('Delete this check entry? This cannot be undone.', async () => {
-      await deleteDoc(doc(db,'checkRegister',id));
-      showToast('Check entry deleted.');
+      const checkSnap = checks.find(c => c.id === id);
+      const voucherDocId = checkSnap?.voucherDocId || null;
+
+      // 1. Delete all linked JEs (matched by sourceDocId = voucherDocId)
+      if (voucherDocId) {
+        const jeSnap = await getDocs(query(collection(db,'journalEntries'), where('sourceDocId','==',voucherDocId)));
+        await Promise.all(jeSnap.docs.map(d => deleteDoc(d.ref)));
+
+        // 2. Delete the voucher document itself
+        await deleteDoc(doc(db,'vouchers',voucherDocId));
+
+        // 3. Delete all sibling checkRegister entries sharing the same voucherDocId
+        const siblingSnap = await getDocs(query(collection(db,'checkRegister'), where('voucherDocId','==',voucherDocId)));
+        await Promise.all(siblingSnap.docs.map(d => deleteDoc(d.ref)));
+      } else {
+        // No voucher link — just delete this single checkRegister entry
+        await deleteDoc(doc(db,'checkRegister',id));
+      }
+
+      showToast('Check entry and linked records deleted.');
     });
   };
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, orderBy, query
@@ -221,6 +222,12 @@ export default function COAPage() {
     showToast(`✅ Imported ${done} account${done!==1?'s':''}!`);
   }, []);
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({isNew:true,code:'',name:'',type:'Expense',subType:SUBTYPES_BY_TYPE['Expense'][0],isCreditLine:false,creditLimit:0,interestRate:0,notes:''}); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const unsub = onSnapshot(

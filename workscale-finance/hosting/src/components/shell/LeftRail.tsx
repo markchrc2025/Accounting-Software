@@ -1,13 +1,55 @@
 import * as React from 'react';
+import { useState, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Plus, Bookmark, Home, Rss, BarChart2, Grid,
-  Calculator, CreditCard, MoreHorizontal, Settings2,
+  Plus, Home, BarChart3,
+  Wallet, Calculator, FileText, Settings2, Users,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import type { ReportType } from '../../types/reports';
-import { REPORT_TABS } from '../reports/ReportViewport';
 
-// ─── Icon-rail item ───────────────────────────────────────────────────
+// ─── Module group definitions ─────────────────────────────────────────────────
+const GROUPS = [
+  {
+    id: 'disbursement',
+    label: 'Disbursement',
+    icon: Wallet,
+    items: [
+      { label: 'Vouchers',           path: '/scalebooks/vouchers' },
+      { label: 'Approvals',          path: '/scalebooks/approvals' },
+      { label: 'Weekly Projections', path: '/scalebooks/projections' },
+      { label: 'Payment Schedule',   path: '/scalebooks/pay-schedule' },
+      { label: 'Disbursements',      path: '/scalebooks/disbursements' },
+      { label: 'Check Registry',     path: '/scalebooks/checks' },
+    ],
+  },
+  {
+    id: 'accountant',
+    label: 'Accountant',
+    icon: Calculator,
+    items: [
+      { label: 'Journal',              path: '/scalebooks/journal' },
+      { label: 'Bank',                 path: '/scalebooks/bank' },
+      { label: 'Chart of Accounts',    path: '/scalebooks/coa' },
+      { label: 'Tax',                  path: '/scalebooks/tax' },
+      { label: 'Financial Management', path: '/scalebooks/financial' },
+      { label: 'Fixed Assets',         path: '/scalebooks/assets' },
+    ],
+  },
+  {
+    id: 'billing',
+    label: 'Billing',
+    icon: FileText,
+    items: [
+      { label: 'Billing Book',     path: '/scalebooks/billing' },
+      { label: 'Service Invoices', path: '/scalebooks/invoices' },
+      { label: 'Collections',      path: '/scalebooks/collections' },
+    ],
+  },
+] as const;
+
+type GroupId = (typeof GROUPS)[number]['id'];
+
+// ─── Simple icon-only rail button ─────────────────────────────────────────────
 interface RailItemProps {
   icon: React.ElementType;
   label: string;
@@ -19,81 +61,177 @@ function RailItem({ icon: Icon, label, active, onClick }: RailItemProps) {
   return (
     <button
       onClick={onClick}
+      title={label}
       className={cn(
-        'flex flex-col items-center justify-center gap-1 w-full py-2.5 px-1 rounded-lg transition-colors',
+        'relative flex flex-col items-center justify-center gap-0.5 w-full h-16 px-1 transition-colors outline-none',
         active
-          ? 'text-[#2CA01C] bg-[#f0fdf0]'
-          : 'text-slate-400 hover:text-slate-700 hover:bg-slate-100',
+          ? 'text-[#F97316]'
+          : 'text-[#6B7280] hover:text-[#1F2937] hover:bg-[#F3F4F6]',
       )}
     >
-      <Icon className="h-5 w-5" strokeWidth={active ? 2.2 : 1.8} />
-      <span className="text-[9px] font-semibold leading-none tracking-tight">{label}</span>
+      {active && (
+        <span className="absolute left-0 top-3 bottom-3 w-[3px] bg-[#F97316] rounded-r-full" />
+      )}
+      <Icon size={22} strokeWidth={active ? 2.2 : 1.75} aria-hidden="true" />
+      <span className="text-[11px] font-semibold leading-none tracking-tight mt-0.5">
+        {label}
+      </span>
     </button>
   );
 }
 
-// ─── Left rail ────────────────────────────────────────────────────────
-interface LeftRailProps {
-  activeReport: ReportType;
-  onReportChange: (r: ReportType) => void;
+// ─── Group button with hover flyout ───────────────────────────────────────────
+interface GroupButtonProps {
+  group: (typeof GROUPS)[number];
+  active: boolean;
+  onEnter: (el: HTMLElement) => void;
+  onLeave: () => void;
 }
 
-export function LeftRail({ activeReport, onReportChange }: LeftRailProps) {
+function GroupButton({ group, active, onEnter, onLeave }: GroupButtonProps) {
+  const Icon = group.icon;
   return (
-    <aside className="w-[80px] shrink-0 flex flex-col items-center border-r border-border bg-white py-2 overflow-y-auto">
-      {/* Primary group */}
-      <div className="w-full px-2 space-y-0.5">
-        <RailItem icon={Plus}     label="Create"    />
-        <RailItem icon={Bookmark} label="Bookmarks" />
-        <RailItem icon={Home}     label="Home"      />
-        <RailItem icon={Rss}      label="Feed"      />
-        <RailItem
-          icon={BarChart2}
-          label="Reports"
-          active={true}
-        />
-        <RailItem icon={Grid}     label="All apps"  />
-      </div>
-
-      {/* Divider */}
-      <div className="w-12 h-px bg-border my-3" />
-
-      {/* PINNED label */}
-      <p className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400 mb-2 px-2 w-full text-center">
-        Pinned
-      </p>
-
-      {/* Pinned items */}
-      <div className="w-full px-2 space-y-0.5">
-        <RailItem icon={Calculator}   label="Accounting" />
-        <RailItem icon={CreditCard}   label="Expenses"   />
-        <RailItem icon={MoreHorizontal} label="More"     />
-        <RailItem icon={Settings2}    label="Customise"  />
-      </div>
-
-      {/* Spacer + Report sub-tabs (vertical) */}
-      <div className="flex-1" />
-      <div className="w-full px-2 pb-2 space-y-0.5">
-        {REPORT_TABS.map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => onReportChange(tab.id)}
-            title={tab.label}
-            className={cn(
-              'w-full flex items-center justify-center py-2 rounded-lg transition-colors',
-              activeReport === tab.id
-                ? 'bg-[#2CA01C]/10 text-[#2CA01C]'
-                : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700',
-            )}
-          >
-            <span className="text-[8px] font-bold text-center leading-tight px-0.5 line-clamp-2">
-              {tab.label.split(' ').map((w, i) => (
-                <span key={i} className="block">{w}</span>
-              ))}
-            </span>
-          </button>
-        ))}
-      </div>
-    </aside>
+    <button
+      title={group.label}
+      onMouseEnter={(e) => onEnter(e.currentTarget)}
+      onMouseLeave={onLeave}
+      className={cn(
+        'relative flex flex-col items-center justify-center gap-0.5 w-full h-16 px-1 transition-colors outline-none',
+        active
+          ? 'text-[#F97316]'
+          : 'text-[#6B7280] hover:text-[#1F2937] hover:bg-[#F3F4F6]',
+      )}
+    >
+      {active && (
+        <span className="absolute left-0 top-3 bottom-3 w-[3px] bg-[#F97316] rounded-r-full" />
+      )}
+      <Icon size={22} strokeWidth={active ? 2.2 : 1.75} aria-hidden="true" />
+      <span className="text-[11px] font-semibold leading-none tracking-tight mt-0.5">
+        {group.label}
+      </span>
+    </button>
   );
 }
+
+// ─── LeftRail ─────────────────────────────────────────────────────────────────
+export interface LeftRailProps {
+  onCreateClick: () => void;
+}
+
+export function LeftRail({ onCreateClick }: LeftRailProps) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const p = location.pathname;
+
+  const [flyout, setFlyout] = useState<{ groupId: GroupId; top: number } | null>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const is = (route: string, exact = false) =>
+    exact ? p === route : p === route || p.startsWith(route + '/');
+
+  const isGroupActive = (group: (typeof GROUPS)[number]) =>
+    group.items.some(item => is(item.path));
+
+  function openFlyout(groupId: GroupId, el: HTMLElement) {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    const rect = el.getBoundingClientRect();
+    setFlyout({ groupId, top: rect.top });
+  }
+
+  function scheduleClose() {
+    closeTimer.current = setTimeout(() => setFlyout(null), 120);
+  }
+
+  function cancelClose() {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+  }
+
+  const activeGroup = flyout ? GROUPS.find(g => g.id === flyout.groupId) ?? null : null;
+
+  return (
+    <>
+      <aside className="w-[80px] shrink-0 flex flex-col items-center bg-white border-r border-[#E5E7EB] z-20">
+
+        {/* ── Top: Create / Home / Reports ──────────────────────────────── */}
+        <div className="w-full flex flex-col pt-1">
+          <RailItem icon={Plus} label="Create" onClick={onCreateClick} />
+          <RailItem
+            icon={Home}
+            label="Home"
+            active={is('/scalebooks', true)}
+            onClick={() => navigate('/scalebooks')}
+          />
+          <RailItem
+            icon={BarChart3}
+            label="Reports"
+            active={location.pathname.startsWith('/scalebooks/reports')}
+            onClick={() => navigate('/scalebooks/reports')}
+          />
+        </div>
+
+        {/* ── Divider ───────────────────────────────────────────────────── */}
+        <div className="w-10 h-px bg-[#E5E7EB] my-1 flex-shrink-0" />
+
+        {/* ── Module groups ─────────────────────────────────────────────── */}
+        <div className="w-full flex flex-col">
+          {GROUPS.map(grp => (
+            <GroupButton
+              key={grp.id}
+              group={grp}
+              active={isGroupActive(grp)}
+              onEnter={(el) => openFlyout(grp.id, el)}
+              onLeave={scheduleClose}
+            />
+          ))}
+          <RailItem
+            icon={Users}
+            label="Contacts"
+            active={is('/scalebooks/contacts')}
+            onClick={() => navigate('/scalebooks/contacts')}
+          />
+        </div>
+
+        <div className="flex-1" />
+      </aside>
+
+      {/* ── Hover flyout panel (fixed so it escapes aside bounds) ─────── */}
+      {flyout && activeGroup && (
+        <div
+          role="menu"
+          className="fixed z-50 bg-white border border-[#E5E7EB] shadow-lg rounded-r-xl overflow-hidden"
+          style={{ left: 80, top: flyout.top, width: 180 }}
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
+        >
+          {/* Group header */}
+          <div className="px-3 pt-2.5 pb-1.5 border-b border-[#F3F4F6]">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.07em] text-[#9CA3AF]">
+              {activeGroup.label}
+            </p>
+          </div>
+
+          {/* Sub-items */}
+          <div className="py-0.5">
+            {activeGroup.items.map(item => (
+              <button
+                key={item.path}
+                role="menuitem"
+                onClick={() => { navigate(item.path); setFlyout(null); }}
+                className={cn(
+                  'w-full text-left px-3 py-1.5 text-[13px] transition-colors',
+                  is(item.path)
+                    ? 'text-[#F97316] font-semibold bg-[#FFF7ED]'
+                    : 'text-[#374151] hover:bg-[#F9FAFB] hover:text-[#111827]',
+                )}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+

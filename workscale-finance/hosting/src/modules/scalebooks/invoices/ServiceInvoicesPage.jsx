@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy
 } from 'firebase/firestore';
@@ -80,6 +81,12 @@ export default function ServiceInvoicesPage() {
   const [toast,     setToast]     = useState('');
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({...EMPTY,siId:'',siDate:today()}); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const u1 = onSnapshot(query(collection(db,'serviceInvoices'), orderBy('createdAt','desc')), s => setInvoices(s.docs.map(d=>({id:d.id,...d.data()}))));

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, query, orderBy, onSnapshot, where,
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc
@@ -91,6 +92,12 @@ export default function BankPage() {
 
   const showToast  = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({message, onConfirm});
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({}); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const u1 = onSnapshot(query(collection(db,'dailyBankBalances'),orderBy('date','desc')), snap => {

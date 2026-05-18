@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
   collection, query, orderBy, where, onSnapshot,
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc, getDocs,
@@ -197,9 +197,15 @@ export default function PaymentSchedulePage() {
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); }
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });;
 
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({}); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     const q = query(collection(db,'paymentSchedules'), orderBy('createdAt','desc'));
-    return onSnapshot(q, snap => setSchedules(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    return onSnapshot(q, snap => setSchedules(snap.docs.map(d=>({id:d.id,...d.data()}))));;
   }, []);
 
   // Load COA accounts (used for bank list + expense-account picker) and tax rates.

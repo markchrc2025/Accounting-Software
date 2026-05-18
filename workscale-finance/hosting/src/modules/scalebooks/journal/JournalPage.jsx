@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   collection, query, orderBy, onSnapshot,
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc
@@ -145,6 +146,12 @@ export default function JournalPage() {
     setModal({...e});
     setLines((e.lines||[]).map(l=>({id:uid(),...l})));
   }
+
+  // Open create form when navigating from CreateFlyout
+  const location = useLocation();
+  useEffect(() => {
+    if (location.state?.openCreate) { window.history.replaceState({}, ''); openNew(); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Save ──────────────────────────────────────────────────── */
   async function saveJE(form) {

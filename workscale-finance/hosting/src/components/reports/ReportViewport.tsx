@@ -141,7 +141,7 @@ export function ReportViewport({
             <button style={{
               display: 'flex', alignItems: 'center', gap: 5,
               height: 30, padding: '0 12px', marginLeft: 4,
-              background: '#2CA01C', color: '#fff', border: 'none',
+              background: '#F97316', color: '#fff', border: 'none',
               borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
             }}>
               <Sparkles size={13} />
