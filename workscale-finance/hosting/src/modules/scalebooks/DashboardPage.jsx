@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { collection, query, orderBy, limit, getDocs, where } from 'firebase/firestore';
+import { collection, query, orderBy, limit, onSnapshot, where } from 'firebase/firestore';
 import { db } from '../../firebase.js';
 import { useNavigate } from 'react-router-dom';
+import { usePermissions } from '../../contexts/PermissionsContext.jsx';
 
 import { PrivacyProvider } from '../../contexts/PrivacyContext.jsx';
 import { GreetingBar }     from '../../components/dashboard/GreetingBar.jsx';
@@ -31,6 +32,8 @@ export default function DashboardPage() {
 
 function DashboardPageInner() {
   const navigate = useNavigate();
+  const { globalRoles, isAdmin } = usePermissions();
+  const canSeeApprovals = isAdmin || globalRoles.some(r => ['Verifier', 'Approver', 'Poster'].includes(r));
   const [stats, setStats]               = useState({ vouchers: 0, pending: 0, totalBilled: 0, totalCollected: 0 });
   const [recentVouchers, setRecentVouchers] = useState([]);
   const [recentBilling,  setRecentBilling]  = useState([]);
@@ -39,42 +42,71 @@ function DashboardPageInner() {
   const [isCustomising, setIsCustomising] = useState(false);
   const { layout, isCustomised, setLayout, saveLayout, resetLayout, cancelEdit } = useDashboardLayout();
 
-  // ── Firestore load (preserved from original DashboardPage) ──────────────────
+  // ── Firestore real-time listeners ─────────────────────────────────────────
   useEffect(() => {
-    async function load() {
-      try {
-        const [vSnap, bsSnap] = await Promise.all([
-          getDocs(query(collection(db, 'vouchers'), orderBy('createdAt', 'desc'), limit(5))),
-          getDocs(query(collection(db, 'billingStatements'), orderBy('createdAt', 'desc'), limit(5))),
-        ]);
+    const loaded = new Set();
+    const KEYS = ['vouchers', 'billing', 'allV', 'pending'];
+    function markDone(key) {
+      loaded.add(key);
+      if (KEYS.every(k => loaded.has(k))) setLoading(false);
+    }
 
-        const vouchers   = vSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        const statements = bsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const u1 = onSnapshot(
+      query(collection(db, 'vouchers'), orderBy('createdAt', 'desc'), limit(8)),
+      snap => {
+        // CHECK vouchers are owned by Check Registry — exclude them here
+        const vouchers = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(v => v.voucherType !== 'CHECK');
+        setRecentVouchers(vouchers.slice(0, 5));
+        markDone('vouchers');
+      },
+      e => { console.error(e); markDone('vouchers'); }
+    );
 
-        const [allVSnap, pendingSnap] = await Promise.all([
-          getDocs(collection(db, 'vouchers')),
-          getDocs(query(collection(db, 'vouchers'), where('status', '==', 'Pending'))),
-        ]);
-
+    const u2 = onSnapshot(
+      query(collection(db, 'billingStatements'), orderBy('createdAt', 'desc'), limit(5)),
+      snap => {
+        const statements = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        setRecentBilling(statements);
         const totalBilled    = statements.reduce((s, d) => s + (d.netDue || d.totalAmount || 0), 0);
         const totalCollected = statements.reduce((s, d) => s + (d.amountCollected || 0), 0);
+        setStats(prev => ({ ...prev, totalBilled, totalCollected }));
+        markDone('billing');
+      },
+      e => { console.error(e); markDone('billing'); }
+    );
 
-        setStats({ vouchers: allVSnap.size, pending: pendingSnap.size, totalBilled, totalCollected });
-        setRecentVouchers(vouchers);
-        setRecentBilling(statements);
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
+    const u3 = onSnapshot(
+      collection(db, 'vouchers'),
+      snap => {
+        setStats(prev => ({ ...prev, vouchers: snap.size }));
+        markDone('allV');
+      },
+      e => { console.error(e); markDone('allV'); }
+    );
+
+    let u4 = () => {};
+    if (canSeeApprovals) {
+      u4 = onSnapshot(
+        query(collection(db, 'vouchers'), where('status', 'in', ['Pending', 'For Verification', 'For Approval'])),
+        snap => {
+          setStats(prev => ({ ...prev, pending: snap.size }));
+          markDone('pending');
+        },
+        e => { console.error(e); markDone('pending'); }
+      );
+    } else {
+      // Makers have no approval queue
+      setStats(prev => ({ ...prev, pending: 0 }));
+      markDone('pending');
     }
-    load();
-  }, []);
+
+    return () => { u1(); u2(); u3(); u4(); };
+  }, [canSeeApprovals]);
 
   // ── Widget map — keyed by layout item id ────────────────────────────────────
   const WIDGETS = {
     A: () => <TotalVouchersWidget    count={stats.vouchers}       loading={loading} />,
-    B: () => <PendingApprovalsWidget count={stats.pending}        loading={loading} />,
+    B: () => canSeeApprovals ? <PendingApprovalsWidget count={stats.pending} loading={loading} /> : null,
     C: () => <ProfitLossWidget />,
     D: () => <ExpensesWidget />,
     E: () => <BankAccountsWidget />,

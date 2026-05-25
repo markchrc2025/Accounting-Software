@@ -21,23 +21,23 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-const admin  = require('firebase-admin');
-const path   = require('path');
+const admin = require("firebase-admin");
+const path = require("path");
 
 // ── Service account ───────────────────────────────────────────────────────────
-const serviceAccount = require(path.resolve(__dirname, '..', 'serviceAccountKey.json'));
+const serviceAccount = require(path.resolve(__dirname, "..", "serviceAccountKey.json"));
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
 // Named Firestore database (NOT the default "(default)")
-const db = admin.firestore().databaseId
-  ? admin.firestore()
-  : admin.firestore();
+const db = admin.firestore().databaseId ?
+  admin.firestore() :
+  admin.firestore();
 // Override to use the named database "scalebooks"
-const { getFirestore } = require('firebase-admin/firestore');
-const scalebooksDb = getFirestore('scalebooks');
+const {getFirestore} = require("firebase-admin/firestore");
+const scalebooksDb = getFirestore("scalebooks");
 
 // ── Users to restore ──────────────────────────────────────────────────────────
 // Available roles: Admin | Maker | Verifier | Approver | Poster
@@ -53,13 +53,13 @@ const scalebooksDb = getFirestore('scalebooks');
 
 const USERS = [
   {
-    email:        'workscale.finance@gmail.com',
-    fullName:     'Christian R. Canlubo',
-    workEmail:    '',
-    roles:        ['Admin'],
+    email: "workscale.finance@gmail.com",
+    fullName: "Christian R. Canlubo",
+    workEmail: "",
+    roles: ["Admin"],
     moduleAccess: {},
-    signatureUrl: '',
-    inviteStatus: 'active',
+    signatureUrl: "",
+    inviteStatus: "active",
   },
 
   // ── Add more users below (copy-paste the block above) ──────────────────────
@@ -89,10 +89,10 @@ async function run() {
 
     // Check for existing doc with this email
     const existing = await scalebooksDb
-      .collection('appUsers')
-      .where('email', '==', email)
-      .limit(1)
-      .get();
+        .collection("appUsers")
+        .where("email", "==", email)
+        .limit(1)
+        .get();
 
     if (!existing.empty) {
       console.log(`⏭  Skipped (already exists): ${email}`);
@@ -100,20 +100,20 @@ async function run() {
       continue;
     }
 
-    await scalebooksDb.collection('appUsers').add({
+    await scalebooksDb.collection("appUsers").add({
       email,
-      fullName:     user.fullName || '',
-      workEmail:    user.workEmail || '',
-      roles:        user.roles || [],
+      fullName: user.fullName || "",
+      workEmail: user.workEmail || "",
+      roles: user.roles || [],
       moduleAccess: user.moduleAccess || {},
-      signatureUrl: user.signatureUrl || '',
-      inviteStatus: user.inviteStatus || 'active',
-      invitedAt:    now,
-      createdAt:    now,
-      createdBy:    'restore-script',
+      signatureUrl: user.signatureUrl || "",
+      inviteStatus: user.inviteStatus || "active",
+      invitedAt: now,
+      createdAt: now,
+      createdBy: "restore-script",
     });
 
-    console.log(`✅ Created: ${email} [${(user.roles || []).join(', ')}]`);
+    console.log(`✅ Created: ${email} [${(user.roles || []).join(", ")}]`);
     created++;
   }
 
@@ -121,7 +121,7 @@ async function run() {
   process.exit(0);
 }
 
-run().catch(err => {
-  console.error('Error:', err.message);
+run().catch((err) => {
+  console.error("Error:", err.message);
   process.exit(1);
 });

@@ -70,8 +70,64 @@ function clampDay(year, monthIdx, day) {
   return Math.min(day, last);
 }
 
-/* ── Build schedule with dueDate (ISO yyyy-mm-dd) ───────────────── */
+/* ── Every-N-Days schedule ──────────────────────────────────────── */
+function buildIntervalSchedule(loan) {
+  const intervalDays = parseInt(loan.intervalDays) || 15;
+  const start = loan.disbursementDate ? new Date(loan.disbursementDate + 'T00:00:00') : null;
+  if (!start || isNaN(start.getTime()) || !loan.termMonths) return [];
+  const endDate = new Date(start.getFullYear(), start.getMonth() + parseInt(loan.termMonths), start.getDate());
+  const P = parseFloat(loan.principal) || 0;
+  const dates = [];
+  let cur = new Date(start);
+  while (cur <= endDate) { dates.push(new Date(cur)); cur = new Date(cur.getTime() + intervalDays * 86400000); }
+  const n = dates.length;
+  if (n === 0 || P <= 0) return [];
+  const r = (loan.annualRate || 0) / 100 * intervalDays / 365;
+  const pmt = r === 0 ? P / n : P * r * Math.pow(1+r,n) / (Math.pow(1+r,n)-1);
+  // For Fixed method: total interest = P × (annualRate/12) × termMonths (same as GAS monthly calc),
+  // spread evenly over n actual interval periods so totals are consistent with the Amortization tab.
+  const fixedInterestPerPeriod = n > 0
+    ? P * (loan.annualRate||0) / 100 / 12 * parseInt(loan.termMonths || 1) / n
+    : 0;
+  let balance = P;
+  const fee = parseFloat(loan.processingFee) || 0;
+  const schedule = dates.map((d, i) => {
+    const openingBalance = balance;
+    let interest, principal;
+    if (loan.interestMethod === 'Fixed') {
+      principal = P / n;
+      interest  = fixedInterestPerPeriod;
+    } else if (loan.interestMethod === 'Balloon') {
+      interest  = balance * r;
+      principal = i === n - 1 ? balance : 0;
+    } else {
+      interest  = balance * r;
+      principal = Math.max(0, pmt - interest);
+    }
+    balance = Math.max(0, balance - principal);
+    const dueDate = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    const m = new Date(d.getFullYear(), d.getMonth(), 1);
+    const label = MONTH_NAMES[m.getMonth()] + '-' + m.getFullYear();
+    return {
+      period: i+1, label, dueDate,
+      scheduledPrincipal: principal, scheduledInterest: interest,
+      scheduledTotal: principal + interest,
+      openingBalance,
+      closingBalance: balance,
+      paidPrincipal: 0, paidInterest: 0, paidPenalty: 0,
+      status: 'scheduled',
+    };
+  });
+  // Store processing fee on first period as a separate field (not merged into interest)
+  if (schedule.length > 0 && fee > 0) {
+    schedule[0].processingFee = fee;
+  }
+  return schedule;
+}
+
+/* ── Build schedule with due dates ─────────────────────────────── */
 export function buildScheduleWithDueDates(loan) {
+  if (loan.payDayMode === 'Every N Days') return buildIntervalSchedule(loan);
   const rows = [];
   if (!loan.disbursementDate || !loan.termMonths) return rows;
   const base = new Date(loan.disbursementDate);
@@ -105,6 +161,11 @@ export function buildScheduleWithDueDates(loan) {
   // fill opening balances
   for (let i = 1; i < rows.length; i++) {
     rows[i].openingBalance = rows[i - 1].closingBalance;
+  }
+  // Store processing fee on first period as a separate field (not merged into interest)
+  const fee = parseFloat(loan.processingFee) || 0;
+  if (rows.length > 0 && fee > 0) {
+    rows[0].processingFee = fee;
   }
   return rows;
 }

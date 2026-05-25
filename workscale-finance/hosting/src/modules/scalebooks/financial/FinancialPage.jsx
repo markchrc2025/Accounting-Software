@@ -3,8 +3,9 @@ import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs, onSn
 import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import { nextVoucherId } from '../../../utils/documentIds.js';
-import { recomputeLoanState, daysBetween } from './loanMonitoring.js';
+import { recomputeLoanState, daysBetween, buildScheduleWithDueDates } from './loanMonitoring.js';
 import RecordPaymentModal from './RecordPaymentModal.jsx';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
 /* ─── Constants ─────────────────────────────────────────────────── */
 const LOAN_TYPES = [
@@ -66,6 +67,41 @@ function buildPayDaysMonths(loan) {
     months.push({ key, label });
   }
   return months;
+}
+
+/* ── Every-N-Days payment schedule ─────────────────────────────── */
+/* Returns one entry per payment: { period, dueDate, date, principal, interest, balance } */
+function buildIntervalPayments(loan) {
+  const intervalDays = parseInt(loan.intervalDays) || 15;
+  const start = loan.disbursementDate ? new Date(loan.disbursementDate + 'T00:00:00') : null;
+  if (!start || isNaN(start.getTime()) || !loan.termMonths) return [];
+  const endDate = new Date(start.getFullYear(), start.getMonth() + parseInt(loan.termMonths), start.getDate());
+  const P = parseFloat(loan.principal) || 0;
+  // Collect all due dates
+  const dates = [];
+  let cur = new Date(start);
+  while (cur <= endDate) { dates.push(new Date(cur)); cur = new Date(cur.getTime() + intervalDays * 86400000); }
+  const n = dates.length;
+  if (n === 0 || P <= 0) return [];
+  const r = (loan.annualRate || 0) / 100 * intervalDays / 365;
+  const pmt = r === 0 ? P / n : P * r * Math.pow(1+r,n) / (Math.pow(1+r,n)-1);
+  let balance = P;
+  return dates.map((d, i) => {
+    let interest, principal;
+    if (loan.interestMethod === 'Fixed') {
+      principal = P / n;
+      interest  = P * (loan.annualRate||0) / 100 * intervalDays / 365;
+    } else if (loan.interestMethod === 'Balloon') {
+      interest  = balance * r;
+      principal = i === n - 1 ? balance : 0;
+    } else {
+      interest  = balance * r;
+      principal = Math.max(0, pmt - interest);
+    }
+    balance = Math.max(0, balance - principal);
+    const iso = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    return { period: i+1, dueDate: iso, date: d, principal, interest, balance };
+  });
 }
 
 /* Build array of 'Mon-YYYY' labels from disbursementDate over termMonths */
@@ -175,6 +211,49 @@ const CSS = `
   .cal-event { font-size:10px; background:#fff7ed; border:1px solid #fed7aa; border-radius:4px; padding:2px 4px; margin-bottom:2px; line-height:1.3; }
   .toast     { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; }
   .backdrop  { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
+
+  /* ── Loan Registry ─────────────────────────────────────────────── */
+  .lr-kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:16px; }
+  .lr-kpi-card { border-radius:12px; padding:12px 14px; }
+  .lr-kpi-label { font-size:9px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; margin-bottom:4px; opacity:.75; }
+  .lr-kpi-value { font-size:17px; font-weight:900; line-height:1.1; }
+  .lr-kpi-sub   { font-size:10px; opacity:.6; margin-top:3px; }
+  .lr-filter-bar { display:flex; gap:4px; background:#f1f5f9; border-radius:8px; padding:3px; }
+  .lr-filter-btn { border:none; border-radius:6px; padding:4px 10px; font-size:11px; font-weight:700; cursor:pointer; font-family:inherit; transition:all .15s; }
+  .lr-tbl-wrap { border-radius:12px; border:1px solid #e5e7eb; background:#fff; overflow:hidden; }
+  .lr-tbl-wrap table { margin:0; }
+  .lr-tbl-wrap th:first-child { border-radius:0; }
+  .lr-row td { border-left:3px solid transparent; }
+  .lr-row-active td:first-child { border-left:3px solid #22c55e; }
+  .lr-row-disposed td:first-child { border-left:3px solid #cbd5e1; }
+  .lr-prog-track { background:#f1f5f9; border-radius:999px; height:5px; overflow:hidden; margin-top:4px; }
+  .lr-prog-fill  { height:100%; border-radius:999px; transition:width .4s ease; }
+  .lr-type-badge { font-size:9px; font-weight:800; padding:2px 6px; border-radius:4px; display:inline-block; margin-top:3px; white-space:nowrap; }
+  .lr-del-btn    { background:none; border:none; color:#fca5a5; cursor:pointer; font-weight:900; font-size:14px; padding:2px 6px; border-radius:6px; transition:color .15s; }
+  .lr-del-btn:hover { color:#dc2626; }
+  .lr-save-badge { font-size:11px; font-weight:700; padding:4px 10px; border-radius:6px; border:1px solid; }
+  .lr-empty { padding:56px 24px; text-align:center; color:#94a3b8; }
+  .lr-empty-icon { font-size:36px; margin-bottom:10px; }
+  .lr-empty-title { font-weight:700; font-size:14px; color:#475569; margin-bottom:4px; }
+  .lr-empty-sub   { font-size:12px; }
+  .lr-edit-btn   { background:none; border:1px solid #e2e8f0; color:#64748b; cursor:pointer; font-size:12px; padding:3px 8px; border-radius:6px; transition:all .15s; font-family:inherit; }
+  .lr-edit-btn:hover { border-color:#f97316; color:#f97316; }
+  .lr-form-grid  { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+  .lr-form-full  { grid-column:1/-1; }
+  .lr-form-sect  { font-size:10px; font-weight:800; color:#94a3b8; letter-spacing:.06em; text-transform:uppercase; margin:4px 0 10px; padding-bottom:6px; border-bottom:1px solid #f1f5f9; grid-column:1/-1; }
+  .lr-td-label   { font-size:13px; font-weight:700; color:#0b1220; }
+  .lr-td-sub     { font-size:10px; color:#94a3b8; margin-top:2px; }
+  .lr-row-click  { cursor:pointer; }
+  .lr-row-click:hover td { background:#fafbff !important; }
+  .lr-detail-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px 18px; }
+  .lr-detail-2col { grid-column:span 2; }
+  .lr-detail-3col { grid-column:span 3; }
+  .lr-detail-lbl  { font-size:9px; font-weight:800; color:#94a3b8; letter-spacing:.07em; text-transform:uppercase; margin-bottom:3px; }
+  .lr-detail-val  { font-size:13px; font-weight:700; color:#0b1220; }
+  .lr-detail-val-dim { font-size:13px; font-weight:600; color:#94a3b8; }
+  .lr-detail-sect { font-size:10px; font-weight:800; color:#94a3b8; letter-spacing:.06em; text-transform:uppercase; margin:16px 0 10px; padding-bottom:6px; border-bottom:1px solid #f1f5f9; grid-column:1/-1; }
+  .lr-hero-outstanding { border-radius:14px; padding:16px 20px; margin-bottom:16px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+  .lr-lock-notice { display:flex; align-items:center; gap:6px; font-size:11px; color:#94a3b8; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:6px 12px; }
 `;
 
 export default function FinancialPage() {
@@ -212,6 +291,13 @@ export default function FinancialPage() {
   // pmForm.checks: [{id, checkNo, checkDate, amount}]
   const [monitorFilter, setMonitorFilter] = useState('outstanding'); // outstanding | paidoff | atrisk | all
   const [historyLoanFilter, setHistoryLoanFilter] = useState('all');
+  const [lrFilter, setLrFilter] = useState('all'); // all | active | disposed
+  const [loanFormModal, setLoanFormModal] = useState(null); // { mode:'new'|'edit', data:{...loan} }
+  const [loanDetailModal, setLoanDetailModal] = useState(null); // loan.id
+  const [loanDetailTab, setLoanDetailTab] = useState('details'); // 'details' | 'schedule'
+  const [reportDropdown, setReportDropdown] = useState(false);
+  const reportTableRef = useRef(null);
+  const { isAdmin } = usePermissions();
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
@@ -316,19 +402,19 @@ export default function FinancialPage() {
 
   const addLoan = useCallback(() => {
     const iso = new Date().toISOString().slice(0, 7) + '-01';
-    setLoans(prev => {
-      const id = prev.reduce((m, l) => Math.max(m, l.id || 0), 0) + 1;
-      const newLoan = {
-        id, name: '', loanType: 'Term Loan',
+    setPdFillD1(''); setPdFillD2('');
+    setLoanFormModal({
+      mode: 'new',
+      data: {
+        id: null, name: '', loanType: 'Term Loan',
         disbursementDate: iso, proceedsDate: '',
-        termMonths: 60, annualRate: 6,
+        termMonths: 60, annualRate: 6, principal: 0,
         interestMethod: 'Reducing Balance', processingFee: 0,
         status: 'Active', paymentFrequency: 'Monthly',
-        payDayMode: 'Fixed', payDays: '', payDaysPerMonth: {},
-        paymentMethod: 'Check', pmChecks: [],
-        pmAdaDay: '', pmAdaBank: '', pmBtBank: ''
-      };
-      return [...prev, newLoan];
+        payDayMode: 'Fixed', payDays: '', payDay1: '', payDay2: '',
+        payDaysPerMonth: {}, intervalDays: 15, paymentMethod: 'Check', pmChecks: [],
+        pmAdaDay: '', pmAdaBank: '', pmBtBank: '', cycleCount: 1
+      }
     });
   }, [])
 
@@ -341,6 +427,21 @@ export default function FinancialPage() {
       });
     });
   }, [debounceSave, setConfirmModal]);
+
+  const saveLoanFromModal = useCallback((data) => {
+    setLoans(prev => {
+      let next;
+      if (data.id == null) {
+        const id = prev.reduce((m, l) => Math.max(m, l.id || 0), 0) + 1;
+        next = [...prev, { ...data, id }];
+      } else {
+        next = prev.map(l => l.id === data.id ? { ...l, ...data } : l);
+      }
+      debounceSave(next);
+      return next;
+    });
+    setLoanFormModal(null);
+  }, [debounceSave]);
 
   const activeLoans    = loans.filter(l => l.status === 'Active');
   const totalPrincipal = activeLoans.reduce((s, l) => s + (parseFloat(l.principal) || 0), 0);
@@ -427,7 +528,6 @@ export default function FinancialPage() {
   const TABS = [
     { key: 'dashboard',  label: 'Dashboard' },
     { key: 'loans',      label: 'Loan Registry' },
-    { key: 'monitoring', label: 'Loan Monitoring' },
     { key: 'schedule',   label: 'Amortization' },
     { key: 'history',    label: 'Payment History' },
     { key: 'calendar',   label: 'Calendar' },
@@ -443,105 +543,328 @@ export default function FinancialPage() {
   }, []);
 
   /* ── Tab: Loan Registry ────────────────────────────────────────── */
+  const LOAN_TYPE_COLORS = {
+    'Term Loan':           { bg:'#eff6ff', color:'#1d4ed8' },
+    'Revolving Credit':    { bg:'#faf5ff', color:'#7c3aed' },
+    'Mortgage':            { bg:'#fef3c7', color:'#92400e' },
+    'Equipment Financing': { bg:'#ecfdf5', color:'#065f46' },
+    'Line of Credit':      { bg:'#fff7ed', color:'#c2410c' },
+    'Balloon Loan':        { bg:'#fce7f3', color:'#9d174d' },
+    'Bonds Payable':       { bg:'#f0f9ff', color:'#0369a1' },
+    'Other':               { bg:'#f8fafc', color:'#475569' },
+  };
+
   function LoansTab() {
+    const today = new Date().toISOString().slice(0, 10);
+    const countAll         = loans.length;
+    const countOutstanding = loans.filter(l => !loanStates[l.id]?.isPaidOff && l.status !== 'Disposed').length;
+    const countAtRisk      = loans.filter(l => (loanStates[l.id]?.missedCount || 0) > 0 && !loanStates[l.id]?.isPaidOff).length;
+    const countPaidOff     = loans.filter(l =>  loanStates[l.id]?.isPaidOff).length;
+    const countDisposed    = loans.filter(l => l.status === 'Disposed').length;
+
+    let visibleLoans;
+    if (lrFilter === 'outstanding') {
+      visibleLoans = loans.filter(l => !loanStates[l.id]?.isPaidOff && l.status !== 'Disposed');
+    } else if (lrFilter === 'atrisk') {
+      visibleLoans = loans.filter(l => (loanStates[l.id]?.missedCount || 0) > 0 && !loanStates[l.id]?.isPaidOff);
+    } else if (lrFilter === 'paidoff') {
+      visibleLoans = loans.filter(l =>  loanStates[l.id]?.isPaidOff);
+    } else if (lrFilter === 'disposed') {
+      visibleLoans = loans.filter(l => l.status === 'Disposed');
+    } else {
+      visibleLoans = loans;
+    }
+
+    const kpi = loans.reduce((acc, l) => {
+      const st = loanStates[l.id] || {};
+      acc.totalPrincipal   += Number(l.principal) || 0;
+      acc.totalOutstanding += st.outstandingTotal || 0;
+      acc.totalInterest    += st.totalScheduledInterest || 0;
+      return acc;
+    }, { totalPrincipal:0, totalOutstanding:0, totalInterest:0 });
+
+    const METHOD_SHORT = {
+      'Reducing Balance':              'Reducing Bal.',
+      'Straight-Line':                 'Straight-Line',
+      'Straight-Line (Monthly Rate)':  'Straight-Line Mo.',
+      'Fixed':                         'Fixed',
+      'Balloon':                       'Balloon',
+    };
+
     return (
       <div>
-        <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:12, flexWrap:'wrap' }}>
-          <button className="btn btn-primary btn-sm" onClick={addLoan}>+ Add Loan</button>
-          <span style={{ marginLeft:'auto', fontSize:12, color:'#64748b' }}>
-            {activeLoans.length} active · Principal: <strong>{fmtCur(totalPrincipal)}</strong>
-          </span>
-          {saveStatus && (
-            <span style={{ fontSize:11, color: saveStatus==='error'?'#dc2626':'#15803d', fontWeight:600 }}>
-              {saveStatus==='saving'?'Saving…':saveStatus==='saved'?'Saved ✓':'Save Error'}
-            </span>
-          )}
-          <button className="btn btn-dark btn-sm" onClick={()=>saveToFirestore(loans)}>Save</button>
+        {/* ── KPI Summary Cards ─────────────────────────────────── */}
+        <div className="lr-kpi-grid">
+          {[
+            { label:'Total Loans',        value: String(countAll),             sub:`${countOutstanding} outstanding · ${countAtRisk} at-risk`, color:'#0369a1', bg:'#f0f9ff', border:'#bae6fd' },
+            { label:'Total Borrowed',     value: fmtCur(kpi.totalPrincipal),   sub:'original principal',              color:'#7c3aed', bg:'#faf5ff', border:'#ddd6fe' },
+            { label:'Outstanding',        value: fmtCur(kpi.totalOutstanding), sub:'principal + interest',            color:'#c2410c', bg:'#fff7ed', border:'#fed7aa' },
+            { label:'Projected Interest', value: fmtCur(kpi.totalInterest),    sub:'total finance cost',              color:'#065f46', bg:'#f0fdf4', border:'#bbf7d0' },
+          ].map(k => (
+            <div key={k.label} className="lr-kpi-card" style={{ background:k.bg, border:`1px solid ${k.border}` }}>
+              <div className="lr-kpi-label" style={{ color:k.color }}>{k.label}</div>
+              <div className="lr-kpi-value" style={{ color:k.color }}>{k.value}</div>
+              <div className="lr-kpi-sub"   style={{ color:k.color }}>{k.sub}</div>
+            </div>
+          ))}
         </div>
-        {loans.length === 0 ? (
-          <div className="empty">No loans yet. Click "+ Add Loan" to begin.</div>
+
+        {/* ── Toolbar ───────────────────────────────────────────── */}
+        <div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:14, flexWrap:'wrap' }}>
+          {isAdmin
+            ? <button className="btn btn-primary btn-sm" onClick={addLoan}>+ Add Loan</button>
+            : <span title="Admin access required" style={{ display:'inline-flex', alignItems:'center', gap:5, fontSize:12, color:'#94a3b8', background:'#f8fafc', border:'1px solid #e2e8f0', borderRadius:8, padding:'6px 12px', cursor:'not-allowed' }}>
+                🔒 Add Loan
+              </span>
+          }
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+            {[
+              { k:'all',         label:'All',         count:countAll,         accent:'#0f172a' },
+              { k:'outstanding', label:'Outstanding',  count:countOutstanding, accent:'#c2410c' },
+              { k:'atrisk',      label:'At-Risk',      count:countAtRisk,      accent:'#b91c1c' },
+              { k:'paidoff',     label:'Paid-Off',     count:countPaidOff,     accent:'#15803d' },
+              { k:'disposed',    label:'Disposed',     count:countDisposed,    accent:'#64748b' },
+            ].map(({ k, label, count, accent }) => (
+              <button key={k}
+                onClick={() => setLrFilter(k)}
+                style={{
+                  border: lrFilter === k ? `2px solid ${accent}` : '2px solid #e5e7eb',
+                  background: lrFilter === k ? accent : '#fff',
+                  color: lrFilter === k ? '#fff' : '#0b1220',
+                  borderRadius: 999, padding: '5px 13px', fontSize: 12, fontWeight: 800,
+                  cursor: 'pointer', fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 7,
+                }}
+              >
+                {label}
+                <span style={{
+                  background: lrFilter === k ? 'rgba(255,255,255,.25)' : '#f1f5f9',
+                  color: lrFilter === k ? '#fff' : '#64748b',
+                  borderRadius: 999, padding: '1px 7px', fontSize: 11, fontWeight: 800,
+                }}>{count}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ marginLeft:'auto', display:'flex', gap:8, alignItems:'center' }}>
+            <span style={{ fontSize:11, color:'#94a3b8' }}>
+              {visibleLoans.length} loan{visibleLoans.length !== 1 ? 's' : ''}
+            </span>
+            {saveStatus && (
+              <span className="lr-save-badge" style={{
+                background:  saveStatus==='error' ? '#fef2f2' : saveStatus==='saved' ? '#f0fdf4' : '#f8fafc',
+                color:       saveStatus==='error' ? '#dc2626' : saveStatus==='saved' ? '#15803d' : '#64748b',
+                borderColor: saveStatus==='error' ? '#fca5a5' : saveStatus==='saved' ? '#bbf7d0' : '#e2e8f0',
+              }}>
+                {saveStatus==='saving' ? '⟳ Saving…' : saveStatus==='saved' ? '✓ Saved' : '✕ Error'}
+              </span>
+            )}
+            <button className="btn btn-ghost btn-sm" onClick={() => saveToFirestore(loans)}>Save</button>
+          </div>
+        </div>
+
+        {/* ── Empty State ───────────────────────────────────────── */}
+        {visibleLoans.length === 0 ? (
+          <div className="lr-empty">
+            <div className="lr-empty-icon">🏦</div>
+            <div className="lr-empty-title">
+              {lrFilter === 'all' ? 'No loans yet' : `No ${lrFilter} loans`}
+            </div>
+            <div className="lr-empty-sub">
+              {lrFilter === 'all'
+                ? 'Click "+ Add Loan" to register your first loan.'
+                : 'Switch to "All" to see all loans.'}
+            </div>
+          </div>
         ) : (
-          <div style={{ overflowX:'auto' }}>
-            <datalist id="fp-lender-list">
-              {[...new Set(loans.map(l => l.name).filter(Boolean))].map(n => <option key={n} value={n} />)}
-            </datalist>
+          /* ── Table ──────────────────────────────────────────── */
+          <div className="lr-tbl-wrap">
             <table>
               <thead>
                 <tr>
-                  <th style={{width:28}}>#</th>
-                  <th style={{minWidth:140}}>Contact / Lender</th>
-                  <th style={{minWidth:120}}>Loan Type</th>
-                  <th style={{minWidth:120}}>First Payment</th>
-                  <th style={{minWidth:110}}>Principal ₱</th>
-                  <th style={{width:70}}>Term Mo.</th>
-                  <th style={{width:80}}>Rate %</th>
-                  <th style={{minWidth:150}}>Interest Method</th>
-                  <th style={{minWidth:110}}>Processing Fee ₱</th>
-                  <th style={{minWidth:120}}>Proceeds Date</th>
-                  <th style={{width:90}}>Status</th>
-                  <th style={{width:110}}>Frequency</th>
-                  <th style={{width:90}}>Pay Days</th>
-                  <th style={{minWidth:110}}>Last Payment</th>
-                  <th style={{minWidth:110, textAlign:'right'}}>Outstanding</th>
-                  <th style={{width:36}}></th>
+                  <th style={{width:36}}>#</th>
+                  <th style={{minWidth:180}}>Lender / Type</th>
+                  <th style={{minWidth:130, textAlign:'right'}}>Principal ₱</th>
+                  <th style={{width:110}}>Term · Rate</th>
+                  <th style={{width:120}}>Method</th>
+                  <th style={{width:120}}>Schedule</th>
+                  <th style={{minWidth:175, textAlign:'right'}}>Outstanding / Progress</th>
+                  <th style={{width:140}}>Next Due</th>
+                  <th style={{width:100}}>Status</th>
+                  <th style={{width:85, textAlign:'center'}}>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {loans.map((l, idx) => (
-                  <tr key={l.id}>
-                    <td style={{ color:'#94a3b8', fontSize:10 }}>{idx + 1}</td>
-                    <td>
-                      <input list="fp-lender-list" className="tbl-inp" style={{minWidth:130}} value={l.name||''} onChange={e=>updateLoan(l.id,'name',e.target.value)} placeholder="Lender name" />
-                    </td>
-                    <td>
-                      <select className="tbl-sel" value={l.loanType||'Term Loan'} onChange={e=>updateLoan(l.id,'loanType',e.target.value)}>
-                        {LOAN_TYPES.map(t=><option key={t}>{t}</option>)}
-                      </select>
-                    </td>
-                    <td><input type="date" className="tbl-inp" value={l.disbursementDate||''} onChange={e=>updateLoan(l.id,'disbursementDate',e.target.value)} /></td>
-                    <td><input type="number" className="tbl-inp tbl-num" value={l.principal||''} onChange={e=>updateLoan(l.id,'principal',parseFloat(e.target.value)||0)} /></td>
-                    <td><input type="number" className="tbl-inp" style={{width:60}} value={l.termMonths||''} onChange={e=>updateLoan(l.id,'termMonths',parseInt(e.target.value)||0)} /></td>
-                    <td><input type="number" step="0.01" className="tbl-inp" style={{width:70}} value={l.annualRate||''} onChange={e=>updateLoan(l.id,'annualRate',parseFloat(e.target.value)||0)} /></td>
-                    <td>
-                      <select className="tbl-sel" value={l.interestMethod||'Reducing Balance'} onChange={e=>updateLoan(l.id,'interestMethod',e.target.value)}>
-                        {INTEREST_METHODS.map(m=><option key={m}>{m}</option>)}
-                      </select>
-                    </td>
-                    <td><input type="number" className="tbl-inp tbl-num" value={l.processingFee||''} onChange={e=>updateLoan(l.id,'processingFee',parseFloat(e.target.value)||0)} /></td>
-                    <td><input type="date" className="tbl-inp" value={l.proceedsDate||''} onChange={e=>updateLoan(l.id,'proceedsDate',e.target.value)} /></td>
-                    <td>
-                      <select className="tbl-sel" value={l.status||'Active'} onChange={e=>updateLoan(l.id,'status',e.target.value)}>
-                        {['Active','Disposed'].map(s=><option key={s}>{s}</option>)}
-                      </select>
-                    </td>
-                    <td>
-                      <select className="tbl-sel" value={l.paymentFrequency||'Monthly'} onChange={e=>updateLoan(l.id,'paymentFrequency',e.target.value)}>
-                        {PAYMENT_FREQS.map(f=><option key={f}>{f}</option>)}
-                      </select>
-                    </td>
-                    <td>
-                      {l.paymentFrequency === 'Semi-Monthly'
-                        ? <button className="pill pill-sm" onClick={()=>{setPayDaysModal(l.id);setPdFillD1('');setPdFillD2('');}} style={{cursor:'pointer',background:'#f0f9ff',borderColor:'#bae6fd',color:'#0284c7',border:'1px solid'}}>
-                            {l.payDayMode==='Variable per Month' ? 'Variable' : (l.payDay1&&l.payDay2 ? `${l.payDay1}/${l.payDay2}` : l.payDays||'Set')}
-                          </button>
-                        : <span style={{color:'#94a3b8',fontSize:10}}>Monthly</span>
-                      }
-                    </td>
-                    <td style={{ fontSize:11 }}>
-                      {loanStates[l.id]?.lastPaymentDate || <span style={{ color:'#cbd5e1' }}>—</span>}
-                    </td>
-                    <td style={{ textAlign:'right', fontWeight:700, color: (loanStates[l.id]?.outstandingPrincipal||0) > 0 ? '#c2410c' : '#15803d' }}>
-                      {fmtCur(loanStates[l.id]?.outstandingPrincipal || 0)}
-                    </td>
-                    <td>
-                      <button onClick={()=>deleteLoan(l.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:14,padding:'2px 4px'}}>✕</button>
-                    </td>
-                  </tr>
-                ))}
+                {visibleLoans.map((l, idx) => {
+                  const st          = loanStates[l.id] || {};
+                  const isActive    = (l.status || 'Active') === 'Active';
+                  const typeColor   = LOAN_TYPE_COLORS[l.loanType] || LOAN_TYPE_COLORS['Other'];
+                  const principal   = parseFloat(l.principal) || 0;
+                  const outstanding = st.outstandingPrincipal != null ? st.outstandingPrincipal : principal;
+                  const progress    = principal > 0 ? Math.max(0, Math.min(100, ((principal - outstanding) / principal) * 100)) : 0;
+                  const progColor   = progress >= 100 ? '#22c55e' : progress >= 60 ? '#f97316' : '#3b82f6';
+                  const payLabel    = l.payDayMode === 'Every N Days'
+                    ? `Every ${l.intervalDays || 15}d`
+                    : l.paymentFrequency === 'Semi-Monthly'
+                    ? (l.payDayMode === 'Variable per Month' ? 'Semi-Mo · Var'
+                      : l.payDay1 && l.payDay2 ? `Semi-Mo · ${l.payDay1}/${l.payDay2}` : 'Semi-Monthly')
+                    : 'Monthly';
+                  const dToNext = daysBetween(today, st.nextDueDate);
+                  const rowBorderColor = st.derivedStatus === 'Overdue' ? '#ef4444'
+                    : st.derivedStatus === 'Paid-Off' ? '#22c55e'
+                    : isActive ? '#3b82f6' : '#cbd5e1';
+                  return (
+                    <tr
+                      key={l.id}
+                      className="lr-row-click"
+                      style={{ borderLeft:`3px solid ${rowBorderColor}` }}
+                      onClick={() => setLoanDetailModal(l.id)}
+                    >
+                      <td style={{ color:'#94a3b8', fontSize:10, fontWeight:700, paddingLeft:10 }}>{idx + 1}</td>
+                      <td>
+                        <div className="lr-td-label">
+                          {l.name || <span style={{color:'#cbd5e1',fontStyle:'italic'}}>Unnamed</span>}
+                        </div>
+                        <span className="lr-type-badge" style={{ background:typeColor.bg, color:typeColor.color }}>
+                          {l.loanType || 'Term Loan'}
+                        </span>
+                      </td>
+                      <td style={{ textAlign:'right' }}>
+                        <div className="lr-td-label">{fmtCur(principal)}</div>
+                        {l.processingFee > 0 && <div className="lr-td-sub">+{fmtCur(l.processingFee)} fee</div>}
+                      </td>
+                      <td>
+                        <div className="lr-td-label">{l.termMonths || '—'} mo</div>
+                        <div className="lr-td-sub">{l.annualRate || '—'}% p.a.</div>
+                      </td>
+                      <td>
+                        <div style={{ fontSize:11, color:'#374151' }}>
+                          {METHOD_SHORT[l.interestMethod] || l.interestMethod || '—'}
+                        </div>
+                      </td>
+                      <td>
+                        <div style={{ fontSize:11, color:'#374151' }}>{payLabel}</div>
+                        {l.proceedsDate && <div className="lr-td-sub">Proceeds {l.proceedsDate}</div>}
+                      </td>
+                      <td style={{ textAlign:'right' }}>
+                        <div style={{ fontWeight:800, fontSize:13, color: outstanding > 0 ? '#c2410c' : '#15803d' }}>
+                          {fmtCur(outstanding)}
+                        </div>
+                        <div className="lr-prog-track">
+                          <div className="lr-prog-fill" style={{ width:`${progress}%`, background:progColor }} />
+                        </div>
+                        <div style={{ fontSize:9, color:'#94a3b8', marginTop:2 }}>
+                          {progress.toFixed(0)}% repaid
+                        </div>
+                      </td>
+                      <td style={{ fontSize:11 }}>
+                        {st.nextDueDate ? (
+                          <>
+                            <div style={{ fontWeight:700 }}>{st.nextDueDate}</div>
+                            {dToNext != null && (
+                              <div style={{ fontWeight:700, fontSize:10, color: dToNext < 0 ? '#b91c1c' : dToNext <= 7 ? '#c2410c' : '#94a3b8' }}>
+                                {dToNext < 0 ? `${Math.abs(dToNext)}d overdue` : dToNext === 0 ? 'Due today' : `in ${dToNext}d`}
+                              </div>
+                            )}
+                          </>
+                        ) : <span style={{ color:'#cbd5e1' }}>—</span>}
+                      </td>
+                      <td>
+                        {(() => {
+                          const smap = {
+                            'Paid-Off':  { bg:'#f0fdf4', border:'#bbf7d0', color:'#15803d' },
+                            'Overdue':   { bg:'#fef2f2', border:'#fecaca', color:'#b91c1c' },
+                            'Current':   { bg:'#eff6ff', border:'#bfdbfe', color:'#1d4ed8' },
+                            'Active':    { bg:'#fff7ed', border:'#fed7aa', color:'#c2410c' },
+                            'Disposed':  { bg:'#f8fafc', border:'#e2e8f0', color:'#94a3b8' },
+                          };
+                          const s = smap[st.derivedStatus || 'Active'] || smap.Active;
+                          return <span className="pill" style={{ background:s.bg, borderColor:s.border, color:s.color }}>{st.derivedStatus || 'Active'}</span>;
+                        })()}
+                      </td>
+                      <td style={{ textAlign:'center' }} onClick={e => e.stopPropagation()}>
+                        <div style={{ display:'flex', gap:3, justifyContent:'center' }}>
+                          {!st.isPaidOff && l.status !== 'Disposed' && isAdmin && (
+                            <button
+                              className="btn btn-primary btn-sm"
+                              title="Record payment"
+                              style={{ padding:'3px 7px', fontSize:11 }}
+                              onClick={() => setPayModal(l.id)}
+                            >₱</button>
+                          )}
+                          {isAdmin ? (
+                            <>
+                              <button
+                                className="lr-edit-btn"
+                                title="Edit loan"
+                                onClick={() => { setPdFillD1(''); setPdFillD2(''); setLoanFormModal({ mode:'edit', data:{ ...l } }); }}
+                              >✎</button>
+                              <button
+                                className="lr-del-btn"
+                                title="Delete loan"
+                                onClick={() => deleteLoan(l.id)}
+                              >✕</button>
+                            </>
+                          ) : (
+                            <span title="Admin access required" style={{ fontSize:13, color:'#cbd5e1' }}>🔒</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
+
+        {/* Overdue installments breakdown — when At-Risk filter active */}
+        {lrFilter === 'atrisk' && visibleLoans.length > 0 && (() => {
+          const overdueRows = visibleLoans.flatMap(l => {
+            const st = loanStates[l.id] || {};
+            return (st.schedule || [])
+              .filter(r => r.status === 'overdue' || (r.status === 'partial' && r.dueDate < today))
+              .map(r => ({ l, r }));
+          });
+          if (overdueRows.length === 0) return null;
+          return (
+            <div style={{ marginTop:24 }}>
+              <div style={{ fontSize:11, fontWeight:800, color:'#b91c1c', letterSpacing:'.07em',
+                textTransform:'uppercase', marginBottom:10, paddingBottom:6, borderBottom:'2px solid #fecaca' }}>
+                Overdue Installments
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Loan</th>
+                    <th>Period</th>
+                    <th>Due Date</th>
+                    <th>Days Overdue</th>
+                    <th style={{textAlign:'right'}}>Interest Due</th>
+                    <th style={{textAlign:'right'}}>Principal Due</th>
+                    <th style={{textAlign:'right'}}>Total Due</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overdueRows.map(({ l, r }) => {
+                    const intDue = Math.max(0, r.scheduledInterest - r.paidInterest);
+                    const priDue = Math.max(0, r.scheduledPrincipal - r.paidPrincipal);
+                    const days = daysBetween(r.dueDate, today) || 0;
+                    return (
+                      <tr key={l.id+'-'+r.period}>
+                        <td style={{ fontWeight:700 }}>{l.name || `Loan ${l.id}`}</td>
+                        <td>{r.label} (P{r.period})</td>
+                        <td style={{ fontSize:11 }}>{r.dueDate}</td>
+                        <td style={{ color:'#b91c1c', fontWeight:700 }}>{days}d</td>
+                        <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(intDue)}</td>
+                        <td style={{ textAlign:'right', color:'#2563eb' }}>{fmtCur(priDue)}</td>
+                        <td style={{ textAlign:'right', fontWeight:900 }}>{fmtCur(intDue+priDue)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
       </div>
     );
   }
@@ -557,7 +880,7 @@ export default function FinancialPage() {
     const portfolio = loans.reduce((acc, l) => {
       const st = loanStates[l.id] || {};
       acc.totalBorrowed       += Number(l.principal) || 0;
-      acc.totalOutstanding    += st.outstandingPrincipal || 0;
+      acc.totalOutstanding    += st.outstandingTotal || 0;
       acc.totalPaidPrincipal  += st.paidPrincipal || 0;
       acc.totalPaidInterest   += st.paidInterest  || 0;
       acc.totalScheduledInt   += st.totalScheduledInterest || 0;
@@ -640,9 +963,10 @@ export default function FinancialPage() {
 
           {/* Total Outstanding */}
           {(() => {
-            const pct = portfolio.totalBorrowed > 0
-              ? Math.min(100, (portfolio.totalOutstanding / portfolio.totalBorrowed) * 100)
-              : 0;
+            const totalPayable = portfolio.totalBorrowed + portfolio.totalScheduledInt;
+            const repaidAmt = portfolio.totalPaidPrincipal + portfolio.totalPaidInterest;
+            const repaidPct = totalPayable > 0 ? Math.min(100, (repaidAmt / totalPayable) * 100) : 0;
+            const outPct    = totalPayable > 0 ? Math.min(100, (portfolio.totalOutstanding / totalPayable) * 100) : 0;
             return (
               <div style={{
                 background:'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)',
@@ -653,12 +977,13 @@ export default function FinancialPage() {
                 </div>
                 <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Outstanding</div>
                 <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.totalOutstanding)}</div>
-                <div style={{marginTop:10,height:5,background:'rgba(255,255,255,.25)',borderRadius:99}}>
-                  <div style={{height:'100%',width:`${pct}%`,background:'#fff',borderRadius:99,transition:'width .6s'}} />
+                <div style={{fontSize:11,opacity:.7,marginBottom:6}}>principal + interest</div>
+                <div style={{marginTop:4,height:5,background:'rgba(255,255,255,.25)',borderRadius:99}}>
+                  <div style={{height:'100%',width:`${repaidPct}%`,background:'#fff',borderRadius:99,transition:'width .6s'}} />
                 </div>
                 <div style={{marginTop:5,fontSize:11,opacity:.8,display:'flex',justifyContent:'space-between'}}>
-                  <span>{pct.toFixed(1)}% of borrowed</span>
-                  <span>{(100-pct).toFixed(1)}% repaid</span>
+                  <span>{outPct.toFixed(1)}% of total payable</span>
+                  <span>{repaidPct.toFixed(1)}% repaid</span>
                 </div>
               </div>
             );
@@ -841,7 +1166,7 @@ export default function FinancialPage() {
     // Portfolio KPIs (across all loans, not just filtered)
     const kpi = rows.reduce((acc, r) => {
       acc.totalPrincipal += parseFloat(r.loan.principal) || 0;
-      acc.totalOutstanding += r.st.outstandingPrincipal || 0;
+      acc.totalOutstanding += r.st.outstandingTotal || 0;
       acc.totalPaidPrincipal += r.st.paidPrincipal || 0;
       acc.totalPaidInterest += r.st.paidInterest || 0;
       if (r.st.isPaidOff) acc.paidOffCount++;
@@ -895,7 +1220,7 @@ export default function FinancialPage() {
           <div className="scard">
             <div className="scard-label">Outstanding Balance</div>
             <div className="scard-value" style={{ color:'#c2410c' }}>{fmtCur(kpi.totalOutstanding)}</div>
-            <div style={{ fontSize:10, color:'#94a3b8', marginTop:4 }}>{kpi.outstandingCount} active</div>
+            <div style={{ fontSize:10, color:'#94a3b8', marginTop:4 }}>{kpi.outstandingCount} active · principal + interest</div>
           </div>
           <div className="scard">
             <div className="scard-label">Principal Paid-to-Date</div>
@@ -1094,7 +1419,7 @@ export default function FinancialPage() {
 
         {filtered.length === 0 ? (
           <div className="empty">
-            No payments recorded yet. Use the <strong>Loan Monitoring</strong> tab to record a payment.
+            No payments recorded yet. Use the <strong>+ Record Payment</strong> button in the Loan Details view.
           </div>
         ) : (
           <div style={{ overflowX:'auto' }}>
@@ -1102,7 +1427,8 @@ export default function FinancialPage() {
               <thead>
                 <tr>
                   <th>Date</th>
-                  <th>Loan</th>
+                  <th>Contact</th>
+                  <th style={{textAlign:'center'}}>Cycle</th>
                   <th>Method</th>
                   <th>Reference</th>
                   <th>Loan Voucher (LV)</th>
@@ -1119,7 +1445,8 @@ export default function FinancialPage() {
                 {filtered.map(p => (
                   <tr key={p.id}>
                     <td style={{ fontSize:11, fontWeight:700 }}>{p.date}</td>
-                    <td style={{ fontWeight:700 }}>{p.loanName || `Loan ${p.loanId}`}</td>
+                    <td style={{ fontWeight:700 }}>{(() => { const ln = loans.find(x => String(x.id) === String(p.loanId)); return ln?.name || p.loanName || '—'; })()}</td>
+                    <td style={{ textAlign:'center', fontWeight:800, color:'#7c3aed' }}>{(() => { const ln = loans.find(x => String(x.id) === String(p.loanId)); return ln?.cycleCount ? `#${ln.cycleCount}` : '—'; })()}</td>
                     <td style={{ fontSize:11, color:'#64748b' }}>{p.method || '—'}</td>
                     <td style={{ fontSize:11, color:'#64748b' }}>{p.referenceNo || '—'}</td>
                     <td>
@@ -1171,7 +1498,7 @@ export default function FinancialPage() {
               </tbody>
               <tfoot>
                 <tr>
-                  <td colSpan={6}>TOTALS</td>
+                  <td colSpan={7}>TOTALS</td>
                   <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(totals.interest)}</td>
                   <td style={{ textAlign:'right', color:'#2563eb' }}>{fmtCur(totals.principal)}</td>
                   <td style={{ textAlign:'right', color:'#7c2d12' }}>{fmtCur(totals.penalty)}</td>
@@ -1350,66 +1677,347 @@ export default function FinancialPage() {
   }
 
   /* ── Tab: Summary ──────────────────────────────────────────────── */
+  function buildOutstandingRows() {
+    return loans
+      .filter(l => (l.status || 'Active') === 'Active')
+      .map(l => {
+        const st             = loanStates[l.id] || {};
+        const principal      = parseFloat(l.principal) || 0;
+        const outPrincipal   = st.outstandingPrincipal != null ? st.outstandingPrincipal : principal;
+        const totalInt       = Math.max(0, loanTotalInterest(l) - (parseFloat(l.processingFee) || 0));
+        const outInterest    = Math.max(0, totalInt - (st.paidInterest || 0));
+        const totalOutstanding = outPrincipal + outInterest;
+        const pctRepaid      = principal > 0 ? Math.max(0, Math.min(100, ((principal - outPrincipal) / principal) * 100)) : 0;
+        let payEndDate = '—';
+        if (l.payDayMode === 'Every N Days') {
+          const pmts = buildIntervalPayments(l);
+          if (pmts.length > 0) payEndDate = pmts[pmts.length - 1].dueDate;
+        } else if (l.disbursementDate && l.termMonths) {
+          const base = new Date(l.disbursementDate);
+          const lastMonthDate = new Date(base.getFullYear(), base.getMonth() + parseInt(l.termMonths) - 1, 1);
+          const lastKey = lastMonthDate.getFullYear() + '-' + String(lastMonthDate.getMonth() + 1).padStart(2, '0');
+          let lastDay;
+          if (l.paymentFrequency === 'Semi-Monthly') {
+            if (l.payDayMode === 'Variable per Month') {
+              const perMonth = l.payDaysPerMonth?.[lastKey] || {};
+              const vd2 = parseInt(perMonth.d2), vd1 = parseInt(perMonth.d1);
+              if (vd2 >= 1 && vd2 <= 31) lastDay = vd2;
+              else if (vd1 >= 1 && vd1 <= 31) lastDay = vd1;
+              else { const f2 = parseInt(l.payDay2), f1 = parseInt(l.payDay1); lastDay = (f2 >= 1 && f2 <= 31) ? f2 : (f1 >= 1 && f1 <= 31) ? f1 : base.getDate(); }
+            } else {
+              const fd2 = parseInt(l.payDay2), fd1 = parseInt(l.payDay1);
+              lastDay = (fd2 >= 1 && fd2 <= 31) ? fd2 : (fd1 >= 1 && fd1 <= 31) ? fd1 : base.getDate();
+            }
+          } else {
+            lastDay = base.getDate();
+          }
+          const daysInLastMonth = new Date(lastMonthDate.getFullYear(), lastMonthDate.getMonth() + 1, 0).getDate();
+          const clampedDay = Math.min(lastDay, daysInLastMonth);
+          const d = new Date(lastMonthDate.getFullYear(), lastMonthDate.getMonth(), clampedDay);
+          if (!isNaN(d.getTime())) payEndDate = d.toISOString().slice(0, 10);
+        }
+        return { l, principal, outPrincipal, outInterest, totalOutstanding, pctRepaid, payEndDate, nextDue: st.nextDueDate || '—' };
+      });
+  }
+
+  async function exportOutstandingXLSX() {
+    const ExcelJS = (await import('exceljs')).default;
+    const rows = buildOutstandingRows();
+    const asOf = new Date().toLocaleDateString('en-PH', { dateStyle: 'long' });
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Outstanding Loans');
+
+    // Column widths
+    ws.columns = [
+      { width: 30 }, { width: 18 }, { width: 20 }, { width: 22 },
+      { width: 22 }, { width: 22 }, { width: 16 }, { width: 18 }, { width: 12 },
+    ];
+
+    // Row 1: Title
+    const titleRow = ws.addRow([`Outstanding Loans Report — as of ${asOf}`]);
+    ws.mergeCells('A1:I1');
+    titleRow.getCell(1).font = { bold: true, size: 14 };
+    titleRow.height = 22;
+
+    // Row 2: blank
+    ws.addRow([]);
+
+    // Row 3: Header
+    const headerRow = ws.addRow([
+      'Lender / Name', 'Loan Type', 'Principal (₱)', 'Out. Principal (₱)',
+      'Out. Interest (₱)', 'Total Outstanding (₱)', 'Next Due Date', 'Payment End Date', '% Repaid',
+    ]);
+    headerRow.height = 20;
+    headerRow.eachCell(cell => {
+      cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+      cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF97316' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'left' };
+      cell.border    = { bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } } };
+    });
+    // Right-align numeric header cells
+    [3,4,5,6,9].forEach(c => { headerRow.getCell(c).alignment = { vertical: 'middle', horizontal: 'right' }; });
+
+    const toDate = s => {
+      if (!s || s === '—') return s || '';
+      const d = new Date(s + 'T00:00:00');
+      return isNaN(d.getTime()) ? s : d;
+    };
+    const currFmt = '#,##0.00';
+    const dateFmt = 'mm/dd/yyyy';
+
+    // Data rows
+    rows.forEach(r => {
+      const dataRow = ws.addRow([
+        r.l.name || `Loan ${r.l.id}`,
+        r.l.loanType || 'Term Loan',
+        r.principal, r.outPrincipal, r.outInterest, r.totalOutstanding,
+        toDate(r.nextDue), toDate(r.payEndDate),
+        parseFloat(r.pctRepaid.toFixed(2)),
+      ]);
+      dataRow.height = 18;
+      // Currency format
+      [3,4,5,6].forEach(c => {
+        const cell = dataRow.getCell(c);
+        cell.numFmt    = currFmt;
+        cell.alignment = { horizontal: 'right' };
+      });
+      // Date format
+      [7,8].forEach(c => {
+        const cell = dataRow.getCell(c);
+        if (cell.value instanceof Date) cell.numFmt = dateFmt;
+      });
+      // % Repaid
+      dataRow.getCell(9).numFmt    = '0.00';
+      dataRow.getCell(9).alignment = { horizontal: 'right' };
+    });
+
+    // Blank row before totals
+    ws.addRow([]);
+
+    // Totals row
+    const totalsRow = ws.addRow([
+      `TOTALS (${rows.length} active)`, '',
+      rows.reduce((s,r)=>s+r.principal,0),
+      rows.reduce((s,r)=>s+r.outPrincipal,0),
+      rows.reduce((s,r)=>s+r.outInterest,0),
+      rows.reduce((s,r)=>s+r.totalOutstanding,0),
+      '', '', '',
+    ]);
+    totalsRow.height = 20;
+    totalsRow.eachCell({ includeEmpty: true }, cell => {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+    });
+    [3,4,5,6].forEach(c => {
+      const cell = totalsRow.getCell(c);
+      cell.numFmt    = currFmt;
+      cell.alignment = { horizontal: 'right' };
+    });
+
+    const buf = await wb.xlsx.writeBuffer();
+    const url = URL.createObjectURL(new Blob([buf], { type: 'application/octet-stream' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = `Outstanding_Loans_${new Date().toISOString().slice(0,10)}.xlsx`;
+    a.click(); URL.revokeObjectURL(url);
+    setReportDropdown(false);
+  }
+
+  async function exportOutstandingPDF() {
+    setReportDropdown(false);
+    if (!reportTableRef.current) return;
+    const { default: jsPDF }       = await import('jspdf');
+    const { default: html2canvas } = await import('html2canvas');
+    const canvas  = await html2canvas(reportTableRef.current, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
+    const imgData = canvas.toDataURL('image/png');
+    const pdf     = new jsPDF('l', 'mm', 'a4');
+    const pw      = pdf.internal.pageSize.getWidth();
+    const asOf    = new Date().toLocaleDateString('en-PH', { dateStyle: 'long' });
+    pdf.setFont('helvetica', 'bold');   pdf.setFontSize(14);
+    pdf.text('Outstanding Loans Report', 14, 14);
+    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(9); pdf.setTextColor(100);
+    pdf.text(`As of ${asOf}`, 14, 21);  pdf.setTextColor(0);
+    const imgW = pw - 28;
+    pdf.addImage(imgData, 'PNG', 14, 26, imgW, (canvas.height * imgW) / canvas.width);
+    pdf.save(`Outstanding_Loans_${new Date().toISOString().slice(0,10)}.pdf`);
+  }
+
   function SummaryTab() {
-    const rows = loans.map(l => {
-      const totInt = loanTotalInterest(l) - (parseFloat(l.processingFee)||0);
-      const fee    = parseFloat(l.processingFee)||0;
+    const orRows = buildOutstandingRows();
+    const orGrand = {
+      principal:        orRows.reduce((s,r)=>s+r.principal, 0),
+      outPrincipal:     orRows.reduce((s,r)=>s+r.outPrincipal, 0),
+      outInterest:      orRows.reduce((s,r)=>s+r.outInterest, 0),
+      totalOutstanding: orRows.reduce((s,r)=>s+r.totalOutstanding, 0),
+    };
+    const fcRows = loans.map(l => {
+      const totInt  = loanTotalInterest(l) - (parseFloat(l.processingFee)||0);
+      const fee     = parseFloat(l.processingFee)||0;
       const finCost = totInt + fee;
-      const pct   = (parseFloat(l.principal)||0) > 0 ? finCost / (parseFloat(l.principal)||0) * 100 : 0;
+      const pct     = (parseFloat(l.principal)||0) > 0 ? finCost / (parseFloat(l.principal)||0) * 100 : 0;
       return { l, totInt, fee, finCost, pct };
     });
-    const grand = {
-      principal: rows.reduce((s,r)=>s+(parseFloat(r.l.principal)||0),0),
-      totInt:    rows.reduce((s,r)=>s+r.totInt,0),
-      fee:       rows.reduce((s,r)=>s+r.fee,0),
-      finCost:   rows.reduce((s,r)=>s+r.finCost,0),
+    const fcGrand = {
+      principal: fcRows.reduce((s,r)=>s+(parseFloat(r.l.principal)||0),0),
+      totInt:    fcRows.reduce((s,r)=>s+r.totInt,0),
+      fee:       fcRows.reduce((s,r)=>s+r.fee,0),
+      finCost:   fcRows.reduce((s,r)=>s+r.finCost,0),
     };
-    const maxFC = Math.max(...rows.map(r => r.finCost), 1);
-    if (rows.length === 0) return <div className="empty">No loans to summarize.</div>;
+    const maxFC = Math.max(...fcRows.map(r => r.finCost), 1);
+    if (loans.length === 0) return <div className="empty">No loans to summarize.</div>;
+
+    const SECT = {
+      fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase',
+      marginBottom:10, paddingBottom:6, borderBottom:'1px solid #f1f5f9',
+      display:'flex', alignItems:'center', justifyContent:'space-between',
+    };
+
     return (
-      <div style={{ overflowX:'auto' }}>
-        <table>
-          <thead>
-            <tr>
-              <th>Loan / Lender</th>
-              <th>Type</th>
-              <th style={{textAlign:'right'}}>Principal</th>
-              <th style={{textAlign:'right'}}>Total Interest</th>
-              <th style={{textAlign:'right'}}>Processing Fee</th>
-              <th style={{textAlign:'right'}}>Finance Cost</th>
-              <th style={{textAlign:'right'}}>% of Principal</th>
-              <th style={{width:120}}>Cost Bar</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(({ l, totInt, fee, finCost, pct }) => (
-              <tr key={l.id}>
-                <td style={{ fontWeight:700 }}>{l.name || `Loan ${l.id}`}</td>
-                <td style={{ color:'#64748b' }}>{l.loanType}</td>
-                <td style={{ textAlign:'right' }}>{fmtCur(parseFloat(l.principal)||0)}</td>
-                <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(totInt)}</td>
-                <td style={{ textAlign:'right' }}>{fmtCur(fee)}</td>
-                <td style={{ textAlign:'right', fontWeight:800 }}>{fmtCur(finCost)}</td>
-                <td style={{ textAlign:'right' }}>{pct.toFixed(1)}%</td>
-                <td>
-                  <div style={{ background:'#f1f5f9', borderRadius:6, height:8, overflow:'hidden' }}>
-                    <div style={{ width:`${Math.min(finCost/maxFC*100,100)}%`, height:'100%', background:'#f97316', borderRadius:6 }}></div>
+      <div style={{ display:'flex', flexDirection:'column', gap:28 }}>
+
+        {/* ── Outstanding Loans ─────────────────────────────── */}
+        <div>
+          <div style={SECT}>
+            <span>Outstanding Loans</span>
+            <div style={{ position:'relative' }}>
+              <div style={{ display:'flex', borderRadius:8, overflow:'hidden', border:'1px solid #e2e8f0', fontSize:12, fontWeight:700 }}>
+                <button
+                  style={{ padding:'6px 14px', background:'#fff', color:'#374151', border:'none', cursor:'pointer', borderRight:'1px solid #e2e8f0' }}
+                  onClick={() => exportOutstandingXLSX()}
+                >↓ Export Report</button>
+                <button
+                  style={{ padding:'6px 10px', background:'#fff', color:'#374151', border:'none', cursor:'pointer' }}
+                  onClick={() => setReportDropdown(v => !v)}
+                >▾</button>
+              </div>
+              {reportDropdown && (
+                <>
+                  <div style={{ position:'fixed', inset:0, zIndex:40 }} onClick={() => setReportDropdown(false)} />
+                  <div style={{ position:'absolute', right:0, top:'calc(100% + 4px)', zIndex:50, background:'#fff',
+                    border:'1px solid #e2e8f0', borderRadius:10, boxShadow:'0 8px 24px rgba(0,0,0,.10)', minWidth:175, overflow:'hidden' }}>
+                    <button
+                      style={{ display:'flex', alignItems:'center', gap:10, width:'100%', padding:'10px 14px',
+                        background:'none', border:'none', cursor:'pointer', fontSize:13, color:'#374151', textAlign:'left' }}
+                      onMouseEnter={e=>e.currentTarget.style.background='#f8fafc'}
+                      onMouseLeave={e=>e.currentTarget.style.background='none'}
+                      onClick={() => exportOutstandingXLSX()}
+                    >Export Excel (.xlsx)</button>
+                    <button
+                      style={{ display:'flex', alignItems:'center', gap:10, width:'100%', padding:'10px 14px',
+                        background:'none', border:'none', borderTop:'1px solid #f1f5f9', cursor:'pointer', fontSize:13, color:'#374151', textAlign:'left' }}
+                      onMouseEnter={e=>e.currentTarget.style.background='#f8fafc'}
+                      onMouseLeave={e=>e.currentTarget.style.background='none'}
+                      onClick={() => exportOutstandingPDF()}
+                    >Export PDF</button>
                   </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-          <tfoot>
-            <tr>
-              <td colSpan={2}>GRAND TOTAL</td>
-              <td style={{ textAlign:'right' }}>{fmtCur(grand.principal)}</td>
-              <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(grand.totInt)}</td>
-              <td style={{ textAlign:'right' }}>{fmtCur(grand.fee)}</td>
-              <td style={{ textAlign:'right' }}>{fmtCur(grand.finCost)}</td>
-              <td colSpan={2}></td>
-            </tr>
-          </tfoot>
-        </table>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div ref={reportTableRef} style={{ overflowX:'auto', background:'#fff' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Lender / Name</th>
+                  <th>Type</th>
+                  <th style={{textAlign:'right'}}>Principal</th>
+                  <th style={{textAlign:'right'}}>Out. Principal</th>
+                  <th style={{textAlign:'right'}}>Out. Interest</th>
+                  <th style={{textAlign:'right'}}>Total Outstanding</th>
+                  <th>Next Due</th>
+                  <th>Payment End Date</th>
+                  <th style={{textAlign:'right'}}>% Repaid</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orRows.length === 0
+                  ? <tr><td colSpan={9} style={{ textAlign:'center', color:'#94a3b8', padding:24 }}>No active loans.</td></tr>
+                  : orRows.map(({ l, principal, outPrincipal, outInterest, totalOutstanding, pctRepaid, payEndDate, nextDue }) => (
+                    <tr key={l.id}>
+                      <td style={{ fontWeight:700 }}>{l.name || `Loan ${l.id}`}</td>
+                      <td style={{ color:'#64748b' }}>{l.loanType || '—'}</td>
+                      <td style={{ textAlign:'right' }}>{fmtCur(principal)}</td>
+                      <td style={{ textAlign:'right', color:'#c2410c', fontWeight:700 }}>{fmtCur(outPrincipal)}</td>
+                      <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(outInterest)}</td>
+                      <td style={{ textAlign:'right', fontWeight:800 }}>{fmtCur(totalOutstanding)}</td>
+                      <td style={{ color: nextDue !== '—' ? '#c2410c' : '#94a3b8' }}>{nextDue}</td>
+                      <td>{payEndDate}</td>
+                      <td style={{ textAlign:'right' }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:6, justifyContent:'flex-end' }}>
+                          <div style={{ width:48, background:'#f1f5f9', borderRadius:999, height:5, overflow:'hidden' }}>
+                            <div style={{ width:`${pctRepaid}%`, height:'100%', borderRadius:999,
+                              background: pctRepaid >= 100 ? '#22c55e' : pctRepaid >= 60 ? '#f97316' : '#3b82f6' }} />
+                          </div>
+                          <span>{pctRepaid.toFixed(1)}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={2} style={{ fontWeight:800 }}>TOTALS ({orRows.length} active)</td>
+                  <td style={{ textAlign:'right', fontWeight:800 }}>{fmtCur(orGrand.principal)}</td>
+                  <td style={{ textAlign:'right', fontWeight:800, color:'#c2410c' }}>{fmtCur(orGrand.outPrincipal)}</td>
+                  <td style={{ textAlign:'right', fontWeight:800, color:'#dc2626' }}>{fmtCur(orGrand.outInterest)}</td>
+                  <td style={{ textAlign:'right', fontWeight:900, fontSize:14 }}>{fmtCur(orGrand.totalOutstanding)}</td>
+                  <td colSpan={3}></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+
+        {/* ── Finance Cost Summary ───────────────────────────── */}
+        <div>
+          <div style={SECT}><span>Finance Cost Summary</span></div>
+          <div style={{ overflowX:'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Loan / Lender</th><th>Type</th>
+                  <th style={{textAlign:'right'}}>Principal</th>
+                  <th style={{textAlign:'right'}}>Total Interest</th>
+                  <th style={{textAlign:'right'}}>Processing Fee</th>
+                  <th style={{textAlign:'right'}}>Finance Cost</th>
+                  <th style={{textAlign:'right'}}>% of Principal</th>
+                  <th style={{width:120}}>Cost Bar</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fcRows.map(({ l, totInt, fee, finCost, pct }) => (
+                  <tr key={l.id}>
+                    <td style={{ fontWeight:700 }}>{l.name || `Loan ${l.id}`}</td>
+                    <td style={{ color:'#64748b' }}>{l.loanType}</td>
+                    <td style={{ textAlign:'right' }}>{fmtCur(parseFloat(l.principal)||0)}</td>
+                    <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(totInt)}</td>
+                    <td style={{ textAlign:'right' }}>{fmtCur(fee)}</td>
+                    <td style={{ textAlign:'right', fontWeight:800 }}>{fmtCur(finCost)}</td>
+                    <td style={{ textAlign:'right' }}>{pct.toFixed(1)}%</td>
+                    <td>
+                      <div style={{ background:'#f1f5f9', borderRadius:6, height:8, overflow:'hidden' }}>
+                        <div style={{ width:`${Math.min(finCost/maxFC*100,100)}%`, height:'100%', background:'#f97316', borderRadius:6 }}></div>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={2}>GRAND TOTAL</td>
+                  <td style={{ textAlign:'right' }}>{fmtCur(fcGrand.principal)}</td>
+                  <td style={{ textAlign:'right', color:'#dc2626' }}>{fmtCur(fcGrand.totInt)}</td>
+                  <td style={{ textAlign:'right' }}>{fmtCur(fcGrand.fee)}</td>
+                  <td style={{ textAlign:'right' }}>{fmtCur(fcGrand.finCost)}</td>
+                  <td colSpan={2}></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+
       </div>
     );
   }
@@ -1423,12 +2031,23 @@ export default function FinancialPage() {
     loans.filter(l => l.status==='Active').forEach(l => {
       const sched = buildSchedule(l);
       const label = MONTH_NAMES[calMonth] + '-' + calYear;
+      const add = (day, principal, interest) => {
+        if (!events[day]) events[day] = [];
+        events[day].push({ loan: l, principal, interest, status: 'scheduled' });
+      };
+      if (l.payDayMode === 'Every N Days') {
+        // Each payment lands on an exact date — no monthly row lookup needed
+        const allPayments = buildIntervalPayments(l);
+        allPayments
+          .filter(p => p.date.getFullYear() === calYear && p.date.getMonth() === calMonth)
+          .forEach(p => add(p.date.getDate(), p.principal, p.interest));
+      } else {
       const row   = sched.find(r => r.label === label);
       if (!row) return;
       // Phase 4b: derive payment status for this loan/month from loanStates
       const stRow = loanStates[l.id]?.schedule?.find(r => r.label === label);
       const status = stRow?.status || 'scheduled';
-      const add = (day, principal, interest) => {
+      const addS = (day, principal, interest) => {
         if (!events[day]) events[day] = [];
         events[day].push({ loan: l, principal, interest, status });
       };
@@ -1454,11 +2073,12 @@ export default function FinancialPage() {
           if (d2 >= 1 && d2 <= 31) days.push(d2);
           if (days.length === 0) { days.push(15); days.push(30); } // default fallback
         }
-        days.forEach(d => add(d, halfP, halfI));
+        days.forEach(d => addS(d, halfP, halfI));
       } else {
         const day = l.disbursementDate ? new Date(l.disbursementDate).getDate() : 1;
-        add(day, row.principal, row.interest);
+        addS(day, row.principal, row.interest);
       }
+      } // end else (non Every-N-Days)
     });
 
     const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
@@ -1703,6 +2323,723 @@ export default function FinancialPage() {
         {activeTab === 'payment'    && PaymentTab()}
       </div>
 
+      {/* Loan Detail Modal */}
+      {loanDetailModal && (() => {
+        const l   = loans.find(x => x.id === loanDetailModal);
+        if (!l) return null;
+        const st          = loanStates[l.id] || {};
+        const isActive    = (l.status || 'Active') === 'Active';
+        const typeColor   = LOAN_TYPE_COLORS[l.loanType] || LOAN_TYPE_COLORS['Other'];
+        const principal   = parseFloat(l.principal) || 0;
+        const outstanding = st.outstandingPrincipal != null ? st.outstandingPrincipal : principal;
+        const progress    = principal > 0 ? Math.max(0, Math.min(100, ((principal - outstanding) / principal) * 100)) : 0;
+        const progColor   = progress >= 100 ? '#22c55e' : progress >= 60 ? '#f97316' : '#3b82f6';
+        const METHOD_SHORT_D = {
+          'Reducing Balance':             'Reducing Balance',
+          'Straight-Line':                'Straight-Line',
+          'Straight-Line (Monthly Rate)': 'Straight-Line (Monthly Rate)',
+          'Fixed':                        'Fixed',
+          'Balloon':                      'Balloon',
+        };
+        const payLabel = l.paymentFrequency === 'Semi-Monthly'
+          ? (l.payDayMode === 'Every N Days' ? `Every ${l.intervalDays || 15} Days`
+            : l.payDayMode === 'Variable per Month' ? 'Semi-Monthly (Variable)'
+            : l.payDay1 && l.payDay2 ? `Semi-Monthly · Day ${l.payDay1} & ${l.payDay2}` : 'Semi-Monthly')
+          : 'Monthly';
+        const totalPaid    = (st.paidPrincipal || 0) + (st.paidInterest || 0);
+        const paymentCount = (payments || []).filter(p => p.loanId === l.id).length;
+
+        return (
+          <div className="backdrop" onClick={e => { if (e.target === e.currentTarget) { setLoanDetailModal(null); setLoanDetailTab('details'); } }}>
+            <div className="modal" style={{ width:'min(1200px,98vw)', height:'88vh' }}>
+
+              {/* ── Header ──────────────────────────────────────── */}
+              <div className="modal-h" style={{ background:'#fff', borderBottom:'1px solid #f1f5f9' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:12, flex:1, minWidth:0 }}>
+                  <div style={{
+                    width:40, height:40, borderRadius:12, flexShrink:0,
+                    background: typeColor.bg, border:`1px solid ${typeColor.color}22`,
+                    display:'flex', alignItems:'center', justifyContent:'center', fontSize:20
+                  }}>🏦</div>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontWeight:900, fontSize:16, color:'#0b1220', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                      {l.name || 'Unnamed Loan'}
+                    </div>
+                    <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:3 }}>
+                      <span className="lr-type-badge" style={{ background:typeColor.bg, color:typeColor.color }}>
+                        {l.loanType || 'Term Loan'}
+                      </span>
+                      <span className="pill" style={isActive
+                        ? { background:'#f0fdf4', borderColor:'#bbf7d0', color:'#15803d' }
+                        : { background:'#f8fafc', borderColor:'#e2e8f0', color:'#94a3b8' }}>
+                        {l.status || 'Active'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <button className="btn btn-ghost btn-sm" style={{ flexShrink:0 }} onClick={() => { setLoanDetailModal(null); setLoanDetailTab('details'); }}>✕</button>
+              </div>
+
+              {/* ── Tabs ────────────────────────────────────────── */}
+              <div style={{ display:'flex', borderBottom:'2px solid #f1f5f9', background:'#fff', padding:'0 22px' }}>
+                {[['details','Details'],['schedule','Payment Schedule'],['history','Payment History']].map(([key, label]) => (
+                  <button key={key}
+                    onClick={() => setLoanDetailTab(key)}
+                    style={{
+                      border:'none', background:'none', cursor:'pointer', fontFamily:'inherit',
+                      padding:'10px 18px', fontSize:12, fontWeight:700, letterSpacing:'.04em',
+                      color: loanDetailTab === key ? '#f97316' : '#94a3b8',
+                      borderBottom: loanDetailTab === key ? '2px solid #f97316' : '2px solid transparent',
+                      marginBottom:'-2px', transition:'color .15s',
+                    }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* ── Body ────────────────────────────────────────── */}
+              <div className="modal-b" style={{ padding: loanDetailTab === 'schedule' ? '0' : '18px 22px' }}>
+
+              {loanDetailTab === 'details' ? (<>
+
+                {/* Outstanding Hero */}
+                <div className="lr-hero-outstanding" style={{
+                  background: outstanding > 0 ? '#fff7ed' : '#f0fdf4',
+                  border: `1px solid ${outstanding > 0 ? '#fed7aa' : '#bbf7d0'}`,
+                  margin:'18px 22px 0', borderRadius:14,
+                }}>
+                  <div>
+                    <div style={{ fontSize:9, fontWeight:800, color: outstanding > 0 ? '#c2410c' : '#15803d', letterSpacing:'.07em', textTransform:'uppercase', marginBottom:4, opacity:.75 }}>
+                      Outstanding Balance
+                    </div>
+                    <div style={{ fontSize:26, fontWeight:900, color: outstanding > 0 ? '#c2410c' : '#15803d', lineHeight:1 }}>
+                      {fmtCur(outstanding)}
+                    </div>
+                    <div style={{ fontSize:11, color: outstanding > 0 ? '#c2410c' : '#15803d', opacity:.65, marginTop:4 }}>
+                      of {fmtCur(principal)} original principal
+                    </div>
+                  </div>
+                  <div style={{ flex:1, maxWidth:220 }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, fontWeight:700, color:'#64748b', marginBottom:5 }}>
+                      <span>Repaid</span><span>{progress.toFixed(1)}%</span>
+                    </div>
+                    <div className="lr-prog-track" style={{ height:8 }}>
+                      <div className="lr-prog-fill" style={{ width:`${progress}%`, background:progColor }} />
+                    </div>
+                    <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'#94a3b8', marginTop:5 }}>
+                      <span>{fmtCur(st.paidPrincipal || 0)} paid</span>
+                      <span>{fmtCur(outstanding)} left</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ padding:'0 22px' }}>
+
+                {/* Loan Terms */}
+                <div className="lr-detail-sect">Loan Terms</div>
+                <div className="lr-detail-grid" style={{ marginBottom:4 }}>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Principal</div>
+                    <div className="lr-detail-val">{fmtCur(principal)}</div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Processing Fee</div>
+                    <div className={l.processingFee > 0 ? 'lr-detail-val' : 'lr-detail-val-dim'}>
+                      {l.processingFee > 0 ? fmtCur(l.processingFee) : '—'}
+                    </div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Term</div>
+                    <div className="lr-detail-val">{l.termMonths || '—'} months</div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Annual Rate</div>
+                    <div className="lr-detail-val">{l.annualRate || '—'}%</div>
+                  </div>
+                  <div className="lr-detail-item lr-detail-2col">
+                    <div className="lr-detail-lbl">Interest Method</div>
+                    <div className="lr-detail-val">{METHOD_SHORT_D[l.interestMethod] || l.interestMethod || '—'}</div>
+                  </div>
+                </div>
+
+                {/* Schedule */}
+                <div className="lr-detail-sect">Payment Schedule</div>
+                <div className="lr-detail-grid" style={{ marginBottom:4 }}>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">First Payment Date</div>
+                    <div className={l.disbursementDate ? 'lr-detail-val' : 'lr-detail-val-dim'}>{l.disbursementDate || '—'}</div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Proceeds Date</div>
+                    <div className={l.proceedsDate ? 'lr-detail-val' : 'lr-detail-val-dim'}>{l.proceedsDate || '—'}</div>
+                  </div>
+                  <div className="lr-detail-item lr-detail-2col">
+                    <div className="lr-detail-lbl">Payment Schedule</div>
+                    <div className="lr-detail-val">{payLabel}</div>
+                  </div>
+                  {st.nextDueDate && (
+                    <div className="lr-detail-item">
+                      <div className="lr-detail-lbl">Next Due Date</div>
+                      <div className="lr-detail-val" style={{ color:'#c2410c' }}>{st.nextDueDate}</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Activity */}
+                <div className="lr-detail-sect">Repayment Activity</div>
+                <div className="lr-detail-grid">
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Payments Made</div>
+                    <div className="lr-detail-val">{paymentCount}</div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Last Payment</div>
+                    <div className={st.lastPaymentDate ? 'lr-detail-val' : 'lr-detail-val-dim'}>{st.lastPaymentDate || '—'}</div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Total Paid</div>
+                    <div className="lr-detail-val" style={{ color:'#15803d' }}>{fmtCur(totalPaid)}</div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Principal Paid</div>
+                    <div className="lr-detail-val">{fmtCur(st.paidPrincipal || 0)}</div>
+                  </div>
+                  <div className="lr-detail-item">
+                    <div className="lr-detail-lbl">Interest Paid</div>
+                    <div className="lr-detail-val">{fmtCur(st.paidInterest || 0)}</div>
+                  </div>
+                  {(st.overdueAmount || 0) > 0 && (
+                    <div className="lr-detail-item">
+                      <div className="lr-detail-lbl">Overdue Amount</div>
+                      <div className="lr-detail-val" style={{ color:'#dc2626' }}>{fmtCur(st.overdueAmount)}</div>
+                    </div>
+                  )}
+                </div>
+
+                </div>{/* end inner padding */}
+
+              </>) : loanDetailTab === 'schedule' ? (() => {
+                /* ── Payment Schedule Tab ───────────────────────── */
+                const schedule = buildScheduleWithDueDates(l);
+                const today = new Date().toISOString().slice(0,10);
+                if (schedule.length === 0) return (
+                  <div style={{ textAlign:'center', padding:'48px 22px', color:'#94a3b8', fontSize:13 }}>
+                    No schedule available. Set First Payment Date and Term first.
+                  </div>
+                );
+                const totalPrincipal = schedule.reduce((s,r) => s + r.scheduledPrincipal, 0);
+                const totalInterest  = schedule.reduce((s,r) => s + r.scheduledInterest + (r.processingFee||0), 0);
+                const totalPayment   = schedule.reduce((s,r) => s + r.scheduledTotal + (r.processingFee||0), 0);
+                return (
+                  <div style={{ overflowX:'auto' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse', fontSize:11 }}>
+                      <thead>
+                        <tr style={{ background:'#f97316', color:'#fff' }}>
+                          <th style={{ padding:'9px 10px', textAlign:'center', fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>#</th>
+                          <th style={{ padding:'9px 10px', textAlign:'center', fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>Due Date</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right',  fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>Opening Bal.</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right',  fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>Principal</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right',  fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>Interest</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right',  fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>Payment</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right',  fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>Closing Bal.</th>
+                          <th style={{ padding:'9px 10px', textAlign:'center', fontWeight:800, letterSpacing:'.04em', whiteSpace:'nowrap' }}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {schedule.map((row, idx) => {
+                          const isPast    = row.dueDate < today;
+                          const isCurrent = row.dueDate === st.nextDueDate;
+                          const paid      = row.paidPrincipal + row.paidInterest >= row.scheduledTotal * 0.99;
+                          const rowBg     = paid ? '#f0fdf4' : isCurrent ? '#fff7ed' : idx % 2 === 0 ? '#fff' : '#f8fafc';
+                          const rowColor  = paid ? '#15803d' : isCurrent ? '#c2410c' : isPast ? '#94a3b8' : '#0b1220';
+                          const statusLabel = paid ? 'Paid' : isCurrent ? 'Current' : isPast ? 'Overdue' : 'Scheduled';
+                          const statusColor = paid ? '#15803d' : isCurrent ? '#c2410c' : isPast ? '#ef4444' : '#64748b';
+                          const statusBg    = paid ? '#f0fdf4' : isCurrent ? '#fff7ed' : isPast ? '#fef2f2' : '#f1f5f9';
+                          return (<>
+                            <tr key={row.period} style={{ background:rowBg, color:rowColor, borderBottom: row.processingFee ? 'none' : '1px solid #f1f5f9' }}>
+                              <td style={{ padding:'7px 10px', textAlign:'center', fontWeight:700 }}>{row.period}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'center', fontFamily:'monospace', fontSize:11 }}>{row.dueDate}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right' }}>{fmtCur(row.openingBalance ?? 0)}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right' }}>{fmtCur(row.scheduledPrincipal)}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right', color:'#f97316' }}>{fmtCur(row.scheduledInterest)}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:700 }}>{fmtCur(row.scheduledTotal)}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right' }}>{fmtCur(row.closingBalance)}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'center' }}>
+                                <span style={{ background:statusBg, color:statusColor, borderRadius:6, padding:'2px 8px', fontWeight:700, fontSize:10 }}>
+                                  {statusLabel}
+                                </span>
+                              </td>
+                            </tr>
+                            {row.processingFee > 0 && (
+                              <tr key={`${row.period}-fee`} style={{ background:'#f0fdf4', color:'#15803d', borderBottom:'1px solid #f1f5f9' }}>
+                                <td style={{ padding:'4px 10px', textAlign:'center', color:'#86efac', fontSize:10 }}>↳</td>
+                                <td style={{ padding:'4px 10px', textAlign:'center', fontStyle:'italic', fontSize:10, color:'#15803d' }}>Processing Fee</td>
+                                <td />
+                                <td />
+                                <td style={{ padding:'4px 10px', textAlign:'right', color:'#15803d', fontWeight:600 }}>{fmtCur(row.processingFee)}</td>
+                                <td style={{ padding:'4px 10px', textAlign:'right', color:'#15803d', fontWeight:600 }}>{fmtCur(row.processingFee)}</td>
+                                <td />
+                                <td style={{ padding:'4px 10px', textAlign:'center' }}>
+                                  <span style={{ background:'#f0fdf4', color:'#15803d', borderRadius:6, padding:'2px 8px', fontWeight:700, fontSize:10 }}>Paid</span>
+                                </td>
+                              </tr>
+                            )}
+                          </>);
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr style={{ background:'#1e293b', color:'#fff', fontWeight:800 }}>
+                          <td colSpan={3} style={{ padding:'8px 10px', textAlign:'right', fontSize:11, letterSpacing:'.04em' }}>TOTALS</td>
+                          <td style={{ padding:'8px 10px', textAlign:'right' }}>{fmtCur(totalPrincipal)}</td>
+                          <td style={{ padding:'8px 10px', textAlign:'right', color:'#fb923c' }}>{fmtCur(totalInterest)}</td>
+                          <td style={{ padding:'8px 10px', textAlign:'right' }}>{fmtCur(totalPayment)}</td>
+                          <td colSpan={2} />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                );
+              })() : (() => {
+                /* ── Payment History Tab ──────────────────────────── */
+                const loanPayments = (payments || [])
+                  .filter(p => String(p.loanId) === String(l.id))
+                  .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+                if (loanPayments.length === 0) return (
+                  <div style={{ textAlign:'center', padding:'48px 22px', color:'#94a3b8', fontSize:13 }}>
+                    No payments recorded yet.
+                    {!st.isPaidOff && l.status !== 'Disposed' && (
+                      <div style={{ marginTop:12 }}>
+                        <button className="btn btn-primary btn-sm"
+                          onClick={() => { setLoanDetailModal(null); setLoanDetailTab('details'); setPayModal(l.id); }}>
+                          + Record First Payment
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+                const totals = loanPayments.reduce((acc, p) => ({
+                  interest:  acc.interest  + (p.interest  || 0),
+                  principal: acc.principal + (p.principal || 0),
+                  penalty:   acc.penalty   + (p.penalty   || 0),
+                  total:     acc.total     + (p.total     || 0),
+                }), { interest:0, principal:0, penalty:0, total:0 });
+                return (
+                  <div style={{ overflowX:'auto' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse', fontSize:11 }}>
+                      <thead>
+                        <tr style={{ background:'#f97316', color:'#fff' }}>
+                          <th style={{ padding:'9px 10px', fontWeight:800, whiteSpace:'nowrap' }}>Date</th>
+                          <th style={{ padding:'9px 10px', fontWeight:800, whiteSpace:'nowrap' }}>Method</th>
+                          <th style={{ padding:'9px 10px', fontWeight:800, whiteSpace:'nowrap' }}>Reference</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right', fontWeight:800, whiteSpace:'nowrap' }}>Interest</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right', fontWeight:800, whiteSpace:'nowrap' }}>Principal</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right', fontWeight:800, whiteSpace:'nowrap' }}>Penalty</th>
+                          <th style={{ padding:'9px 10px', textAlign:'right', fontWeight:800, whiteSpace:'nowrap' }}>Total</th>
+                          <th style={{ padding:'9px 10px', fontWeight:800 }}>Notes</th>
+                          <th style={{ padding:'9px 10px', width:36 }}></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {loanPayments.map((p, idx) => (
+                          <tr key={p.id} style={{ background: idx % 2 === 0 ? '#fff' : '#f8fafc', borderBottom:'1px solid #f1f5f9' }}>
+                            <td style={{ padding:'7px 10px', fontFamily:'monospace', fontWeight:700 }}>{p.date}</td>
+                            <td style={{ padding:'7px 10px', color:'#64748b' }}>{p.method || '—'}</td>
+                            <td style={{ padding:'7px 10px', color:'#64748b', fontFamily:'monospace' }}>{p.referenceNo || '—'}</td>
+                            <td style={{ padding:'7px 10px', textAlign:'right', color:'#dc2626' }}>{p.interest ? fmtCur(p.interest) : '—'}</td>
+                            <td style={{ padding:'7px 10px', textAlign:'right', color:'#2563eb' }}>{p.principal ? fmtCur(p.principal) : '—'}</td>
+                            <td style={{ padding:'7px 10px', textAlign:'right', color:'#7c2d12' }}>{p.penalty ? fmtCur(p.penalty) : '—'}</td>
+                            <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:700 }}>{fmtCur(p.total || 0)}</td>
+                            <td style={{ padding:'7px 10px', color:'#64748b', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{p.notes || ''}</td>
+                            <td style={{ padding:'7px 10px', textAlign:'center' }}>
+                              <button onClick={() => deletePayment(p.id)} style={{ background:'none', border:'none', color:'#dc2626', cursor:'pointer', fontWeight:900, fontSize:13 }}>✕</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr style={{ background:'#1e293b', color:'#fff', fontWeight:800 }}>
+                          <td colSpan={3} style={{ padding:'8px 10px', textAlign:'right', fontSize:11, letterSpacing:'.04em' }}>TOTALS</td>
+                          <td style={{ padding:'8px 10px', textAlign:'right', color:'#fca5a5' }}>{fmtCur(totals.interest)}</td>
+                          <td style={{ padding:'8px 10px', textAlign:'right', color:'#93c5fd' }}>{fmtCur(totals.principal)}</td>
+                          <td style={{ padding:'8px 10px', textAlign:'right' }}>{fmtCur(totals.penalty)}</td>
+                          <td style={{ padding:'8px 10px', textAlign:'right' }}>{fmtCur(totals.total)}</td>
+                          <td colSpan={2} />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                );
+              })()}
+
+              </div>{/* end modal-b */}
+
+              {/* ── Footer ──────────────────────────────────────── */}
+              <div className="modal-f" style={{ justifyContent:'space-between', alignItems:'center' }}>
+                {!isAdmin && (
+                  <span className="lr-lock-notice">
+                    🔒 <span>Editing requires <strong>Admin</strong> access</span>
+                  </span>
+                )}
+                <div style={{ display:'flex', gap:8, marginLeft:'auto' }}>
+                  <button className="btn btn-ghost" onClick={() => { setLoanDetailModal(null); setLoanDetailTab('details'); }}>Close</button>
+                  {!st.isPaidOff && l.status !== 'Disposed' && (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ background:'#fff7ed', color:'#c2410c', border:'1.5px solid #fed7aa', fontWeight:700 }}
+                      onClick={() => { setLoanDetailModal(null); setLoanDetailTab('details'); setPayModal(l.id); }}
+                    >+ Record Payment</button>
+                  )}
+                  {isAdmin && (
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => {
+                        setLoanDetailModal(null);
+                        setLoanDetailTab('details');
+                        setPdFillD1(''); setPdFillD2('');
+                        setLoanFormModal({ mode:'edit', data:{ ...l } });
+                      }}
+                    >✎ Edit Loan</button>
+                  )}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Loan Form Modal (Add / Edit) */}
+      {loanFormModal && (() => {
+        const isNew = loanFormModal.mode === 'new';
+        const fd    = loanFormModal.data;
+        const set   = (field, val) =>
+          setLoanFormModal(prev => ({ ...prev, data: { ...prev.data, [field]: val } }));
+        const isSemiMonthly = fd.paymentFrequency === 'Semi-Monthly';
+        const canSave = !!(fd.name?.trim());
+        const typeColor = LOAN_TYPE_COLORS[fd.loanType] || LOAN_TYPE_COLORS['Other'];
+        return (
+          <div className="backdrop" onClick={e => { if (e.target === e.currentTarget) setLoanFormModal(null); }}>
+            <div className="modal" style={{ width:'min(1200px,98vw)', height:'88vh' }}>
+
+              {/* ── Header ──────────────────────────────────────── */}
+              <div className="modal-h">
+                <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                  <div style={{
+                    width:36, height:36, borderRadius:10,
+                    background:'#fff7ed', border:'1px solid #fed7aa',
+                    display:'flex', alignItems:'center', justifyContent:'center', fontSize:18
+                  }}>🏦</div>
+                  <div>
+                    <div style={{ fontWeight:900, fontSize:15 }}>
+                      {isNew ? 'New Loan' : 'Edit Loan'}
+                    </div>
+                    <div style={{ fontSize:11, color:'#94a3b8' }}>
+                      {isNew ? 'Register a new loan facility'
+                             : `Editing: ${fd.name || `Loan ${fd.id}`}`}
+                    </div>
+                  </div>
+                </div>
+                <button className="btn btn-ghost btn-sm" onClick={() => setLoanFormModal(null)}>✕</button>
+              </div>
+
+              {/* ── Body ────────────────────────────────────────── */}
+              <div className="modal-b">
+
+                {/* Section: Lender */}
+                <div style={{ fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase', marginBottom:10, paddingBottom:6, borderBottom:'1px solid #f1f5f9' }}>
+                  Lender Information
+                </div>
+                <div className="lr-form-grid">
+                  <div className="field lr-form-full">
+                    <label>Contact / Lender Name <span style={{color:'#ef4444'}}>*</span></label>
+                    <input
+                      list="fp-lender-modal-list"
+                      value={fd.name||''}
+                      onChange={e => {
+                        const newName = e.target.value;
+                        set('name', newName);
+                        // Auto-compute cycle: count all loans with same name (excluding self in edit)
+                        const sameName = loans.filter(l =>
+                          l.name?.trim().toLowerCase() === newName.trim().toLowerCase() &&
+                          (isNew ? true : l.id !== fd.id)
+                        );
+                        set('cycleCount', sameName.length + 1);
+                      }}
+                      placeholder="e.g. BDO Universal Bank"
+                      autoFocus
+                    />
+                    <datalist id="fp-lender-modal-list">
+                      {[...new Set(loans.map(l => l.name).filter(Boolean))].map(n => <option key={n} value={n} />)}
+                    </datalist>
+                  </div>
+                  <div className="field">
+                    <label>Loan Type</label>
+                    <select value={fd.loanType||'Term Loan'} onChange={e => set('loanType', e.target.value)}>
+                      {LOAN_TYPES.map(t => <option key={t}>{t}</option>)}
+                    </select>
+                    <span className="lr-type-badge" style={{ background:typeColor.bg, color:typeColor.color, marginTop:2 }}>
+                      {fd.loanType || 'Term Loan'}
+                    </span>
+                  </div>
+                  <div className="field">
+                    <label>Status</label>
+                    <select value={fd.status||'Active'} onChange={e => set('status', e.target.value)}>
+                      {['Active','Disposed'].map(s => <option key={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Cycle Count</label>
+                    <input
+                      type="number"
+                      value={fd.cycleCount || 1}
+                      readOnly
+                      style={{ background:'#f8fafc', color:'#7c3aed', fontWeight:800, cursor:'default' }}
+                    />
+                    <span style={{ fontSize:10, color:'#94a3b8', marginTop:3 }}>
+                      Auto-set · Cycle #{fd.cycleCount || 1} for this contact
+                      {(fd.cycleCount || 1) > 1 && ` (${fd.cycleCount - 1} prior loan${fd.cycleCount - 1 > 1 ? 's' : ''} found)`}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Section: Loan Terms */}
+                <div style={{ fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase', marginBottom:10, paddingBottom:6, borderBottom:'1px solid #f1f5f9' }}>
+                  Loan Terms
+                </div>
+                <div className="lr-form-grid">
+                  <div className="field">
+                    <label>Principal ₱</label>
+                    <input type="number" value={fd.principal||''} onChange={e => set('principal', parseFloat(e.target.value)||0)} placeholder="0.00" />
+                  </div>
+                  <div className="field">
+                    <label>Processing Fee ₱</label>
+                    <input type="number" value={fd.processingFee||''} onChange={e => set('processingFee', parseFloat(e.target.value)||0)} placeholder="0.00" />
+                  </div>
+                  <div className="field">
+                    <label>Term (months)</label>
+                    <input type="number" value={fd.termMonths||''} onChange={e => set('termMonths', parseInt(e.target.value)||0)} placeholder="e.g. 60" />
+                  </div>
+                  <div className="field">
+                    <label>Annual Rate %</label>
+                    <input type="number" step="0.01" value={fd.annualRate||''} onChange={e => set('annualRate', parseFloat(e.target.value)||0)} placeholder="e.g. 6.5" />
+                  </div>
+                  <div className="field lr-form-full">
+                    <label>Interest Method</label>
+                    <select value={fd.interestMethod||'Reducing Balance'} onChange={e => set('interestMethod', e.target.value)}>
+                      {INTEREST_METHODS.map(m => <option key={m}>{m}</option>)}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Section: Schedule */}
+                <div style={{ fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase', marginBottom:10, paddingBottom:6, borderBottom:'1px solid #f1f5f9' }}>
+                  Payment Schedule
+                </div>
+                <div className="lr-form-grid">
+                  <div className="field">
+                    <label>First Payment Date</label>
+                    <input type="date" value={fd.disbursementDate||''} onChange={e => set('disbursementDate', e.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label>Proceeds Date</label>
+                    <input type="date" value={fd.proceedsDate||''} onChange={e => set('proceedsDate', e.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label>Payment Frequency</label>
+                    <select value={fd.paymentFrequency||'Monthly'} onChange={e => set('paymentFrequency', e.target.value)}>
+                      {PAYMENT_FREQS.map(f => <option key={f}>{f}</option>)}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Payment Method</label>
+                    <div style={{ display:'flex', gap:8, marginTop:2 }}>
+                      {['Check','Bank Transfer','Auto-Debit'].map(pm => (
+                        <button
+                          key={pm}
+                          type="button"
+                          onClick={() => set('paymentMethod', pm)}
+                          style={{
+                            flex:1, padding:'7px 10px', borderRadius:8, fontSize:12, fontWeight:700,
+                            border: (fd.paymentMethod||'Check') === pm ? '2px solid #f97316' : '1.5px solid #e5e7eb',
+                            background: (fd.paymentMethod||'Check') === pm ? '#fff7ed' : '#f8fafc',
+                            color: (fd.paymentMethod||'Check') === pm ? '#ea580c' : '#64748b',
+                            cursor:'pointer', transition:'all .15s'
+                          }}
+                        >{pm}</button>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Pay Day Mode — shown for all frequencies */}
+                  {(() => {
+                      const ord = n => { const v = parseInt(n); if (!v) return ''; const s = v % 100; return v + (s >= 11 && s <= 13 ? 'th' : s % 10 === 1 ? 'st' : s % 10 === 2 ? 'nd' : s % 10 === 3 ? 'rd' : 'th'); };
+                      const modes = isSemiMonthly
+                        ? ['Fixed', 'Variable per Month', 'Every N Days']
+                        : ['Every N Days'];
+                      return (
+                        <div className="field" style={{ gridColumn:'1/-1' }}>
+                          <label>Pay Day Mode</label>
+                          {/* Mode toggle */}
+                          <div style={{ display:'flex', gap:8, marginBottom:10 }}>
+                            {modes.map(mode => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => set('payDayMode', mode)}
+                                style={{
+                                  flex:1, padding:'7px 10px', borderRadius:8, fontSize:12, fontWeight:700,
+                                  border: fd.payDayMode === mode ? '2px solid #f97316' : '1.5px solid #e2e8f0',
+                                  background: fd.payDayMode === mode ? '#fff7ed' : '#fff',
+                                  color: fd.payDayMode === mode ? '#c2410c' : '#64748b',
+                                  cursor:'pointer', transition:'all .15s',
+                                }}
+                              >
+                                {mode === 'Fixed' ? 'Fixed Pay Days' : mode === 'Variable per Month' ? 'Variable per Month' : 'Every N Days'}
+                              </button>
+                            ))}
+                          </div>
+
+                          {fd.payDayMode === 'Every N Days' ? (
+                            <div>
+                              <div style={{ fontSize:11, color:'#64748b', marginBottom:10 }}>
+                                Payments fall every <strong>N days</strong> from the First Payment Date, regardless of calendar months.
+                              </div>
+                              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                                <div style={{ flex:'0 0 140px' }}>
+                                  <div style={{ fontSize:10, fontWeight:700, color:'#94a3b8', marginBottom:4, textTransform:'uppercase', letterSpacing:'.05em' }}>Interval (days)</div>
+                                  <input
+                                    type="number" min="1" max="365"
+                                    value={fd.intervalDays || 15}
+                                    onChange={e => set('intervalDays', parseInt(e.target.value)||15)}
+                                    style={{ width:'100%', textAlign:'center', fontWeight:800, fontSize:16 }}
+                                  />
+                                </div>
+                                {fd.disbursementDate && fd.termMonths && fd.intervalDays && (() => {
+                                  const pmts = buildIntervalPayments(fd);
+                                  return pmts.length > 0 ? (
+                                    <div style={{ flex:1, padding:'8px 12px', borderRadius:8, background:'#fff7ed', border:'1px solid #fed7aa', fontSize:11, color:'#c2410c', fontWeight:600 }}>
+                                      <strong>{pmts.length}</strong> payments every {fd.intervalDays} days.
+                                      First: <strong>{pmts[0].dueDate}</strong> &nbsp;·&nbsp; Last: <strong>{pmts[pmts.length-1].dueDate}</strong>
+                                    </div>
+                                  ) : null;
+                                })()}
+                              </div>
+                            </div>
+                          ) : fd.payDayMode === 'Fixed' ? (
+                            <div>
+                              <div style={{ fontSize:11, color:'#64748b', marginBottom:8 }}>
+                                Same two calendar days every month (e.g. 15th &amp; 30th).
+                              </div>
+                              <div style={{ display:'flex', gap:8, alignItems:'flex-end' }}>
+                                <div style={{ flex:1 }}>
+                                  <div style={{ fontSize:10, fontWeight:700, color:'#94a3b8', marginBottom:4, textTransform:'uppercase', letterSpacing:'.05em' }}>Day 1</div>
+                                  <select
+                                    value={fd.payDay1||''}
+                                    onChange={e => set('payDay1', e.target.value)}
+                                    style={{ width:'100%' }}
+                                  >
+                                    <option value="">— choose —</option>
+                                    {Array.from({length:31},(_,i)=>i+1).map(d => (
+                                      <option key={d} value={d}>{ord(d)}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div style={{ fontSize:18, color:'#cbd5e1', paddingBottom:8 }}>&amp;</div>
+                                <div style={{ flex:1 }}>
+                                  <div style={{ fontSize:10, fontWeight:700, color:'#94a3b8', marginBottom:4, textTransform:'uppercase', letterSpacing:'.05em' }}>Day 2</div>
+                                  <select
+                                    value={fd.payDay2||''}
+                                    onChange={e => set('payDay2', e.target.value)}
+                                    style={{ width:'100%' }}
+                                  >
+                                    <option value="">— choose —</option>
+                                    {Array.from({length:31},(_,i)=>i+1).map(d => (
+                                      <option key={d} value={d}>{ord(d)}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                              {fd.payDay1 && fd.payDay2 && (
+                                <div style={{ marginTop:8, padding:'7px 10px', borderRadius:7, background:'#fff7ed', border:'1px solid #fed7aa', fontSize:11, color:'#c2410c', fontWeight:600 }}>
+                                  Payments due on the <strong>{ord(fd.payDay1)}</strong> and <strong>{ord(fd.payDay2)}</strong> of each month.
+                                </div>
+                              )}
+                            </div>
+                          ) : (() => {
+                              const pdMonths = buildPayDaysMonths({ disbursementDate: fd.disbursementDate, termMonths: fd.termMonths });
+                              const pdm      = fd.payDaysPerMonth || {};
+                              const getCell  = (key, col) => pdm[key]?.[col] || '';
+                              const setCell  = (key, col, val) => set('payDaysPerMonth', { ...pdm, [key]: { ...(pdm[key]||{}), [col]: val } });
+                              if (!fd.disbursementDate || !fd.termMonths) {
+                                return (
+                                  <div style={{ padding:'12px 14px', borderRadius:8, background:'#fefce8', border:'1px solid #fde68a', fontSize:12, color:'#92400e', display:'flex', gap:10, alignItems:'center' }}>
+                                    <span style={{ fontSize:18 }}>⚠️</span>
+                                    <span>Set a <strong>First Payment Date</strong> and <strong>Term (months)</strong> above to generate the monthly schedule.</span>
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div>
+                                  <p style={{ margin:'0 0 10px', fontSize:11, color:'#64748b' }}>
+                                    Enter the pay days for each month individually.
+                                  </p>
+                                  <div style={{ maxHeight:240, overflowY:'auto', border:'1px solid #e5e7eb', borderRadius:10 }}>
+                                    <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                                      <thead style={{ position:'sticky', top:0, zIndex:1 }}>
+                                        <tr>
+                                          <th style={{ textAlign:'left', fontSize:10, fontWeight:800, color:'#64748b', letterSpacing:'.05em', textTransform:'uppercase', padding:'8px 10px', background:'#f8fafc', borderBottom:'2px solid #e5e7eb' }}>MONTH</th>
+                                          <th style={{ textAlign:'center', fontSize:10, fontWeight:800, color:'#64748b', letterSpacing:'.05em', textTransform:'uppercase', padding:'8px 10px', background:'#f8fafc', borderBottom:'2px solid #e5e7eb' }}>Day 1</th>
+                                          <th style={{ textAlign:'center', fontSize:10, fontWeight:800, color:'#64748b', letterSpacing:'.05em', textTransform:'uppercase', padding:'8px 10px', background:'#f8fafc', borderBottom:'2px solid #e5e7eb' }}>Day 2</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {pdMonths.map(({ key, label }) => (
+                                          <tr key={key}>
+                                            <td style={{ padding:'5px 10px', borderBottom:'1px solid #f1f5f9', fontSize:12, fontWeight:700 }}>{label}</td>
+                                            <td style={{ padding:'5px 8px', borderBottom:'1px solid #f1f5f9', textAlign:'center' }}>
+                                              <input type="number" min="1" max="31" placeholder="D1"
+                                                style={{ border:'1px solid #e5e7eb', borderRadius:8, padding:'5px 0', fontSize:12, width:64, textAlign:'center', fontFamily:'inherit', boxSizing:'border-box' }}
+                                                value={getCell(key, 'd1')}
+                                                onChange={e => setCell(key, 'd1', e.target.value)} />
+                                            </td>
+                                            <td style={{ padding:'5px 8px', borderBottom:'1px solid #f1f5f9', textAlign:'center' }}>
+                                              <input type="number" min="1" max="31" placeholder="D2"
+                                                style={{ border:'1px solid #e5e7eb', borderRadius:8, padding:'5px 0', fontSize:12, width:64, textAlign:'center', fontFamily:'inherit', boxSizing:'border-box' }}
+                                                value={getCell(key, 'd2')}
+                                                onChange={e => setCell(key, 'd2', e.target.value)} />
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              );
+                          })()}
+                        </div>
+                      );
+                  })()}
+                </div>
+
+              </div>{/* end modal-b */}
+
+              {/* ── Footer ──────────────────────────────────────── */}
+              <div className="modal-f">
+                <button className="btn btn-ghost" onClick={() => setLoanFormModal(null)}>Cancel</button>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => saveLoanFromModal(fd)}
+                  disabled={!canSave}
+                  style={{ opacity: canSave ? 1 : 0.5 }}
+                >
+                  {isNew ? 'Add Loan' : 'Save Changes'}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Record Payment Modal (Phase 2) */}
       {payModal && (() => {
         const l  = loans.find(x => x.id === payModal);
@@ -1927,7 +3264,7 @@ export default function FinancialPage() {
               {/* Mode toggle bar */}
               <div style={{display:'flex',alignItems:'center',gap:10,padding:'14px 20px',borderBottom:'1px solid #e5e7eb',background:'#fff'}}>
                 <span style={{fontSize:12,fontWeight:800,color:'#64748b',letterSpacing:'.04em'}}>MODE:</span>
-                {['Fixed','Variable per Month'].map(m => (
+                {['Fixed','Variable per Month','Every N Days'].map(m => (
                   <button key={m}
                     onClick={()=>updateLoan(payDaysLoan.id,'payDayMode',m)}
                     style={{border:`2px solid ${pdMode===m?'#f97316':'#e5e7eb'}`,borderRadius:10,padding:'6px 14px',fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:'inherit',background:pdMode===m?'#f97316':'#fff',color:pdMode===m?'#fff':'#64748b',transition:'all .15s'}}>
@@ -1938,7 +3275,32 @@ export default function FinancialPage() {
 
               {/* Body */}
               <div className="modal-b" style={{padding:'18px 20px'}}>
-                {pdMode === 'Fixed' ? (
+                {pdMode === 'Every N Days' ? (
+                  <div>
+                    <p style={{margin:'0 0 16px',fontSize:13,color:'#64748b'}}>
+                      Payments fall every <strong>N days</strong> from the First Payment Date, automatically computed.
+                    </p>
+                    <div style={{display:'flex',alignItems:'center',gap:14}}>
+                      <div className="field" style={{flex:'0 0 160px'}}>
+                        <label>INTERVAL (DAYS)</label>
+                        <input className="tbl-inp" type="number" min="1" max="365"
+                          style={{textAlign:'center',fontSize:22,fontWeight:900,padding:'10px 8px'}}
+                          value={payDaysLoan.intervalDays || 15}
+                          onChange={e=>updateLoan(payDaysLoan.id,'intervalDays',parseInt(e.target.value)||15)} />
+                      </div>
+                      {(() => {
+                        const pmts = buildIntervalPayments(payDaysLoan);
+                        return pmts.length > 0 ? (
+                          <div style={{flex:1,padding:'10px 14px',borderRadius:10,background:'#fff7ed',border:'1px solid #fed7aa',fontSize:12,color:'#c2410c',fontWeight:600,lineHeight:1.6}}>
+                            <strong>{pmts.length}</strong> payments every {payDaysLoan.intervalDays || 15} days<br/>
+                            First: <strong>{pmts[0].dueDate}</strong><br/>
+                            Last: <strong>{pmts[pmts.length-1].dueDate}</strong>
+                          </div>
+                        ) : <div style={{color:'#94a3b8',fontSize:12}}>Set First Payment Date and Term first.</div>;
+                      })()}
+                    </div>
+                  </div>
+                ) : pdMode === 'Fixed' ? (
                   <div>
                     <p style={{margin:'0 0 16px',fontSize:13,color:'#64748b'}}>Same two pay days every month.</p>
                     <div style={{display:'flex',alignItems:'flex-end',gap:14}}>

@@ -64,6 +64,8 @@ const MODAL_CSS = `
   .cvpdf-tbl td    { border:1px solid #000; padding:4px 6px; vertical-align:top; background:#fff; color:#000; font-size:10px; }
   .cvpdf-tbl .amt  { text-align:right; white-space:nowrap; }
   .cvpdf-tbl .tr-total td { font-weight:bold; border-top:2px solid #000; }
+  .cvpdf-pay-tbl td { font-size:9px; line-height:1.3; }
+  .cvpdf-pay-cell   { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
   .cvpdf-words-box { border:1px dashed #000; padding:6px 10px; margin-bottom:10px; min-height:28px; font-size:10px; }
   .cvpdf-sigs      { width:100%; border-collapse:collapse; table-layout:fixed; margin-top:20px; }
   .cvpdf-sigs td   { border:none; padding-right:12px; vertical-align:top; }
@@ -84,7 +86,18 @@ const MODAL_CSS = `
 `;
 
 // ── Component ─────────────────────────────────────────────────────────────
-export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccounts, onClose }) {
+export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccounts, accounts = [], onClose }) {
+  // Resolve an expense account code to its full display name
+  const resolveAccount = (codeOrFull) => {
+    if (!codeOrFull) return '—';
+    if (codeOrFull.includes(' — ')) {
+      const [c, ...rest] = codeOrFull.split(' — ');
+      return `(${c.trim()}) ${rest.join(' — ').trim()}`;
+    }
+    const found = accounts.find(a => a.code === codeOrFull);
+    return found ? `(${found.code}) ${found.name}` : codeOrFull;
+  };
+
   const [profile,        setProfile]        = useState({});
   const [preparedByName, setPreparedByName] = useState('');
   const [checkedByName,  setCheckedByName]  = useState('');
@@ -297,26 +310,31 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
       y += 2.5; dashLine(y); y += 4;
 
       // Columns: Contact | Expense Acct | Description | Amount | Tax
-      const PC1 = 35, PC2 = 35, PC3 = 55, PC4 = 28, PC5 = CW - PC1 - PC2 - PC3 - PC4;
+      const PC1 = 35, PC2 = 40, PC3 = 50, PC4 = 28, PC5 = CW - PC1 - PC2 - PC3 - PC4;
       const PAY_COLS = [PC1, PC2, PC3, PC4, PC5];
 
+      // Helper: draw column headers for Payment Details (called on first render + page breaks)
+      const drawPayColHeaders = () => {
+        need(ROW);
+        pdf.setLineWidth(0.15);
+        pdf.rect(ML, y, CW, ROW, 'S');
+        vlines(y, ROW, PAY_COLS);
+        pdf.setLineWidth(0.35); hline(y + ROW, 0.35);
+        bold(7.5);
+        let px = ML;
+        ['CONTACT', 'EXPENSE ACCT', 'DESCRIPTION', 'AMOUNT', 'TAX'].forEach((h, i) => {
+          const w = PAY_COLS[i];
+          pdf.text(h, px + w / 2, y + 4.5, { align: 'center' });
+          px += w;
+        });
+        y += ROW;
+      };
+
       // Header
-      need(ROW);
-      pdf.setLineWidth(0.15);
-      pdf.rect(ML, y, CW, ROW, 'S');
-      vlines(y, ROW, PAY_COLS);
-      pdf.setLineWidth(0.35); hline(y + ROW, 0.35);
-      bold(7.5);
-      let px = ML;
-      ['CONTACT', 'EXPENSE ACCT', 'DESCRIPTION', 'AMOUNT', 'TAX'].forEach((h, i) => {
-        const w = PAY_COLS[i];
-        pdf.text(h, px + w / 2, y + 4.5, { align: 'center' });
-        px += w;
-      });
-      y += ROW;
+      drawPayColHeaders();
 
       // Data rows
-      reg(8.5);
+      reg(7);
       const payLines = voucher?.lines || [];
       if (payLines.length === 0) {
         need(ROW);
@@ -326,17 +344,19 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
         y += ROW;
       } else {
         payLines.forEach(l => {
-          const cLines = pdf.splitTextToSize(l.contact     || '—', PC1 - PAD * 2);
-          const aLines = pdf.splitTextToSize(l.expenseAccountCode || l.expenseAccount || '—', PC2 - PAD * 2);
-          const dLines = pdf.splitTextToSize(l.description || '—', PC3 - PAD * 2);
-          const rowH   = Math.max(ROW, Math.max(cLines.length, aLines.length, dLines.length) * 4 + 3);
+          const cLines = pdf.splitTextToSize(l.contact     || '—', PC1 - PAD * 2).slice(0, 2);
+          const aLines = pdf.splitTextToSize(resolveAccount(l.expenseAccountCode || l.expenseAccount), PC2 - PAD * 2).slice(0, 2);
+          const dLines = pdf.splitTextToSize(l.description || '—', PC3 - PAD * 2).slice(0, 2);
+          const rowH   = Math.max(ROW, Math.max(cLines.length, aLines.length, dLines.length) * 3.5 + 3);
+          const prevY  = y;
           need(rowH);
+          if (y < prevY) { reg(7); drawPayColHeaders(); reg(7); } // re-draw headers after page break
           pdf.setLineWidth(0.15);
           pdf.rect(ML, y, CW, rowH, 'S'); vlines(y, rowH, PAY_COLS);
           let lx = ML;
-          cLines.forEach((t, i) => pdf.text(t, lx + PAD, y + 4 + i * 4)); lx += PC1;
-          aLines.forEach((t, i) => pdf.text(t, lx + PAD, y + 4 + i * 4)); lx += PC2;
-          dLines.forEach((t, i) => pdf.text(t, lx + PAD, y + 4 + i * 4)); lx += PC3;
+          cLines.forEach((t, i) => pdf.text(t, lx + PAD, y + 4 + i * 3.5)); lx += PC1;
+          aLines.forEach((t, i) => pdf.text(t, lx + PAD, y + 4 + i * 3.5)); lx += PC2;
+          dLines.forEach((t, i) => pdf.text(t, lx + PAD, y + 4 + i * 3.5)); lx += PC3;
           pdf.text(`P ${fmtN(l.amount)}`, lx + PC4 - PAD, y + 4.5, { align: 'right' }); lx += PC4;
           const taxAmt = Number(l.taxAmt) || 0;
           pdf.text(taxAmt > 0 ? `P ${fmtN(taxAmt)}` : '—', lx + PC5 / 2, y + 4.5, { align: 'center' });
@@ -548,11 +568,11 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
 
                 {/* Payment Details */}
                 <div className="cvpdf-sec">Payment Details</div>
-                <table className="cvpdf-tbl">
+                <table className="cvpdf-tbl cvpdf-pay-tbl">
                   <thead>
                     <tr>
-                      <th style={{ width:'18%' }}>Contact</th>
-                      <th style={{ width:'18%' }}>Expense Acct</th>
+                      <th style={{ width:'16%' }}>Contact</th>
+                      <th style={{ width:'20%' }}>Expense Acct</th>
                       <th>Description</th>
                       <th style={{ width:'15%', textAlign:'right' }}>Amount</th>
                       <th style={{ width:'10%', textAlign:'right' }}>Tax</th>
@@ -563,9 +583,9 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
                       <tr><td colSpan={5} style={{ textAlign:'center', color:'#888', padding:10 }}>No lines recorded</td></tr>
                     ) : (voucher?.lines || []).map((l, i) => (
                       <tr key={i}>
-                        <td>{l.contact || '—'}</td>
-                        <td style={{ fontFamily:'monospace', fontSize:'9px' }}>{l.expenseAccountCode || l.expenseAccount || '—'}</td>
-                        <td>{l.description || '—'}</td>
+                        <td><div className="cvpdf-pay-cell">{l.contact || '—'}</div></td>
+                        <td><div className="cvpdf-pay-cell">{resolveAccount(l.expenseAccountCode || l.expenseAccount)}</div></td>
+                        <td><div className="cvpdf-pay-cell">{l.description || '—'}</div></td>
                         <td className="amt">₱ {fmtN(l.amount)}</td>
                         <td className="amt">{Number(l.taxAmt) > 0 ? `₱ ${fmtN(l.taxAmt)}` : '—'}</td>
                       </tr>

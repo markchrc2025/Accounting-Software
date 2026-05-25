@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../../firebase.js';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, onSnapshot, query, collection, where } from 'firebase/firestore';
 
 import DashboardPage       from './DashboardPage.jsx';
 import VouchersPage        from './vouchers/VouchersPage.jsx';
@@ -32,6 +33,7 @@ import { LeftRail } from '../../components/shell/LeftRail.tsx';
 import { TopBar } from '../../components/shell/TopBar.tsx';
 import { CreateFlyout } from '../../components/shell/CreateFlyout.jsx';
 import { CommandPalette } from '../../components/shell/CommandPalette.jsx';
+import { useApprovalCount } from '../../hooks/useApprovalCount.js';
 
 // ── Component ─────────────────────────────────────────────
 export default function ScaleBooksApp() {
@@ -61,8 +63,29 @@ function ScaleBooksAppInner() {
   const [createFlyoutOpen,  setCreateFlyoutOpen]  = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [profile, setProfile] = useState({ companyName: '', logoUrl: '' });
+  const [user, setUser] = useState(auth.currentUser);
+  const [userName, setUserName] = useState(auth.currentUser?.displayName ?? '');
   const navigate = useNavigate();
-  const user = auth.currentUser;
+  const approvalCount = useApprovalCount();
+
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, u => {
+      setUser(u);
+      setUserName(u?.displayName ?? '');
+    });
+    return unsubAuth;
+  }, []);
+
+  // Keep userName in sync with appUsers.fullName (Admin-managed source of truth)
+  useEffect(() => {
+    if (!user?.email) return;
+    const q = query(collection(db, 'appUsers'), where('email', '==', user.email));
+    const unsub = onSnapshot(q, snap => {
+      const d = snap.docs[0]?.data();
+      if (d) setUserName(d.fullName || d.displayName || user.displayName || '');
+    });
+    return unsub;
+  }, [user?.email]);
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'settings', 'profile'), snap => {
@@ -82,9 +105,12 @@ function ScaleBooksAppInner() {
     <div className="flex flex-col h-screen w-screen">
       <TopBar
         companyName={profile.companyName}
+        userName={userName || undefined}
         userEmail={user?.email}
         logoUrl={profile.logoUrl}
         onSignOut={handleSignOut}
+        approvalCount={approvalCount}
+        onApprovalsClick={() => navigate('/scalebooks/approvals')}
         onSearchClick={() => setCommandPaletteOpen(true)}
         onSettingsClick={() => navigate('/scalebooks/settings')}
         onProfileClick={() => navigate('/scalebooks/profile')}

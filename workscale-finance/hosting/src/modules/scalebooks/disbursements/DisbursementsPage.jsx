@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
+import jsPDF from 'jspdf';
 import {
   collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
-  serverTimestamp, getDocs, where
+  serverTimestamp, getDocs, getDoc, where
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
 import { nextDisbursementReportId } from '../../../utils/documentIds.js';
@@ -16,152 +17,275 @@ const fmtDate = (d) => { try { return d ? new Date(d+'T00:00:00').toLocaleDateSt
 
 const PAYROLL_TYPES = ['PAYROLL','FINAL_PAY'];
 
-const DR_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Rejected','Voided'];
+const DR_STATUSES = ['Pending','For Verification','Verified','For Approval','Approved','Disbursed','Rejected','Voided'];
 
 // ── PDF generation ────────────────────────────────────────────────────────────
 function buildPdfHtml(report, bankAccounts, companyName = 'Workscale Resources Inc.') {
-  const lines = report.lines || [];
+  const lines    = report.lines || [];
   const bankBals = report.bankBalances || {};
 
-  // Group lines by bankCode
-  const groups = {};
-  lines.forEach(l => {
-    const k = l.bankCode || 'OTHER';
-    if (!groups[k]) groups[k] = [];
-    groups[k].push(l);
-  });
+  // helpers scoped to PDF only
+  const p = (n) => '&#8369;&nbsp;' + fmtN(Math.abs(Number(n)||0));
+  const pDash = (n) => (Number(n)||0) === 0 ? '&mdash;' : `<span class="neg">(&#8369;&nbsp;${fmtN(Math.abs(Number(n)||0))})</span>`;
+  const pAfter = (n) => {
+    const v = Number(n)||0;
+    if (v < 0) return `<span class="neg">(&#8369;&nbsp;${fmtN(Math.abs(v))})</span>`;
+    return '&#8369;&nbsp;' + fmtN(v);
+  };
 
-  const groupsHtml = Object.entries(groups).map(([bankCode, bLines]) => {
-    const sub = bLines.reduce((s,l)=>s+(Number(l.amount)||0),0);
-    const acc = bankAccounts.find(a => a.code === bankCode);
-    const bankLabel = acc ? `${acc.code} — ${acc.name}` : bankCode;
-    return `
-      <tr class="bank-header"><td colspan="7"><strong>${bankLabel}</strong></td></tr>
-      ${bLines.map((l,i)=>`
-        <tr>
-          <td>${l.lineNo||i+1}</td>
-          <td>${l.voucherId||'—'}</td>
-          <td>${l.contact||'—'}</td>
-          <td>${l.description||l.voucherType||'—'}</td>
-          <td>${l.checkNo||'—'}</td>
-          <td>${l.refNo||'—'}</td>
-          <td class="amt">₱${fmtN(l.amount)}</td>
-        </tr>`).join('')}
-      <tr class="sub-row"><td colspan="6" style="text-align:right"><strong>Subtotal — ${bankLabel}</strong></td><td class="amt"><strong>₱${fmtN(sub)}</strong></td></tr>`;
-  }).join('');
-
-  const bankBalRows = bankAccounts.map(acc => {
-    const bal   = Number(bankBals[acc.code]) || 0;
-    const disb  = lines.filter(l=>l.bankCode===acc.code).reduce((s,l)=>s+(Number(l.amount)||0),0);
+  // ── Bank balance section ──────────────────────────────────────────────────
+  const activeAccounts = bankAccounts.filter(a => bankBals[a.code] !== undefined || lines.some(l=>l.bankCode===a.code));
+  let totalBal = 0, totalDisb = 0;
+  const bankBalRows = activeAccounts.map(acc => {
+    const bal  = Number(bankBals[acc.code]) || 0;
+    const disb = lines.filter(l=>l.bankCode===acc.code).reduce((s,l)=>s+(Number(l.amount)||0), 0);
+    totalBal  += bal;
+    totalDisb += disb;
     const after = bal - disb;
     return `<tr>
-      <td>${acc.code} — ${acc.name}</td>
-      <td class="amt">₱${fmtN(bal)}</td>
-      <td class="amt">₱${fmtN(disb)}</td>
-      <td class="amt ${after<0?'neg':''}">₱${fmtN(after)}</td>
+      <td>${acc.name||acc.code}</td>
+      <td class="amt">${p(bal)}</td>
+      <td class="amt">${pDash(disb)}</td>
+      <td class="amt">${pAfter(after)}</td>
     </tr>`;
   }).join('');
+  // also accumulate lines for accounts not in activeAccounts (edge case)
+  lines.forEach(l => { if (!activeAccounts.find(a=>a.code===l.bankCode)) totalDisb += (Number(l.amount)||0); });
+  const expColl  = Number(report.expectedCollection)||0;
+  const balAfter = totalBal + expColl - totalDisb;
 
-  const totalBal  = Object.values(bankBals).reduce((s,v)=>s+(Number(v)||0),0);
-  const totalDisb = lines.reduce((s,l)=>s+(Number(l.amount)||0),0);
-  const expColl   = Number(report.expectedCollection)||0;
-  const balAfter  = totalBal + expColl - totalDisb;
-
-  // Late lines section
-  const repDate = report.date ? new Date(report.date) : null;
+  // ── Disbursements by bank ─────────────────────────────────────────────────
+  const repDate = report.date ? new Date(report.date+'T00:00:00') : null;
+  const mainLines = lines.filter(l => {
+    if (!repDate || !l.checkDate) return true;
+    try {
+      const cd = new Date(l.checkDate+'T00:00:00');
+      return isNaN(cd.getTime()) || (cd.getMonth()===repDate.getMonth() && cd.getFullYear()===repDate.getFullYear());
+    } catch { return true; }
+  });
   const lateLines = repDate ? lines.filter(l => {
     if (!l.checkDate) return false;
-    const cd = new Date(l.checkDate);
-    return !isNaN(cd.getTime()) && (cd.getMonth()!==repDate.getMonth() || cd.getFullYear()!==repDate.getFullYear());
+    try {
+      const cd = new Date(l.checkDate+'T00:00:00');
+      return !isNaN(cd.getTime()) && (cd.getMonth()!==repDate.getMonth() || cd.getFullYear()!==repDate.getFullYear());
+    } catch { return false; }
   }) : [];
-  const lateHtml = lateLines.length > 0 ? `
-    <h3 class="section-head">FOR LATE APPROVALS</h3>
-    <table class="main-tbl">
-      <thead><tr><th>#</th><th>Voucher No.</th><th>Payee</th><th>Description</th><th>Check No.</th><th>Ref No.</th><th class="amt">Amount</th></tr></thead>
-      <tbody>${lateLines.map((l,i)=>`<tr><td>${l.lineNo||i+1}</td><td>${l.voucherId||'—'}</td><td>${l.contact||'—'}</td><td>${l.description||l.voucherType||'—'}</td><td>${l.checkNo||'—'}</td><td>${l.refNo||'—'}</td><td class="amt">₱${fmtN(l.amount)}</td></tr>`).join('')}</tbody>
-    </table>` : '';
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>DR — ${report.reportId||report.id}</title>
+  const disburseRow = (l) => `<tr>
+    <td style="font-weight:700;color:#c2410c">${l.voucherId||'&mdash;'}</td>
+    <td>${l.contact||'&mdash;'}</td>
+    <td>${l.description||l.voucherType||'&mdash;'}</td>
+    <td class="amt">${l.checkNo||'&mdash;'}</td>
+    <td class="amt">${l.refNo||'&mdash;'}</td>
+    <td class="amt" style="font-weight:700">&#8369;&nbsp;${fmtN(l.amount)}</td>
+  </tr>`;
+
+  const buildGroups = (lineSet) => {
+    const groups = {};
+    lineSet.forEach(l => { const k = l.bankCode||'OTHER'; if (!groups[k]) groups[k]=[]; groups[k].push(l); });
+    return Object.entries(groups).map(([bankCode, bLines]) => {
+      const acc = bankAccounts.find(a=>a.code===bankCode);
+      const bankName = acc ? acc.name : bankCode;
+      const sub = bLines.reduce((s,l)=>s+(Number(l.amount)||0), 0);
+      return `
+        <div class="bank-group-header">DISBURSEMENTS FROM: ${bankName.toUpperCase()}</div>
+        <table class="disb-tbl">
+          <thead><tr><th>VOUCHER NO.</th><th>PAYEE</th><th>DESCRIPTION</th><th class="amt">CHECK NO.</th><th class="amt">REF NO.</th><th class="amt">AMOUNT</th></tr></thead>
+          <tbody>${bLines.map(disburseRow).join('')}</tbody>
+          <tfoot><tr class="sub-row"><td colspan="5" class="amt"><strong>Subtotal</strong></td><td class="amt"><strong>&#8369;&nbsp;${fmtN(sub)}</strong></td></tr></tfoot>
+        </table>
+        <div class="bank-total-line">Total for ${bankName}: &nbsp;<strong>&#8369;&nbsp;${fmtN(sub)}</strong></div>`;
+    }).join('');
+  };
+
+  const lateGroupsHtml = lateLines.length > 0 ? (() => {
+    const groups = {};
+    lateLines.forEach(l => { const k = l.bankCode||'OTHER'; if (!groups[k]) groups[k]=[]; groups[k].push(l); });
+    return Object.entries(groups).map(([bankCode, bLines]) => {
+      const acc = bankAccounts.find(a=>a.code===bankCode);
+      const bankName = acc ? acc.name : bankCode;
+      const sub = bLines.reduce((s,l)=>s+(Number(l.amount)||0), 0);
+      return `
+        <div class="late-from">From: ${bankName}</div>
+        <table class="disb-tbl">
+          <thead><tr><th>VOUCHER NO.</th><th>PAYEE</th><th>DESCRIPTION</th><th class="amt">CHECK NO.</th><th class="amt">REF NO.</th><th class="amt">AMOUNT</th></tr></thead>
+          <tbody>${bLines.map(disburseRow).join('')}</tbody>
+          <tfoot><tr class="sub-row"><td colspan="5" class="amt"><strong>Subtotal</strong></td><td class="amt"><strong>&#8369;&nbsp;${fmtN(sub)}</strong></td></tr></tfoot>
+        </table>`;
+    }).join('');
+  })() : '';
+
+  const genDate = fmtDate(new Date().toISOString().slice(0,10));
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>DR &mdash; ${report.reportId||report.id}</title>
   <style>
-    @page { size: letter landscape; margin: 15mm 12mm; }
-    * { box-sizing: border-box; }
+    @page { size: letter portrait; margin: 12mm 14mm 14mm; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: Arial, sans-serif; font-size: 10px; color: #0b1220; }
-    .header { text-align: center; margin-bottom: 10px; }
-    .header h1 { font-size: 14px; font-weight: 900; text-transform: uppercase; margin: 0 0 2px; }
-    .header h2 { font-size: 11px; font-weight: 700; margin: 0 0 2px; }
-    .header p  { font-size: 9px; color: #555; margin: 0; }
-    .meta { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 9px; }
-    .meta span { font-weight: 700; }
-    .section-head { font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: .05em; border-bottom: 2px solid #333; padding-bottom: 2px; margin: 10px 0 4px; }
-    .main-tbl { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
-    .main-tbl th { font-size: 9px; font-weight: 900; text-transform: uppercase; background: #f0f0f0; border: 1px solid #ccc; padding: 4px 6px; }
-    .main-tbl td { border: 1px solid #ddd; padding: 3px 6px; font-size: 9px; }
-    .main-tbl tr.bank-header td { background: #e8eef6; font-weight: 900; padding: 4px 6px; }
-    .main-tbl tr.sub-row td { background: #f8f8f8; }
+
+    /* ── Top bar ── */
+    .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+    .logo-wrap { display: flex; align-items: center; gap: 8px; }
+    .logo-box { width: 34px; height: 34px; background: #f97316; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .logo-w { color: #fff; font-size: 18px; font-weight: 900; font-family: Arial, sans-serif; line-height: 1; }
+    .logo-text-wrap { display: flex; flex-direction: column; line-height: 1.1; }
+    .logo-co { font-size: 12px; font-weight: 900; color: #0b1220; letter-spacing: .04em; }
+    .logo-sub { font-size: 8px; font-weight: 700; color: #f97316; letter-spacing: .12em; text-transform: uppercase; }
+    .doc-meta { text-align: right; font-size: 9px; color: #374151; }
+    .doc-meta div { margin-bottom: 1px; }
+
+    /* ── Title ── */
+    .doc-title { font-size: 15px; font-weight: 900; text-transform: uppercase; letter-spacing: .02em; margin-bottom: 1px; border-bottom: 2px solid #0b1220; padding-bottom: 4px; }
+    .doc-date  { font-size: 9px; color: #555; margin-bottom: 10px; }
+
+    /* ── Section headers ── */
+    .sec-label { background: #e5e7eb; font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; padding: 4px 8px; margin: 10px 0 0; border: 1px solid #ccc; }
+
+    /* ── Bank balance table ── */
+    .bal-tbl { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+    .bal-tbl th { font-size: 8.5px; font-weight: 900; text-transform: uppercase; background: #374151; color: #fff; border: 1px solid #4b5563; padding: 4px 7px; }
+    .bal-tbl th.amt { text-align: right; }
+    .bal-tbl td { border: 1px solid #d1d5db; padding: 3px 7px; font-size: 9px; }
+    .bal-tbl tr.total-row td { background: #f3f4f6; font-weight: 900; font-size: 9.5px; border-top: 2px solid #374151; }
+
+    /* ── Disbursement group ── */
+    .bank-group-header { font-size: 8.5px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; padding: 4px 7px; background: #f9fafb; border: 1px solid #d1d5db; border-bottom: none; margin-top: 8px; color: #374151; }
+    .disb-tbl { width: 100%; border-collapse: collapse; }
+    .disb-tbl th { font-size: 8px; font-weight: 900; text-transform: uppercase; background: #374151; color: #fff; border: 1px solid #4b5563; padding: 3px 6px; }
+    .disb-tbl th.amt { text-align: right; }
+    .disb-tbl td { border: 1px solid #d1d5db; padding: 3px 6px; font-size: 8.5px; vertical-align: top; }
+    .disb-tbl tr.sub-row td { background: #f9fafb; font-size: 9px; }
+    .bank-total-line { font-size: 8.5px; text-align: right; padding: 3px 7px; color: #374151; border: 1px solid #d1d5db; border-top: none; margin-bottom: 4px; }
+
+    /* ── Late approvals ── */
+    .late-header { font-size: 10px; font-weight: 900; text-transform: uppercase; padding: 5px 8px; background: #fffbeb; border: 1px solid #fcd34d; margin: 12px 0 4px; }
+    .late-from { font-size: 9px; font-weight: 700; padding: 4px 7px; background: #fefce8; border: 1px solid #fde68a; border-bottom: none; margin-top: 6px; color: #92400e; }
+
+    /* ── Footer ── */
+    .footer-wrap { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 18px; gap: 16px; }
+    .sig-block { display: flex; gap: 18px; flex: 1; }
+    .sig-col { flex: 1; text-align: center; }
+    .sig-space { height: 28px; }
+    .sig-line { border-top: 1px solid #374151; margin-bottom: 3px; }
+    .sig-name { font-size: 8.5px; font-weight: 900; text-transform: uppercase; }
+    .sig-label { font-size: 8px; color: #6b7280; }
+
+    /* ── Summary box ── */
+    .summary-box { border: 1px solid #374151; min-width: 220px; flex-shrink: 0; }
+    .summary-title { background: #374151; color: #fff; font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: .06em; padding: 4px 10px; }
+    .summary-row { display: flex; justify-content: space-between; font-size: 9px; padding: 3px 10px; gap: 12px; }
+    .summary-row.total-row { font-weight: 900; font-size: 10px; background: #f3f4f6; border-top: 2px solid #374151; padding: 5px 10px; }
+
+    /* ── Utilities ── */
     .amt { text-align: right; white-space: nowrap; }
     .neg { color: #dc2626; }
-    .bal-tbl { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
-    .bal-tbl th { font-size: 9px; font-weight: 900; background: #f0f0f0; border: 1px solid #ccc; padding: 4px 6px; text-align: left; }
-    .bal-tbl td { border: 1px solid #ddd; padding: 3px 6px; font-size: 9px; }
-    .summary-box { border: 1px solid #999; padding: 8px 12px; display: inline-block; min-width: 280px; float: right; margin-bottom: 10px; }
-    .summary-box h4 { font-size: 10px; font-weight: 900; text-transform: uppercase; margin: 0 0 6px; border-bottom: 1px solid #999; padding-bottom: 3px; }
-    .summary-row { display: flex; justify-content: space-between; font-size: 9px; margin-bottom: 2px; }
-    .summary-row.total { font-weight: 900; border-top: 1px solid #999; margin-top: 4px; padding-top: 3px; font-size: 10px; }
-    .sig-block { clear: both; display: flex; justify-content: space-around; margin-top: 24px; }
-    .sig-col { text-align: center; min-width: 140px; }
-    .sig-line { border-top: 1px solid #333; margin-bottom: 4px; }
-    .sig-label { font-size: 9px; font-weight: 700; }
-    .sig-name { font-size: 9px; font-weight: 900; }
-    @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .no-print { display: none; } }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .no-print { display: none; }
+    }
   </style>
   </head><body>
-    <div class="no-print" style="padding:10px;background:#f5f5f5;text-align:center">
-      <button onclick="window.print()" style="padding:8px 20px;font-size:13px;font-weight:700;background:#f97316;color:#fff;border:0;border-radius:8px;cursor:pointer">🖨 Print / Save as PDF</button>
+    <div class="no-print" style="padding:10px;background:#f5f5f5;text-align:center;margin-bottom:8px">
+      <button onclick="window.print()" style="padding:8px 22px;font-size:13px;font-weight:700;background:#f97316;color:#fff;border:0;border-radius:8px;cursor:pointer">&#128424; Print / Save as PDF</button>
     </div>
-    <div class="header">
-      <h2>${companyName}</h2>
-      <h1>Master Disbursement Report</h1>
-      <p>${fmtDate(report.date)} &nbsp;|&nbsp; Report No.: ${report.reportId||report.id} &nbsp;|&nbsp; Status: ${report.status||'Draft'}</p>
+
+    <!-- Header -->
+    <div class="doc-header">
+      <div class="logo-wrap">
+        <div class="logo-box"><span class="logo-w">W</span></div>
+        <div class="logo-text-wrap">
+          <span class="logo-co">WORKSCALE</span>
+          <span class="logo-sub">RESOURCES</span>
+        </div>
+      </div>
+      <div class="doc-meta">
+        <div><strong>Report No:</strong>&nbsp; ${report.reportId||report.id}</div>
+        <div><strong>Generated:</strong>&nbsp; ${genDate}</div>
+      </div>
     </div>
-    <div class="meta">
-      <div>Prepared by: <span>${report.createdBy||'—'}</span></div>
-      <div>Reviewed by: <span>${report.reviewedBy||'—'}</span></div>
-      <div>Approved by: <span>${report.approvedBy||'—'}</span></div>
-    </div>
-    <h3 class="section-head">Disbursements</h3>
-    <table class="main-tbl">
-      <thead><tr><th>#</th><th>Voucher No.</th><th>Payee</th><th>Description</th><th>Check No.</th><th>Ref No.</th><th class="amt">Amount</th></tr></thead>
-      <tbody>${groupsHtml}</tbody>
-      <tfoot><tr style="background:#e8eef6"><td colspan="6" style="text-align:right;font-weight:900;font-size:10px">GRAND TOTAL</td><td class="amt" style="font-weight:900;font-size:10px">₱${fmtN(totalDisb)}</td></tr></tfoot>
-    </table>
-    ${lateHtml}
-    <h3 class="section-head">Bank Account Balances</h3>
+    <div class="doc-title">MASTER DISBURSEMENT REPORT</div>
+    <div class="doc-date">${fmtDate(report.date)}</div>
+
+    <!-- Section 1: Bank Account Balances -->
+    <div class="sec-label">1. BANK ACCOUNT BALANCES</div>
     <table class="bal-tbl">
-      <thead><tr><th>Account</th><th class="amt">Current Balance</th><th class="amt">Less: Disbursements</th><th class="amt">Balance After</th></tr></thead>
-      <tbody>${bankBalRows}</tbody>
+      <thead>
+        <tr>
+          <th>BANK ACCOUNT</th>
+          <th class="amt">CURRENT BALANCE</th>
+          <th class="amt">LESS: DISBURSEMENTS</th>
+          <th class="amt">BALANCE AFTER</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${bankBalRows}
+      </tbody>
+      <tfoot>
+        <tr class="total-row">
+          <td><strong>TOTAL</strong></td>
+          <td class="amt"><strong>${p(totalBal)}</strong></td>
+          <td class="amt"><strong>${pDash(totalDisb)}</strong></td>
+          <td class="amt"><strong>${pAfter(totalBal - totalDisb)}</strong></td>
+        </tr>
+      </tfoot>
     </table>
-    <div class="summary-box">
-      <h4>Summary</h4>
-      <div class="summary-row"><span>Total Bank Balance (Before)</span><span>₱${fmtN(totalBal)}</span></div>
-      <div class="summary-row"><span>Less: Total Disbursements</span><span>(₱${fmtN(totalDisb)})</span></div>
-      <div class="summary-row"><span>Add: Expected Collection</span><span>₱${fmtN(expColl)}</span></div>
-      <div class="summary-row total"><span>Bank Balance After</span><span class="${balAfter<0?'neg':''}">₱${fmtN(balAfter)}</span></div>
+
+    <!-- Section 2: Disbursements -->
+    <div class="sec-label">2. DISBURSEMENTS</div>
+    ${buildGroups(mainLines)}
+
+    <!-- Late Approvals -->
+    ${lateLines.length > 0 ? `
+    <div class="late-header">&#9658; FOR LATE APPROVALS</div>
+    ${lateGroupsHtml}` : ''}
+
+    <!-- Footer: Signatures + Summary -->
+    <div class="footer-wrap">
+      <div class="sig-block">
+        <div class="sig-col">
+          <div class="sig-space"></div>
+          <div class="sig-line"></div>
+          <div class="sig-name">${report.createdBy||'&nbsp;'}</div>
+          <div class="sig-label">Prepared by</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-space"></div>
+          <div class="sig-line"></div>
+          <div class="sig-name">${report.reviewedBy||'&nbsp;'}</div>
+          <div class="sig-label">Verified by</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-space"></div>
+          <div class="sig-line"></div>
+          <div class="sig-name">${report.approvedBy||'&nbsp;'}</div>
+          <div class="sig-label">Approved by</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-space"></div>
+          <div class="sig-line"></div>
+          <div class="sig-name">&nbsp;</div>
+          <div class="sig-label">Noted by</div>
+        </div>
+      </div>
+      <div class="summary-box">
+        <div class="summary-title">SUMMARY</div>
+        <div class="summary-row"><span>Total Bank Balance (Before)</span><span>${p(totalBal)}</span></div>
+        <div class="summary-row neg"><span>Less: Total Disbursements</span><span>${pDash(totalDisb)}</span></div>
+        <div class="summary-row"><span>Add: Expected Collection</span><span>${expColl > 0 ? p(expColl) : '&#8369;&nbsp;0.00'}</span></div>
+        <div class="summary-row total-row"><span>Bank Balance After</span><span class="${balAfter<0?'neg':''}">${pAfter(balAfter)}</span></div>
+      </div>
     </div>
-    ${report.notes ? `<div style="clear:both;font-size:9px;color:#555;margin-top:6px"><strong>Notes:</strong> ${report.notes}</div>` : '<div style="clear:both"></div>'}
-    <div class="sig-block">
-      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-name">${report.createdBy||'&nbsp;'}</div><div class="sig-label">Prepared By</div></div>
-      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-name">${report.reviewedBy||'&nbsp;'}</div><div class="sig-label">Reviewed By</div></div>
-      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-name">${report.approvedBy||'&nbsp;'}</div><div class="sig-label">Approved By</div></div>
-      <div class="sig-col"><div class="sig-line" style="margin-top:28px"></div><div class="sig-label">Noted By</div></div>
-    </div>
+    ${report.notes ? `<div style="font-size:8.5px;color:#6b7280;margin-top:8px"><strong>Notes:</strong> ${report.notes}</div>` : ''}
   </body></html>`;
 }
 
 const STATUS_STYLES = {
-  'Draft':            { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
-  'Pending Review':   { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
-  'Pending Approval': { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
+  'Pending':          { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
+  'For Verification': { background:'#fffbeb', borderColor:'#fde68a', color:'#92400e' },
+  'Verified':         { background:'#f0fdf4', borderColor:'#86efac', color:'#166534' },
+  'For Approval':     { background:'#eff6ff', borderColor:'#bfdbfe', color:'#1d4ed8' },
   'Approved':         { background:'#ecfdf5', borderColor:'#6ee7b7', color:'#065f46' },
+  'Disbursed':        { background:'#f0f9ff', borderColor:'#7dd3fc', color:'#0369a1' },
   'Rejected':         { background:'#fef2f2', borderColor:'#fecaca', color:'#dc2626' },
   'Voided':           { background:'#f8fafc', borderColor:'#e2e8f0', color:'#94a3b8' },
 };
@@ -188,7 +312,7 @@ const CSS = `
   tr:last-child td { border-bottom:none; }
   .pill { display:inline-block; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid; white-space:nowrap; }
   .backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:100; }
-  .modal    { width:min(1100px,98vw); max-height:94vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
+  .modal    { width:min(1280px,98vw); max-height:94vh; background:#fff; border-radius:16px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.25); }
   .modal-sm { width:min(480px,98vw); }
   .modal-h  { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid #e5e7eb; background:#f8fafc; flex-shrink:0; }
   .modal-h strong { font-size:15px; font-weight:900; }
@@ -213,7 +337,8 @@ const CSS = `
   .toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; animation:fadeIn .2s; }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
   .expand-row td { background:#f8fafc; padding:16px 20px; }
-  .elig-check { display:flex; align-items:flex-start; gap:10px; padding:10px 14px; border-bottom:1px solid #f1f5f9; }
+  .elig-header { display:grid; grid-template-columns:24px 120px 58px 1fr 130px 150px 88px 110px; gap:8px; padding:7px 14px; background:#f8fafc; border-bottom:2px solid #e5e7eb; font-size:10px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:.05em; align-items:center; }
+  .elig-check  { display:grid; grid-template-columns:24px 120px 58px 1fr 130px 150px 88px 110px; gap:8px; padding:9px 14px; border-bottom:1px solid #f1f5f9; align-items:center; }
   .elig-check:last-child { border-bottom:none; }
   .elig-late  { background:#fffbeb; border-left:3px solid #f59e0b; }
   .bank-cards { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:4px; }
@@ -227,13 +352,17 @@ const CSS = `
   .summary-item { display:flex; flex-direction:column; }
   .summary-item-lbl { font-size:9px; font-weight:800; color:#94a3b8; text-transform:uppercase; letter-spacing:.06em; }
   .summary-item-val { font-size:14px; font-weight:900; color:#065f46; }
+  .km-item     { display:block; width:100%; background:none; border:0; text-align:left; padding:9px 16px; font-size:13px; font-family:inherit; cursor:pointer; color:#0b1220; white-space:nowrap; }
+  .km-item:hover { background:#f1f5f9; }
+  .km-item-danger { color:#dc2626; }
+  .km-divider { border:none; border-top:1px solid #f1f5f9; margin:4px 0; }
   .summary-item-val.neg { color:#dc2626; }
   .late-badge { display:inline-block; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:800; background:#fef3c7; color:#92400e; border:1px solid #fde68a; margin-left:8px; }
 `;
 
 function StatusPill({ status }) {
-  const s = STATUS_STYLES[status] || STATUS_STYLES['Draft'];
-  return <span className="pill" style={s}>{status || 'Draft'}</span>;
+  const s = STATUS_STYLES[status] || STATUS_STYLES['Pending'];
+  return <span className="pill" style={s}>{status || 'Pending'}</span>;
 }
 
 export default function DisbursementsPage() {
@@ -242,8 +371,10 @@ export default function DisbursementsPage() {
 
   const [reports,      setReports]      = useState([]);
   const [vouchers,     setVouchers]     = useState([]);
+  const [checkEntries, setCheckEntries] = useState([]); // checkRegister entries — loaded while modal is open
   const [bankAccounts, setBankAccounts] = useState([]); // COA accounts with subType='Bank'
   const [dailyBals,    setDailyBals]    = useState([]); // dailyBankBalances entries
+  const [profile,      setProfile]      = useState({});  // settings/profile
 
   // Filters
   const [search,       setSearch]       = useState('');
@@ -257,23 +388,76 @@ export default function DisbursementsPage() {
   // Expand
   const [expandId, setExpandId] = useState(null);
 
+  // Kebab menu
+  const [openMenuId,   setOpenMenuId]  = useState(null);
+  const [menuPos,      setMenuPos]     = useState({ top:0, right:0 });
+  const menuRef = useRef(null);
+
   // Modals
   const [showModal,    setShowModal]    = useState(false);
   const [editing,      setEditing]      = useState(null);
   const [statusModal,  setStatusModal]  = useState(null);
   const [viewModal,    setViewModal]    = useState(null);
   const [confirmModal, setConfirmModal] = useState(null);
+  const [viewMeta,     setViewMeta]     = useState({ preparedName:'', reviewedName:'', approvedName:'' });
+  const [viewRoute,    setViewRoute]    = useState({ verifierEmail:'', approverEmail:'', hasVerifier:false, isVerifier:false, isApprover:false, isMaker:false });
 
   // Form
   const [form,    setForm]    = useState({ date:today(), expectedCollection:0, notes:'' });
   const [drLines, setDrLines] = useState([]); // lines picked from eligible items
   // bankBals is derived live from dailyBals — no manual state needed
-  const [saving,  setSaving]  = useState(false);
-  const [toast,   setToast]   = useState('');
+  const [saving,     setSaving]     = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(null); // report id being downloaded
+  const [toast,      setToast]      = useState('');
 
   const showToast  = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
   const user = auth.currentUser?.email || '';
+
+  // Close kebab menu on outside click or scroll
+  useEffect(() => {
+    if (!openMenuId) return;
+    const close = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setOpenMenuId(null); };
+    const closeScroll = () => setOpenMenuId(null);
+    document.addEventListener('mousedown', close);
+    document.addEventListener('scroll', closeScroll, true);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('scroll', closeScroll, true); };
+  }, [openMenuId]);
+
+  // ── Resolve signatory display names when view modal opens ──────────────────
+  useEffect(() => {
+    if (!viewModal) {
+      setViewMeta({ preparedName:'', reviewedName:'', approvedName:'' });
+      setViewRoute({ verifierEmail:'', approverEmail:'', hasVerifier:false, isVerifier:false, isApprover:false, isMaker:false });
+      return;
+    }
+    const lookupName = async (email) => {
+      if (!email) return '';
+      const snap = await getDocs(query(collection(db,'appUsers'), where('email','==',email)));
+      const d = snap?.docs?.[0]?.data();
+      return d?.fullName || d?.displayName || email;
+    };
+    (async () => {
+      const [preparedName, reviewedName, approvedName, routingSnap] = await Promise.all([
+        lookupName(viewModal.createdBy  || ''),
+        lookupName(viewModal.reviewedBy || ''),
+        lookupName(viewModal.approvedBy || ''),
+        getDoc(doc(db,'settings','approvalRouting')),
+      ]);
+      setViewMeta({ preparedName, reviewedName, approvedName });
+      const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+      const route = routes.find(rt => rt.documentType === 'Disbursements' && rt.makerEmail === viewModal.createdBy) || null;
+      const verifierEmail = route?.verifierEmail || '';
+      const approverEmail = route?.approverEmail || '';
+      const hasVerifier = !!verifierEmail && !route?.autoBypass && verifierEmail !== viewModal.createdBy;
+      setViewRoute({
+        verifierEmail, approverEmail, hasVerifier,
+        isVerifier: isAdmin || user === verifierEmail,
+        isApprover: isAdmin || user === approverEmail,
+        isMaker: user === viewModal.createdBy,
+      });
+    })();
+  }, [viewModal?.id]);
 
   // ── Data loading ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -285,18 +469,36 @@ export default function DisbursementsPage() {
     // COA bank accounts (one-time)
     getDocs(query(collection(db,'accounts'), where('subType','==','Bank')))
       .then(s => setBankAccounts(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.code||'').localeCompare(b.code||''))));
+    // Company profile (logo, notedBy, etc.)
+    getDoc(doc(db,'settings','profile')).then(s => { if (s.exists()) setProfile(s.data()); });
     // Daily bank balances — live from Bank Management
     const unsubBals = onSnapshot(
       query(collection(db,'dailyBankBalances'), orderBy('date','desc')),
       snap => setDailyBals(snap.docs.map(d=>({id:d.id,...d.data()})))
     );
-    return () => { unsub(); unsubBals(); };
+    // Vouchers — only Approved or already-staged For Disbursement may be included in a DR
+    const unsubVouchers = onSnapshot(
+      query(collection(db,'vouchers'), where('status','in',
+        ['Approved','For Disbursement']
+      )),
+      s => setVouchers(s.docs.map(d => ({ id:d.id, ...d.data() })))
+    );
+    return () => { unsub(); unsubBals(); unsubVouchers(); };
   }, []);
 
-  // Refresh vouchers when the create/edit modal is opened (dailyBals is already live)
+  // Live subscriptions — active only while the create/edit modal is open
+  const checkUnsubRef   = useRef(null);
   const refreshModalData = () => {
-    getDocs(query(collection(db,'vouchers'), where('status','in',['Pending','Pending Review','Pending Approval','Approved','For Disbursement'])))
-      .then(s => setVouchers(s.docs.map(d => ({ id:d.id, ...d.data() }))));
+    if (checkUnsubRef.current) checkUnsubRef.current();
+    // Load Issued check register entries so CHECK vouchers expand per physical check
+    checkUnsubRef.current = onSnapshot(
+      query(collection(db,'checkRegister'), where('status','==','Issued')),
+      s => setCheckEntries(s.docs.map(d => ({ id:d.id, ...d.data() })))
+    );
+  };
+  const closeModal = () => {
+    if (checkUnsubRef.current) { checkUnsubRef.current(); checkUnsubRef.current = null; }
+    setShowModal(false);
   };
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -332,6 +534,8 @@ export default function DisbursementsPage() {
     vouchers.forEach(v => {
       const status = v.status || '';
       if (['Paid','Voided','Rejected'].includes(status)) return;
+      // Only fully-approved vouchers may enter a Disbursement Report
+      if (!['Approved','For Disbursement'].includes(status)) return;
       // Skip vouchers already in ANOTHER report
       if (status === 'For Disbursement' && v.disbursementRef && v.disbursementRef !== editingId) return;
 
@@ -366,8 +570,44 @@ export default function DisbursementsPage() {
           }
           eligible.push(item);
         });
+      } else if (v.voucherType === 'CHECK') {
+        // CHECK vouchers — expand into one item per physical check (from checkRegister).
+        // Checks connected to a Loan are excluded; the Loan Voucher covers those.
+        if (v.loanId) return;
+        const physicalChecks = checkEntries.filter(c => c.voucherDocId === v.id);
+        // No Issued checks in checkRegister means all checks were voided/deleted — skip entirely.
+        if (physicalChecks.length === 0) return;
+        physicalChecks.forEach(c => {
+            const checkDate = c.checkDate || c.issueDate || '';
+            // Only include checks whose date falls in the same month as the report.
+            // Other-month checks are skipped entirely — they don't belong to this disbursement.
+            if (checkDate) {
+              try {
+                const cd = new Date(checkDate + 'T00:00:00');
+                if (!isNaN(cd.getTime()) && (cd.getMonth() !== repMonth || cd.getFullYear() !== repYear)) return;
+              } catch { /* no-op */ }
+            }
+            const item = {
+              key:          `${v.voucherId||v.id}::chk-${c.id}`,
+              voucherId:    v.voucherId || v.id,
+              voucherDocId: v.id,
+              checkDocId:   c.id,
+              lineNo:       c.lineNo ?? null,
+              voucherType:  'CHECK',
+              contact:      c.payeeName || v.contactSummary || '',
+              description:  v.purposeCategory || '',
+              amount:       Number(c.amount) || 0,
+              bankCode:     c.bankCode || v.paymentFromAccountCode || '',
+              checkNo:      c.checkNumber || '',
+              checkDate,
+              loanId:       '',
+              isPayrollLine:false,
+              _preDisbStatus: v.preDisbursementStatus || v.status,
+            };
+            eligible.push(item);
+          });
       } else {
-        // Regular voucher (PAYMENT, LOAN, CHECK)
+        // PAYMENT, LOAN vouchers
         const item = {
           key:          `${v.voucherId||v.id}::`,
           voucherId:    v.voucherId || v.id,
@@ -397,7 +637,7 @@ export default function DisbursementsPage() {
     });
 
     return { eligible, late };
-  }, [vouchers, form.date, editing]);
+  }, [vouchers, checkEntries, form.date, editing]);
 
   // ── Computed totals ───────────────────────────────────────────────────────────
   const lineTotal      = drLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
@@ -436,7 +676,7 @@ export default function DisbursementsPage() {
     let r = [...reports];
     const q = search.toLowerCase();
     if (q) r = r.filter(x => (x.reportId||x.id||'').toLowerCase().includes(q) || (x.createdBy||'').toLowerCase().includes(q));
-    if (filterStatus) r = r.filter(x => (x.status||'Draft') === filterStatus);
+    if (filterStatus) r = r.filter(x => (x.status||'Pending') === filterStatus);
     if (dateFrom) r = r.filter(x => (x.date||'') >= dateFrom);
     if (dateTo)   r = r.filter(x => (x.date||'') <= dateTo);
     return r;
@@ -444,8 +684,8 @@ export default function DisbursementsPage() {
 
   const kpis = useMemo(() => ({
     total:    reports.length,
-    draft:    reports.filter(r => r.status === 'Draft').length,
-    pending:  reports.filter(r => ['Pending Review','Pending Approval'].includes(r.status)).length,
+    draft:    reports.filter(r => r.status === 'Pending').length,
+    pending:  reports.filter(r => ['For Verification','Verified','For Approval'].includes(r.status)).length,
     approved: reports.filter(r => r.status === 'Approved').length,
     totalAmt: reports.filter(r => !['Voided','Rejected'].includes(r.status)).reduce((s,r) => s+(Number(r.totalAmount)||0), 0),
   }), [reports]);
@@ -459,7 +699,7 @@ export default function DisbursementsPage() {
   const bulkSubmit = () => {
     if (!selected.size) return;
     askConfirm(`Submit ${selected.size} report(s) for approval?`, async () => {
-      await Promise.all([...selected].map(id => updateDoc(doc(db,'disbursementReports',id), { status:'Pending Review', updatedAt:serverTimestamp(), updatedBy:user })));
+      await Promise.all([...selected].map(id => updateDoc(doc(db,'disbursementReports',id), { status:'For Verification', updatedAt:serverTimestamp(), updatedBy:user })));
       setSelected(new Set()); showToast('Submitted for review.');
     });
   };
@@ -492,13 +732,30 @@ export default function DisbursementsPage() {
     refreshModalData();
     setEditing(r);
     setForm({ date:r.date||today(), expectedCollection:r.expectedCollection||0, notes:r.notes||'' });
-    // Pre-populate drLines from saved report lines
-    setDrLines((r.lines||[]).map(l => ({
-      ...l,
-      _key:     uid(),
-      _eligKey: `${l.voucherId}::${l.lineNo != null ? l.lineNo : ''}`,
-      _preDisbStatus: 'Approved', // will be resolved via voucher lookup on save
-    })));
+    // Pre-populate drLines from saved report lines, refreshing bankCode from live voucher data
+    setDrLines((r.lines||[]).map(l => {
+      const liveV = vouchers.find(v => (v.voucherId||v.id) === l.voucherId);
+      let currentBankCode = l.bankCode || '';
+      if (liveV) {
+        const vType = l.voucherType || liveV.voucherType || '';
+        if (PAYROLL_TYPES.includes(vType) && l.srcLineNo != null) {
+          const pl = (liveV.lines||[]).find(x => x.lineNo === l.srcLineNo);
+          currentBankCode = pl?.lineBankCode || liveV.paymentFromAccountCode || l.bankCode || '';
+        } else if (vType === 'CHECK') {
+          const chk = checkEntries.find(c => c.voucherDocId === liveV.id && (c.lineNo === l.srcLineNo || c.checkNumber === l.checkNo));
+          currentBankCode = chk?.bankCode || liveV.paymentFromAccountCode || l.bankCode || '';
+        } else {
+          currentBankCode = liveV.paymentFromAccountCode || l.bankCode || '';
+        }
+      }
+      return {
+        ...l,
+        bankCode:       currentBankCode,
+        _key:           uid(),
+        _eligKey:       `${l.voucherId}::${l.lineNo != null ? l.lineNo : ''}`,
+        _preDisbStatus: 'Approved',
+      };
+    }));
     setShowModal(true);
   };
 
@@ -530,7 +787,7 @@ export default function DisbursementsPage() {
         expectedCollection: Number(form.expectedCollection)||0,
         notes:              form.notes||'',
         bankBalances:       buildInitialBankBals(form.date),
-        status:             status || 'Draft',
+        status:             status || 'Pending',
         lines:              reportLines,
         updatedAt:          serverTimestamp(),
         updatedBy:          user,
@@ -586,7 +843,7 @@ export default function DisbursementsPage() {
         }).filter(Boolean));
         showToast('Report created.');
       }
-      setShowModal(false);
+      closeModal();
     } catch(e) { showToast('Error: ' + e.message); }
     setSaving(false);
   };
@@ -594,15 +851,15 @@ export default function DisbursementsPage() {
   // ── Status update ─────────────────────────────────────────────────────────────
   const doStatusUpdate = async () => {
     if (!statusModal) return;
-    const { report, newStatus, reason } = statusModal;
+    const { report, newStatus, reason, action } = statusModal;
     setSaving(true);
     try {
       const updateFields = {
         status: newStatus,
         ...(reason ? { rejectReason: reason } : {}),
-        ...(newStatus === 'Pending Review'   ? { reviewedBy: user }  : {}),
-        ...(newStatus === 'Pending Approval' ? { reviewedBy: user }  : {}),
-        ...(newStatus === 'Approved'         ? { approvedBy: user }  : {}),
+        ...(action === 'submit'  ? { rejectReason: '' }                  : {}),
+        ...(action === 'verify'  ? { reviewedBy: user, rejectReason: '' } : {}),
+        ...(action === 'approve' ? { approvedBy: user }                   : {}),
         updatedAt: serverTimestamp(), updatedBy: user,
       };
       await updateDoc(doc(db,'disbursementReports',report.id), updateFields);
@@ -662,6 +919,16 @@ export default function DisbursementsPage() {
     setSaving(false);
   };
 
+  // ── Routing-aware submit from row (kebab menu) ───────────────────────────────
+  const submitFromRow = async (r) => {
+    const routingSnap = await getDoc(doc(db,'settings','approvalRouting'));
+    const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+    const route = routes.find(rt => rt.documentType === 'Disbursements' && rt.makerEmail === r.createdBy) || null;
+    const verifierEmail = route?.verifierEmail || '';
+    const hasVerifier = !!verifierEmail && !route?.autoBypass && verifierEmail !== r.createdBy;
+    setStatusModal({ report:r, action:'submit', newStatus: hasVerifier ? 'For Verification' : 'For Approval', reason:null });
+  };
+
   // ── Delete report (reverts voucher statuses) ──────────────────────────────────
   const deleteReport = (r) => {
     askConfirm(`Delete report ${r.reportId||r.id}? Vouchers will be reverted.`, async () => {
@@ -714,24 +981,449 @@ export default function DisbursementsPage() {
   };
 
   // ── PDF export ────────────────────────────────────────────────────────────────
-  const openPdf = (r) => {
-    const html = buildPdfHtml(r, bankAccounts);
-    const win = window.open('', '_blank');
-    if (!win) { showToast('Pop-up blocked. Please allow pop-ups for this site.'); return; }
-    win.document.write(html);
-    win.document.close();
-    win.focus();
-    setTimeout(() => win.print(), 800);
+  const openPdf = async (r) => {
+    setPdfLoading(r.id);
+    try {
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' });
+
+      // Letter: 215.9 × 279.4 mm
+      const PW = 215.9, PH = 279.4;
+      const ML = 14, MR = 14, MT = 14;
+      const CW = PW - ML - MR; // ~187.9 mm
+
+      const reg  = (sz = 9)  => { pdf.setFont('helvetica', 'normal'); pdf.setFontSize(sz); };
+      const bold = (sz = 9)  => { pdf.setFont('helvetica', 'bold');   pdf.setFontSize(sz); };
+      const hline = (yy, lw = 0.2) => { pdf.setLineWidth(lw); pdf.setDrawColor(0, 0, 0); pdf.line(ML, yy, ML + CW, yy); };
+
+      let y = MT;
+      const need = (h) => { if (y + h > PH - 14) { pdf.addPage(); y = MT; } };
+
+      // ── HEADER ───────────────────────────────────────────────────────────────
+      // Resolve signatories via approval routing (same as VoucherPdfModal)
+      const lookupName = async (email) => {
+        if (!email) return '';
+        const snap = await getDocs(query(collection(db, 'appUsers'), where('email', '==', email)));
+        const data = snap?.docs?.[0]?.data();
+        return data?.fullName || data?.displayName || email;
+      };
+
+      const makerEmail = r.createdBy || '';
+      const routingSnap = await getDoc(doc(db, 'settings', 'approvalRouting'));
+      const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+      const route  = routes.find(rt => rt.documentType === 'Disbursements' && rt.makerEmail === makerEmail);
+      const verifierEmail = route?.verifierEmail || '';
+      const approverEmail = route?.approverEmail || '';
+
+      const [preparedName, reviewedName, approvedName] = await Promise.all([
+        lookupName(makerEmail),
+        lookupName(verifierEmail),
+        lookupName(approverEmail),
+      ]);
+      const notedByName = profile.voucherNotedBy || profile.notedBy || '';
+
+      // Logo or placeholder
+      let logoRightEdge = ML + 13;
+      if (profile.logoBase64) {
+        const imgFmt = (profile.logoBase64.match(/^data:image\/(\w+);/) || [])[1]?.toUpperCase() || 'PNG';
+        const imgEl  = new Image();
+        await new Promise(res => { imgEl.onload = res; imgEl.onerror = res; imgEl.src = profile.logoBase64; });
+        const MAX_W = 14, MAX_H = 10;
+        const asp  = (imgEl.naturalWidth || 1) / (imgEl.naturalHeight || 1);
+        const imgW = asp > MAX_W / MAX_H ? MAX_W : MAX_H * asp;
+        const imgH = asp > MAX_W / MAX_H ? MAX_W / asp : MAX_H;
+        pdf.addImage(profile.logoBase64, imgFmt, ML, y, imgW, imgH, '', 'FAST');
+        logoRightEdge = ML + imgW + 2;
+      } else {
+        pdf.setFillColor(249, 115, 22);
+        pdf.roundedRect(ML, y, 10, 10, 1, 1, 'F');
+        bold(11);
+        pdf.setTextColor(255, 255, 255);
+        pdf.text('W', ML + 5, y + 7.2, { align: 'center' });
+        pdf.setTextColor(0, 0, 0);
+        logoRightEdge = ML + 12;
+      }
+
+      bold(11);
+      pdf.setTextColor(0, 0, 0);
+      const companyName = profile.companyName || 'WORKSCALE';
+      pdf.text(companyName, logoRightEdge, y + 6);
+      if (!profile.logoBase64) {
+        bold(7);
+        pdf.setTextColor(249, 115, 22);
+        pdf.text('RESOURCES', logoRightEdge, y + 8.8);
+        pdf.setTextColor(0, 0, 0);
+      }
+
+      reg(8.5);
+      pdf.setTextColor(55, 65, 81);
+      const genDate = new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' });
+      pdf.text(`Report No:  ${r.reportId || r.id || '\u2014'}`, ML + CW, y + 3.5, { align: 'right' });
+      pdf.text(`Generated:  ${genDate}`, ML + CW, y + 8, { align: 'right' });
+      pdf.setTextColor(0, 0, 0);
+      y += 14;
+
+      // ── TITLE ────────────────────────────────────────────────────────────────
+      bold(14);
+      pdf.text('MASTER DISBURSEMENT REPORT', ML, y);
+      y += 2.5;
+      hline(y, 0.6);
+      y += 4;
+      reg(8.5);
+      pdf.setTextColor(85, 85, 85);
+      pdf.text(fmtDate(r.date) || '\u2014', ML, y);
+      pdf.setTextColor(0, 0, 0);
+      y += 9;
+
+      // ── Helpers ──────────────────────────────────────────────────────────────
+      const TH = 6.5; // table header height
+      const RH = 5.5; // row height
+      let cx = ML;
+
+      const secLabel = (text) => {
+        need(7);
+        pdf.setFillColor(229, 231, 235);
+        pdf.setDrawColor(200, 200, 200);
+        pdf.rect(ML, y, CW, 6, 'FD');
+        pdf.setDrawColor(0, 0, 0);
+        bold(8.5);
+        pdf.setTextColor(30, 41, 59);
+        pdf.text(text, ML + 4, y + 4.2);
+        pdf.setTextColor(0, 0, 0);
+        y += 6;
+      };
+
+      // ── SECTION 1: BANK ACCOUNT BALANCES ─────────────────────────────────────
+      secLabel('1. BANK ACCOUNT BALANCES');
+
+      const balCols = [CW * 0.40, CW * 0.20, CW * 0.22, CW * 0.18];
+
+      need(TH);
+      pdf.setFillColor(55, 65, 81);
+      pdf.setDrawColor(75, 85, 99);
+      pdf.rect(ML, y, CW, TH, 'FD');
+      bold(7.5);
+      pdf.setTextColor(255, 255, 255);
+      cx = ML;
+      ['BANK ACCOUNT', 'CURRENT BALANCE', 'LESS: DISBURSEMENTS', 'BALANCE AFTER'].forEach((h, i) => {
+        if (i === 0) pdf.text(h, cx + 3, y + 4.3);
+        else pdf.text(h, cx + balCols[i] - 2.5, y + 4.3, { align: 'right' });
+        cx += balCols[i];
+      });
+      pdf.setTextColor(0, 0, 0);
+      y += TH;
+
+      const lines = r.lines || [];
+      const bankBals = r.bankBalances || {};
+      const activeAccounts = bankAccounts.filter(a =>
+        bankBals[a.code] !== undefined || lines.some(l => l.bankCode === a.code)
+      );
+      let totalBal = 0, totalDisb = 0;
+
+      activeAccounts.forEach((acc, idx) => {
+        const bal  = Number(bankBals[acc.code]) || 0;
+        const disb = lines.filter(l => l.bankCode === acc.code).reduce((s, l) => s + (Number(l.amount) || 0), 0);
+        totalBal  += bal;
+        totalDisb += disb;
+        const after = bal - disb;
+
+        need(RH);
+        if (idx % 2 === 1) { pdf.setFillColor(248, 250, 252); pdf.rect(ML, y, CW, RH, 'F'); }
+        pdf.setDrawColor(209, 213, 219);
+        pdf.rect(ML, y, CW, RH, 'S');
+        pdf.setDrawColor(0, 0, 0);
+
+        cx = ML;
+        reg(8.5);
+        pdf.text(acc.name || acc.code, cx + 3, y + 3.8);
+        cx += balCols[0];
+        pdf.text(`P ${fmtN(bal)}`, cx + balCols[1] - 2.5, y + 3.8, { align: 'right' });
+        cx += balCols[1];
+        if (disb === 0) {
+          pdf.text('\u2014', cx + balCols[2] / 2, y + 3.8, { align: 'center' });
+        } else {
+          pdf.setTextColor(220, 38, 38);
+          pdf.text(`(P ${fmtN(disb)})`, cx + balCols[2] - 2.5, y + 3.8, { align: 'right' });
+          pdf.setTextColor(0, 0, 0);
+        }
+        cx += balCols[2];
+        if (after < 0) {
+          pdf.setTextColor(220, 38, 38);
+          pdf.text(`(P ${fmtN(Math.abs(after))})`, cx + balCols[3] - 2.5, y + 3.8, { align: 'right' });
+          pdf.setTextColor(0, 0, 0);
+        } else {
+          pdf.text(`P ${fmtN(after)}`, cx + balCols[3] - 2.5, y + 3.8, { align: 'right' });
+        }
+        y += RH;
+      });
+
+      lines.forEach(l => { if (!activeAccounts.find(a => a.code === l.bankCode)) totalDisb += (Number(l.amount) || 0); });
+      const expColl  = Number(r.expectedCollection) || 0;
+      const balAfter = totalBal + expColl - totalDisb;
+
+      // TOTAL row
+      need(RH + 2);
+      hline(y, 0.5);
+      pdf.setFillColor(243, 244, 246);
+      pdf.setDrawColor(209, 213, 219);
+      pdf.rect(ML, y, CW, RH + 2, 'FD');
+      pdf.setDrawColor(0, 0, 0);
+      bold(8.5);
+      cx = ML;
+      pdf.text('TOTAL', cx + 3, y + 5);
+      cx += balCols[0];
+      pdf.text(`P ${fmtN(totalBal)}`, cx + balCols[1] - 2.5, y + 5, { align: 'right' });
+      cx += balCols[1];
+      if (totalDisb === 0) {
+        pdf.text('\u2014', cx + balCols[2] / 2, y + 5, { align: 'center' });
+      } else {
+        pdf.setTextColor(220, 38, 38);
+        pdf.text(`(P ${fmtN(totalDisb)})`, cx + balCols[2] - 2.5, y + 5, { align: 'right' });
+        pdf.setTextColor(0, 0, 0);
+      }
+      cx += balCols[2];
+      if (balAfter < 0) {
+        pdf.setTextColor(220, 38, 38);
+        pdf.text(`(P ${fmtN(Math.abs(balAfter))})`, cx + balCols[3] - 2.5, y + 5, { align: 'right' });
+        pdf.setTextColor(0, 0, 0);
+      } else {
+        pdf.text(`P ${fmtN(balAfter)}`, cx + balCols[3] - 2.5, y + 5, { align: 'right' });
+      }
+      y += RH + 2 + 7;
+
+      // ── SECTION 2: DISBURSEMENTS ──────────────────────────────────────────────
+      secLabel('2. DISBURSEMENTS');
+
+      const repDate = r.date ? new Date(r.date + 'T00:00:00') : null;
+      const mainLines = lines.filter(l => {
+        if (!repDate || !l.checkDate) return true;
+        try {
+          const cd = new Date(l.checkDate + 'T00:00:00');
+          return isNaN(cd.getTime()) || (cd.getMonth() === repDate.getMonth() && cd.getFullYear() === repDate.getFullYear());
+        } catch { return true; }
+      });
+      const lateLines = repDate ? lines.filter(l => {
+        if (!l.checkDate) return false;
+        try {
+          const cd = new Date(l.checkDate + 'T00:00:00');
+          return !isNaN(cd.getTime()) && (cd.getMonth() !== repDate.getMonth() || cd.getFullYear() !== repDate.getFullYear());
+        } catch { return false; }
+      }) : [];
+
+      // Disbursement table columns: VOUCHER NO. | PAYEE | DESCRIPTION | CHECK NO. | REF NO. | AMOUNT
+      const dCols = [CW * 0.13, CW * 0.21, CW * 0.28, CW * 0.12, CW * 0.12, CW * 0.14];
+
+      const drawDisbGroup = (bLines, bankName, isLate) => {
+        const GH = 5.5;
+        need(GH + TH + RH + 7);
+
+        // Group header
+        if (isLate) { pdf.setFillColor(254, 252, 232); pdf.setDrawColor(253, 230, 138); }
+        else        { pdf.setFillColor(249, 250, 251); pdf.setDrawColor(209, 213, 219); }
+        pdf.rect(ML, y, CW, GH, 'FD');
+        bold(8);
+        pdf.setTextColor(isLate ? 146 : 55, isLate ? 64 : 65, isLate ? 14 : 81);
+        pdf.text((isLate ? 'From: ' : 'DISBURSEMENTS FROM: ') + bankName.toUpperCase(), ML + 4, y + 3.8);
+        pdf.setTextColor(0, 0, 0);
+        pdf.setDrawColor(0, 0, 0);
+        y += GH;
+
+        // Column headers
+        need(TH);
+        pdf.setFillColor(55, 65, 81);
+        pdf.setDrawColor(75, 85, 99);
+        pdf.rect(ML, y, CW, TH, 'FD');
+        bold(7);
+        pdf.setTextColor(255, 255, 255);
+        cx = ML;
+        ['VOUCHER NO.', 'PAYEE', 'DESCRIPTION', 'CHECK NO.', 'REF NO.', 'AMOUNT'].forEach((h, i) => {
+          if (i < 3) pdf.text(h, cx + 2.5, y + 4.3);
+          else       pdf.text(h, cx + dCols[i] - 2.5, y + 4.3, { align: 'right' });
+          cx += dCols[i];
+        });
+        pdf.setTextColor(0, 0, 0);
+        y += TH;
+
+        let sub = 0;
+        bLines.forEach((l, idx) => {
+          need(RH);
+          if (idx % 2 === 1) { pdf.setFillColor(248, 250, 252); pdf.rect(ML, y, CW, RH, 'F'); }
+          pdf.setDrawColor(209, 213, 219);
+          pdf.rect(ML, y, CW, RH, 'S');
+          pdf.setDrawColor(0, 0, 0);
+
+          cx = ML;
+          reg(7.5);
+          pdf.setTextColor(194, 65, 12);
+          pdf.text(l.voucherId || '\u2014', cx + 2, y + 3.8);
+          pdf.setTextColor(0, 0, 0);
+          cx += dCols[0];
+
+          pdf.text(pdf.splitTextToSize(l.contact || '\u2014', dCols[1] - 4)[0], cx + 2, y + 3.8);
+          cx += dCols[1];
+
+          pdf.text(pdf.splitTextToSize(l.description || l.voucherType || '\u2014', dCols[2] - 4)[0], cx + 2, y + 3.8);
+          cx += dCols[2];
+
+          pdf.text(l.checkNo || '\u2014', cx + dCols[3] - 2.5, y + 3.8, { align: 'right' });
+          cx += dCols[3];
+          pdf.text(l.refNo || '\u2014', cx + dCols[4] - 2.5, y + 3.8, { align: 'right' });
+          cx += dCols[4];
+
+          bold(7.5);
+          pdf.text(`P ${fmtN(l.amount)}`, cx + dCols[5] - 2.5, y + 3.8, { align: 'right' });
+
+          sub += Number(l.amount) || 0;
+          y += RH;
+        });
+
+        // Subtotal row
+        need(RH + 1);
+        pdf.setFillColor(249, 250, 251);
+        pdf.setDrawColor(209, 213, 219);
+        pdf.rect(ML, y, CW, RH + 1, 'FD');
+        bold(8);
+        pdf.text('Subtotal', ML + CW - dCols[dCols.length - 1] - 4, y + 4.2, { align: 'right' });
+        pdf.text(`P ${fmtN(sub)}`, ML + CW - 2.5, y + 4.2, { align: 'right' });
+        pdf.setDrawColor(0, 0, 0);
+        y += RH + 1;
+
+        // "Total for [bank]" line
+        need(6);
+        reg(8);
+        pdf.setTextColor(55, 65, 81);
+        pdf.text(`Total for ${bankName}:`, ML + CW - dCols[dCols.length - 1] - 4, y + 3.8, { align: 'right' });
+        bold(8);
+        pdf.text(`P ${fmtN(sub)}`, ML + CW - 2.5, y + 3.8, { align: 'right' });
+        pdf.setTextColor(0, 0, 0);
+        y += 7;
+      };
+
+      // Main disbursement groups
+      const groups = {};
+      mainLines.forEach(l => { const k = l.bankCode || 'OTHER'; if (!groups[k]) groups[k] = []; groups[k].push(l); });
+      Object.entries(groups).forEach(([bankCode, bLines]) => {
+        const acc = bankAccounts.find(a => a.code === bankCode);
+        drawDisbGroup(bLines, acc ? acc.name : bankCode, false);
+      });
+
+      // Late approvals
+      if (lateLines.length > 0) {
+        need(9);
+        pdf.setFillColor(255, 251, 235);
+        pdf.setDrawColor(252, 211, 77);
+        pdf.rect(ML, y, CW, 7, 'FD');
+        bold(9);
+        pdf.setTextColor(146, 64, 14);
+        pdf.text('\u25BA FOR LATE APPROVALS', ML + 4, y + 4.8);
+        pdf.setTextColor(0, 0, 0);
+        pdf.setDrawColor(0, 0, 0);
+        y += 9;
+
+        const lateGroups = {};
+        lateLines.forEach(l => { const k = l.bankCode || 'OTHER'; if (!lateGroups[k]) lateGroups[k] = []; lateGroups[k].push(l); });
+        Object.entries(lateGroups).forEach(([bankCode, bLines]) => {
+          const acc = bankAccounts.find(a => a.code === bankCode);
+          drawDisbGroup(bLines, acc ? acc.name : bankCode, true);
+        });
+      }
+
+      // ── FOOTER ───────────────────────────────────────────────────────────────
+      need(44);
+      y += 8;
+
+      const sigLabels = ['Prepared by', 'Reviewed by', 'Approved by', 'Noted by'];
+      const sigNames  = [preparedName, reviewedName, approvedName, notedByName];
+      const sigW = (CW * 0.58) / 4;
+
+      bold(8);
+      pdf.setTextColor(30, 41, 59);
+      sigLabels.forEach((lbl, i) => pdf.text(lbl, ML + i * sigW + sigW / 2, y, { align: 'center' }));
+      y += 18;
+
+      pdf.setLineWidth(0.3);
+      pdf.setDrawColor(55, 65, 81);
+      sigLabels.forEach((_, i) => {
+        const x0 = ML + i * sigW;
+        pdf.line(x0, y, x0 + sigW - 3, y);
+        if (sigNames[i]) {
+          bold(7.5);
+          pdf.setTextColor(0, 0, 0);
+          const nLines = pdf.splitTextToSize(sigNames[i].toUpperCase(), sigW - 5);
+          nLines.slice(0, 2).forEach((nl, ni) => pdf.text(nl, x0 + (sigW - 3) / 2, y + 4 + ni * 3.5, { align: 'center' }));
+        }
+      });
+      pdf.setLineWidth(0.2);
+      pdf.setDrawColor(0, 0, 0);
+
+      // Summary box (right side)
+      const boxX = ML + CW * 0.62;
+      const boxW = CW * 0.38;
+      const boxStartY = y - 18 - 8;
+
+      pdf.setFillColor(55, 65, 81);
+      pdf.setDrawColor(55, 65, 81);
+      pdf.rect(boxX, boxStartY, boxW, 6.5, 'FD');
+      bold(8.5);
+      pdf.setTextColor(255, 255, 255);
+      pdf.text('SUMMARY', boxX + boxW / 2, boxStartY + 4.5, { align: 'center' });
+      pdf.setTextColor(0, 0, 0);
+
+      let bY = boxStartY + 6.5;
+      const sumRows = [
+        { label: 'Total Bank Balance (Before)', val: `P ${fmtN(totalBal)}`, red: false },
+        { label: 'Less: Total Disbursements',    val: totalDisb > 0 ? `(P ${fmtN(totalDisb)})` : `P ${fmtN(0)}`, red: totalDisb > 0 },
+        { label: 'Add: Expected Collection',     val: `P ${fmtN(expColl)}`, red: false },
+      ];
+      sumRows.forEach((row, idx) => {
+        if (idx % 2 === 1) { pdf.setFillColor(248, 250, 252); pdf.rect(boxX, bY, boxW, 6, 'F'); }
+        pdf.setDrawColor(209, 213, 219);
+        pdf.rect(boxX, bY, boxW, 6, 'S');
+        reg(7.5);
+        pdf.text(row.label, boxX + 3, bY + 4);
+        if (row.red) pdf.setTextColor(220, 38, 38);
+        pdf.text(row.val, boxX + boxW - 3, bY + 4, { align: 'right' });
+        pdf.setTextColor(0, 0, 0);
+        pdf.setDrawColor(0, 0, 0);
+        bY += 6;
+      });
+
+      // Total row
+      pdf.setLineWidth(0.5);
+      pdf.line(boxX, bY, boxX + boxW, bY);
+      pdf.setLineWidth(0.2);
+      pdf.setFillColor(243, 244, 246);
+      pdf.setDrawColor(55, 65, 81);
+      pdf.rect(boxX, bY, boxW, 7.5, 'FD');
+      pdf.setDrawColor(0, 0, 0);
+      bold(9);
+      pdf.text('Bank Balance After', boxX + 3, bY + 5.2);
+      if (balAfter < 0) {
+        pdf.setTextColor(220, 38, 38);
+        pdf.text(`(P ${fmtN(Math.abs(balAfter))})`, boxX + boxW - 3, bY + 5.2, { align: 'right' });
+        pdf.setTextColor(0, 0, 0);
+      } else {
+        pdf.text(`P ${fmtN(balAfter)}`, boxX + boxW - 3, bY + 5.2, { align: 'right' });
+      }
+
+      pdf.save(`${r.reportId || r.id}.pdf`);
+    } catch (e) {
+      showToast('PDF error: ' + e.message);
+      console.error('PDF generation error:', e);
+    } finally {
+      setPdfLoading(null);
+    }
   };
 
   // ── Status helpers ────────────────────────────────────────────────────────────
   const nextStatuses = (status) => {
-    if (status === 'Draft')            return ['Pending Review','Voided'];
-    if (status === 'Pending Review')   return ['Pending Approval','Rejected','Voided'];
-    if (status === 'Pending Approval') return ['Approved','Rejected','Voided'];
+    if (status === 'Pending')           return ['For Verification','Voided'];
+    if (status === 'For Verification') return ['Verified','Rejected','Voided'];
+    if (status === 'Verified')         return ['For Approval','Rejected','Voided'];
+    if (status === 'For Approval')     return ['Approved','Rejected','Voided'];
+    if (status === 'Approved')         return ['Disbursed','Voided'];
     return [];
   };
-  const canEdit = (r) => ['Draft','Pending Review'].includes(r.status||'Draft');
+  const canEdit = (r) => ['Pending','For Verification','Verified'].includes(r.status||'Pending');
 
   return (
     <div className="dp-wrap">
@@ -785,7 +1477,7 @@ export default function DisbursementsPage() {
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
           {[
             {label:'Total Reports',value:kpis.total,sub:'all disbursement reports',color:'#1d4ed8',bg:'#eff6ff',border:'#bfdbfe',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>},
-            {label:'Draft',value:kpis.draft,sub:'not yet submitted',color:'#64748b',bg:'#f8fafc',border:'#e2e8f0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>},
+            {label:'Pending',value:kpis.draft,sub:'not yet submitted',color:'#64748b',bg:'#f8fafc',border:'#e2e8f0',icon:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>},
           ].map(({label,value,sub,color,bg,border,icon})=>(
             <div key={label} style={{background:bg,border:`1px solid ${border}`,borderRadius:12,padding:'14px 15px'}}>
               <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
@@ -831,13 +1523,14 @@ export default function DisbursementsPage() {
               {filtered.length === 0 && <tr><td colSpan={8} className="empty">No disbursement reports found.</td></tr>}
               {filtered.map(r => {
                 const isExpanded = expandId === r.id;
+                const ns = nextStatuses(r.status||'Pending');
                 return [
-                  <tr key={r.id}>
+                  <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setViewModal(r)}>
                     <td style={{textAlign:'center'}} onClick={e=>e.stopPropagation()}>
                       <input type="checkbox" checked={selected.has(r.id)} onChange={()=>toggleSel(r.id)} />
                     </td>
-                    <td>
-                      <a style={{fontWeight:900,color:'#f97316',textDecoration:'underline',cursor:'pointer'}} onClick={()=>setExpandId(isExpanded?null:r.id)}>
+                    <td onClick={e=>e.stopPropagation()}>
+                      <a style={{fontWeight:900,color:'#f97316',textDecoration:'underline',cursor:'pointer'}} onClick={()=>setViewModal(r)}>
                         {r.reportId||r.id}
                       </a>
                     </td>
@@ -845,24 +1538,44 @@ export default function DisbursementsPage() {
                     <td>{r.bankCode||'MULTIPLE'}</td>
                     <td style={{textAlign:'right',fontWeight:700}}>{fmt(r.totalAmount)}</td>
                     <td style={{textAlign:'right'}}>{fmt(r.expectedCollection)}</td>
-                    <td><StatusPill status={r.status||'Draft'} /></td>
-                    <td style={{textAlign:'center'}}>
-                      <div style={{display:'flex',gap:4,justifyContent:'center'}}>
-                        <button className="btn btn-ghost btn-xs" onClick={()=>setViewModal(r)}>View</button>
-                        {canEdit(r) && <button className="btn btn-ghost btn-xs" onClick={()=>openEdit(r)}>Edit</button>}
-                        {(r.status==='Draft'||r.status==='Rejected') && (
-                          <button className="btn btn-ghost btn-xs" style={{color:'#1d4ed8',border:'1px solid #bfdbfe'}} onClick={()=>setStatusModal({report:r,newStatus:'Pending Review',reason:null})}>Submit</button>
+                    <td><StatusPill status={r.status||'Pending'} /></td>
+                    <td style={{textAlign:'center'}} onClick={e=>e.stopPropagation()}>
+                      <div style={{display:'inline-block'}} ref={openMenuId===r.id ? menuRef : null}>
+                        <button
+                          className="btn btn-ghost btn-xs"
+                          style={{fontWeight:900,letterSpacing:2,padding:'4px 10px',fontSize:15,lineHeight:1}}
+                          onClick={(e)=>{
+                            if (openMenuId===r.id) { setOpenMenuId(null); return; }
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                            setOpenMenuId(r.id);
+                          }}
+                          title="Actions"
+                        >···</button>
+                        {openMenuId === r.id && (
+                          <div style={{
+                            position:'fixed',right:menuPos.right,top:menuPos.top,zIndex:9999,
+                            background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,
+                            boxShadow:'0 8px 24px rgba(0,0,0,.12)',minWidth:160,padding:'4px 0',
+                          }}>
+                            <button className="km-item" onClick={()=>{setViewModal(r);setOpenMenuId(null);}}>View Details</button>
+                            {canEdit(r) && <button className="km-item" onClick={()=>{openEdit(r);setOpenMenuId(null);}}>Edit</button>}
+                            {(r.status==='Pending'||r.status==='Rejected') && (
+                              <button className="km-item" style={{color:'#1d4ed8'}} onClick={()=>{submitFromRow(r);setOpenMenuId(null);}}>Submit for Approval</button>
+                            )}
+                            {ns.filter(s=>s!=='For Verification').map(s=>(
+                              <button key={s} className={`km-item${s==='Rejected'||s==='Voided'?' km-item-danger':''}`}
+                                onClick={()=>{setStatusModal({report:r,action:'admin',newStatus:s,reason:s==='Rejected'?'':null});setOpenMenuId(null);}}>
+                                → {s}
+                              </button>
+                            ))}
+                            <hr className="km-divider" />
+                            <button className="km-item" disabled={!!pdfLoading} onClick={()=>{openPdf(r);setOpenMenuId(null);}}>{pdfLoading===r.id ? '⏳ Generating…' : 'Print / PDF'}</button>
+                            {(r.status||'Pending')==='Pending' && (
+                              <button className="km-item km-item-danger" onClick={()=>{deleteReport(r);setOpenMenuId(null);}}>Delete</button>
+                            )}
+                          </div>
                         )}
-                        {nextStatuses(r.status||'Draft').length > 0 && (
-                          <select className="input" style={{padding:'3px 6px',fontSize:11,borderRadius:8,cursor:'pointer'}}
-                            defaultValue=""
-                            onChange={e=>{ if(e.target.value){ const ns=e.target.value; e.target.value=''; if(ns==='Rejected') setStatusModal({report:r,newStatus:ns,reason:''}); else setStatusModal({report:r,newStatus:ns,reason:null}); } }}>
-                            <option value="" disabled>Update…</option>
-                            {nextStatuses(r.status||'Draft').map(s=><option key={s} value={s}>{s}</option>)}
-                          </select>
-                        )}
-                        {(r.status||'Draft')==='Draft' && <button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>deleteReport(r)}>🗑</button>}
-                        <button className="btn btn-ghost btn-xs" title="Print PDF" onClick={()=>openPdf(r)}>🖨</button>
                       </div>
                     </td>
                   </tr>,
@@ -870,7 +1583,7 @@ export default function DisbursementsPage() {
                     <tr key={r.id+'-exp'} className="expand-row">
                       <td colSpan={8}>
                         <div style={{marginBottom:8,fontSize:12,color:'#64748b'}}>
-                          <strong>Created by:</strong> {r.createdBy||'—'} &nbsp;|&nbsp; <strong>Reviewed by:</strong> {r.reviewedBy||'—'} &nbsp;|&nbsp; <strong>Approved by:</strong> {r.approvedBy||'—'}
+                          <strong>Created by:</strong> {r.createdBy||'—'} &nbsp;|&nbsp; <strong>Verified by:</strong> {r.reviewedBy||'—'} &nbsp;|&nbsp; <strong>Approved by:</strong> {r.approvedBy||'—'}
                           {r.rejectReason && <> &nbsp;|&nbsp; <span style={{color:'#dc2626'}}><strong>Reject Reason:</strong> {r.rejectReason}</span></>}
                         </div>
                         {(r.lines||[]).length > 0 ? (
@@ -907,11 +1620,11 @@ export default function DisbursementsPage() {
 
       {/* Create / Edit Modal */}
       {showModal && (
-        <div className="backdrop" onClick={()=>setShowModal(false)}>
+        <div className="backdrop" onClick={()=>closeModal()}>
           <div className="modal" onClick={e=>e.stopPropagation()}>
             <div className="modal-h">
               <strong>{editing ? `Edit Report — ${editing.reportId||editing.id}` : 'New Disbursement Report'}</strong>
-              <button className="btn btn-ghost btn-sm" onClick={()=>setShowModal(false)}>✕</button>
+              <button className="btn btn-ghost btn-sm" onClick={()=>closeModal()}>✕</button>
             </div>
             <div className="modal-b">
 
@@ -994,7 +1707,7 @@ export default function DisbursementsPage() {
               {/* ── Eligible Vouchers (same month) ── */}
               <div className="section-title">
                 <span>Eligible Vouchers — Same Month ({eligible.length})</span>
-                <span style={{fontSize:10,fontWeight:600,color:'#94a3b8'}}>Pending, Approved &amp; For Disbursement</span>
+                <span style={{fontSize:10,fontWeight:600,color:'#94a3b8'}}>Approved &amp; For Disbursement only</span>
                 {eligible.length > 0 && (
                   <button className="btn btn-ghost btn-xs" onClick={()=>{
                     const unchecked = eligible.filter(it => !drLines.some(l=>l._eligKey===it.key));
@@ -1011,22 +1724,43 @@ export default function DisbursementsPage() {
                   </div>
                 : (
                   <div style={{border:'1px solid #e5e7eb',borderRadius:12,overflow:'hidden',marginBottom:12}}>
+                    {/* header */}
+                    <div className="elig-header">
+                      <span/>
+                      <span>Voucher No.</span>
+                      <span>Type</span>
+                      <span>Payee</span>
+                      <span>Purpose</span>
+                      <span>Payment From</span>
+                      <span>Check Date</span>
+                      <span style={{textAlign:'right'}}>Amount</span>
+                    </div>
                     {eligible.map(item => {
-                      const checked = drLines.some(l=>l._eligKey===item.key);
+                      const checked  = drLines.some(l=>l._eligKey===item.key);
+                      const bankName = bankAccounts.find(a=>a.code===item.bankCode)?.name || item.bankCode || '—';
                       return (
                         <div key={item.key} className="elig-check" style={{background:checked?'#fff7ed':'#fff',cursor:'pointer'}} onClick={()=>toggleItem(item)}>
                           <input type="checkbox" checked={checked} readOnly style={{width:16,height:16,accentColor:'#f97316',flexShrink:0}} />
-                          <div style={{flex:1,fontSize:12}}>
-                            <strong style={{color:'#f97316'}}>{item.voucherId}</strong>
-                            {item.isPayrollLine && <span style={{marginLeft:6,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 5px',borderRadius:4,fontWeight:700}}>LINE {item.lineNo}</span>}
-                            <span style={{marginLeft:8,color:'#64748b',fontSize:11}}>{item.voucherType}</span>
-                            {item.loanId && <span style={{marginLeft:6,fontSize:10,background:'#fdf4ff',color:'#7c3aed',padding:'1px 5px',borderRadius:4,fontWeight:700,border:'1px solid #e9d5ff'}}>LOAN</span>}
-                            <span style={{marginLeft:8,color:'#0b1220'}}>{item.contact}</span>
-                            {item.description && <span style={{marginLeft:8,color:'#94a3b8',fontSize:11}}>{item.description}</span>}
+                          {/* Voucher No. */}
+                          <div style={{fontSize:12,overflow:'hidden'}}>
+                            <strong style={{color:'#f97316',whiteSpace:'nowrap'}}>{item.voucherId}</strong>
+                            {item.isPayrollLine && <span style={{marginLeft:4,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 4px',borderRadius:4,fontWeight:700}}>L{item.lineNo}</span>}
                           </div>
-                          <span style={{fontSize:11,color:'#64748b',marginRight:8}}>{item.bankCode||'—'}</span>
-                          {item.checkDate && <span style={{fontSize:11,color:'#94a3b8',marginRight:8}}>{item.checkDate}</span>}
-                          <span style={{fontWeight:700,minWidth:100,textAlign:'right',fontSize:13}}>{fmt(item.amount)}</span>
+                          {/* Type */}
+                          <div style={{fontSize:11,display:'flex',flexWrap:'wrap',gap:2}}>
+                            <span style={{color:'#64748b',fontWeight:600,whiteSpace:'nowrap'}}>{item.voucherType}</span>
+                            {item.loanId && <span style={{fontSize:10,background:'#fdf4ff',color:'#7c3aed',padding:'1px 4px',borderRadius:4,fontWeight:700,border:'1px solid #e9d5ff',whiteSpace:'nowrap'}}>LOAN</span>}
+                          </div>
+                          {/* Payee */}
+                          <span style={{fontSize:12,color:'#0b1220',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.contact||'—'}</span>
+                          {/* Purpose */}
+                          <span style={{fontSize:11,color:'#64748b',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.description||'—'}</span>
+                          {/* Payment From */}
+                          <span style={{fontSize:11,color:'#374151',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={bankName}>{bankName}</span>
+                          {/* Check Date */}
+                          <span style={{fontSize:11,color:'#94a3b8',whiteSpace:'nowrap'}}>{item.checkDate||'—'}</span>
+                          {/* Amount */}
+                          <span style={{fontWeight:700,textAlign:'right',fontSize:13,whiteSpace:'nowrap'}}>{fmt(item.amount)}</span>
                         </div>
                       );
                     })}
@@ -1047,21 +1781,38 @@ export default function DisbursementsPage() {
                   </button>
                 </div>
                 <div style={{border:'1px solid #fde68a',borderRadius:12,overflow:'hidden',marginBottom:12}}>
+                  {/* header */}
+                  <div className="elig-header" style={{background:'#fffbeb',borderBottom:'2px solid #fde68a'}}>
+                    <span/>
+                    <span>Voucher No.</span>
+                    <span>Type</span>
+                    <span>Payee</span>
+                    <span>Purpose</span>
+                    <span>Payment From</span>
+                    <span>Check Date</span>
+                    <span style={{textAlign:'right'}}>Amount</span>
+                  </div>
                   {late.map(item => {
-                    const checked = drLines.some(l=>l._eligKey===item.key);
+                    const checked  = drLines.some(l=>l._eligKey===item.key);
+                    const bankName = bankAccounts.find(a=>a.code===item.bankCode)?.name || item.bankCode || '—';
                     return (
                       <div key={item.key} className="elig-check elig-late" style={{background:checked?'#fefce8':'#fffbeb',cursor:'pointer'}} onClick={()=>toggleItem(item)}>
                         <input type="checkbox" checked={checked} readOnly style={{width:16,height:16,accentColor:'#f59e0b',flexShrink:0}} />
-                        <div style={{flex:1,fontSize:12}}>
-                          <strong style={{color:'#d97706'}}>{item.voucherId}</strong>
-                          {item.isPayrollLine && <span style={{marginLeft:6,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 5px',borderRadius:4,fontWeight:700}}>LINE {item.lineNo}</span>}
-                          <span style={{marginLeft:8,color:'#64748b',fontSize:11}}>{item.voucherType}</span>
-                          {item.loanId && <span style={{marginLeft:6,fontSize:10,background:'#fdf4ff',color:'#7c3aed',padding:'1px 5px',borderRadius:4,fontWeight:700,border:'1px solid #e9d5ff'}}>LOAN</span>}
-                          <span style={{marginLeft:8,color:'#0b1220'}}>{item.contact}</span>
+                        {/* Voucher No. */}
+                        <div style={{fontSize:12,overflow:'hidden'}}>
+                          <strong style={{color:'#d97706',whiteSpace:'nowrap'}}>{item.voucherId}</strong>
+                          {item.isPayrollLine && <span style={{marginLeft:4,fontSize:10,background:'#eff6ff',color:'#1d4ed8',padding:'1px 4px',borderRadius:4,fontWeight:700}}>L{item.lineNo}</span>}
                         </div>
-                        <span style={{fontSize:11,color:'#64748b',marginRight:8}}>{item.bankCode||'—'}</span>
-                        {item.checkDate && <span style={{fontSize:11,color:'#92400e',fontWeight:700,marginRight:8}}>{item.checkDate}</span>}
-                        <span style={{fontWeight:700,minWidth:100,textAlign:'right',fontSize:13}}>{fmt(item.amount)}</span>
+                        {/* Type */}
+                        <div style={{fontSize:11,display:'flex',flexWrap:'wrap',gap:2}}>
+                          <span style={{color:'#64748b',fontWeight:600,whiteSpace:'nowrap'}}>{item.voucherType}</span>
+                          {item.loanId && <span style={{fontSize:10,background:'#fdf4ff',color:'#7c3aed',padding:'1px 4px',borderRadius:4,fontWeight:700,border:'1px solid #e9d5ff',whiteSpace:'nowrap'}}>LOAN</span>}
+                        </div>
+                        <span style={{fontSize:12,color:'#0b1220',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.contact||'—'}</span>
+                        <span style={{fontSize:11,color:'#64748b',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.description||'—'}</span>
+                        <span style={{fontSize:11,color:'#374151',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={bankName}>{bankName}</span>
+                        <span style={{fontSize:11,color:'#92400e',fontWeight:700,whiteSpace:'nowrap'}}>{item.checkDate||'—'}</span>
+                        <span style={{fontWeight:700,textAlign:'right',fontSize:13,whiteSpace:'nowrap'}}>{fmt(item.amount)}</span>
                       </div>
                     );
                   })}
@@ -1074,10 +1825,12 @@ export default function DisbursementsPage() {
                   <div className="section-title"><span>Disbursement Lines ({drLines.length})</span></div>
                   <table className="lines-tbl" style={{fontSize:12,marginBottom:8}}>
                     <thead>
-                      <tr><th>#</th><th>Voucher ID</th><th>Type</th><th>Contact / Description</th><th>Bank</th><th>Check No.</th><th>Ref No.</th><th style={{textAlign:'right'}}>Amount</th><th></th></tr>
+                      <tr><th>#</th><th>Voucher ID</th><th>Type</th><th>Contact / Description</th><th>Bank</th><th>Check No.</th><th style={{textAlign:'right'}}>Amount</th><th></th></tr>
                     </thead>
                     <tbody>
-                      {drLines.map((l,i) => (
+                      {drLines.map((l,i) => {
+                        const bankName = bankAccounts.find(a=>a.code===l.bankCode)?.name || l.bankCode || '—';
+                        return (
                         <tr key={l._key}>
                           <td style={{color:'#94a3b8',fontWeight:700,width:32,textAlign:'center'}}>{i+1}</td>
                           <td style={{fontWeight:700,color:'#f97316'}}>
@@ -1086,13 +1839,13 @@ export default function DisbursementsPage() {
                           </td>
                           <td>{l.voucherType}</td>
                           <td style={{maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.contact||l.description||'—'}</td>
-                          <td style={{color:'#374151'}}>{l.bankCode ? `${l.bankCode}` : '—'}</td>
+                          <td style={{color:'#374151'}} title={bankName}>{bankName}</td>
                           <td style={{color:'#374151'}}>{l.checkNo||'—'}</td>
-                          <td style={{color:'#374151'}}>{l.refNo||'—'}</td>
                           <td style={{textAlign:'right',fontWeight:700,color:'#0b1220',paddingRight:8}}>{fmt(l.amount||0)}</td>
                           <td><button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>setDrLines(prev=>prev.filter(x=>x._key!==l._key))}>✕</button></td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                   <div className="tfoot-row">
@@ -1105,9 +1858,9 @@ export default function DisbursementsPage() {
               )}
             </div>
             <div className="modal-f">
-              <button className="btn btn-ghost" onClick={()=>setShowModal(false)}>Cancel</button>
-              <button className="btn btn-ghost" onClick={()=>saveReport('Draft')} disabled={saving}>Save Draft</button>
-              <button className="btn btn-primary" onClick={()=>saveReport('Pending Review')} disabled={saving}>{saving?'Saving…':'Submit for Approval'}</button>
+              <button className="btn btn-ghost" onClick={()=>closeModal()}>Cancel</button>
+              <button className="btn btn-ghost" onClick={()=>saveReport('Pending')} disabled={saving}>Save Draft</button>
+              <button className="btn btn-primary" onClick={()=>saveReport('For Verification')} disabled={saving}>{saving?'Saving…':'Submit for Approval'}</button>
             </div>
           </div>
         </div>
@@ -1120,21 +1873,61 @@ export default function DisbursementsPage() {
             <div className="modal-h">
               <strong>Disbursement Report — {viewModal.reportId||viewModal.id}</strong>
               <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                <StatusPill status={viewModal.status||'Draft'} />
+                <StatusPill status={viewModal.status||'Pending'} />
                 <button className="btn btn-ghost btn-sm" onClick={()=>setViewModal(null)}>✕</button>
               </div>
             </div>
             <div className="modal-b">
-              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:12,marginBottom:20}}>
-                {[['Date',viewModal.date],['Total Amount',fmt(viewModal.totalAmount)],['Expected Collection',fmt(viewModal.expectedCollection)],['Created By',viewModal.createdBy||'—'],['Reviewed By',viewModal.reviewedBy||'—'],['Approved By',viewModal.approvedBy||'—']].map(([k,v])=>(
+              {/* Status progress bar — same pattern as Vouchers */}
+              {(() => {
+                const DR_STEPS = ['Pending','For Verification','Verified','For Approval','Approved','Disbursed'];
+                const cur      = viewModal.status || 'Draft';
+                const stepIdx  = DR_STEPS.indexOf(cur); // -1 for Rejected/Voided
+                return (
+                  <div style={{ marginBottom: 18 }}>
+                    <div style={{ position: 'relative' }}>
+                      <div style={{ position:'absolute', top:10, left:`${100/DR_STEPS.length/2}%`, right:`${100/DR_STEPS.length/2}%`, height:2, background:'#e2e8f0', zIndex:0 }} />
+                      {stepIdx > 0 && (
+                        <div style={{ position:'absolute', top:10, left:`${100/DR_STEPS.length/2}%`, width:`calc(${stepIdx/(DR_STEPS.length-1)} * (100% - ${100/DR_STEPS.length}%))`, height:2, background:'#22c55e', zIndex:1, transition:'width .3s' }} />
+                      )}
+                      <div style={{ display:'flex', position:'relative', zIndex:2 }}>
+                        {DR_STEPS.map((s, i) => {
+                          const done    = stepIdx > i;
+                          const current = stepIdx === i;
+                          const bg = done ? '#22c55e' : current ? '#f97316' : '#e2e8f0';
+                          const tc = done || current ? '#fff' : '#94a3b8';
+                          return (
+                            <div key={s} style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center' }}>
+                              <div style={{ width:22, height:22, borderRadius:'50%', background:bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800, color:tc }}>
+                                {done ? '✓' : i + 1}
+                              </div>
+                              <div style={{ fontSize:9, marginTop:4, fontWeight: current ? 800 : 500, color: current ? '#f97316' : '#64748b', whiteSpace:'nowrap', textAlign:'center' }}>{s}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    {cur === 'Rejected' && viewModal.rejectReason && (
+                      <div style={{ marginTop:10, background:'#fef2f2', border:'1px solid #fecaca', borderRadius:8, padding:'8px 12px', fontSize:12 }}>
+                        <strong style={{ color:'#dc2626' }}>Reject Reason: </strong>{viewModal.rejectReason}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+              {/* Meta row */}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:20}}>
+                {[
+                  ['Date',           viewModal.date],
+                  ['Total Amount',   fmt(viewModal.totalAmount)],
+                  ['Exp. Collection',fmt(viewModal.expectedCollection)],
+                  ['Created By',     viewMeta.preparedName || viewModal.createdBy || '—'],
+                  ['Verified By',    viewModal.reviewedBy ? (viewMeta.reviewedName || viewModal.reviewedBy) : '—'],
+                  ['Approved By',    viewModal.approvedBy ? (viewMeta.approvedName || viewModal.approvedBy) : '—'],
+                ].map(([k,v])=>(
                   <div key={k}><div style={{fontSize:10,fontWeight:800,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:4}}>{k}</div><div style={{fontWeight:700}}>{v||'—'}</div></div>
                 ))}
               </div>
-              {viewModal.rejectReason && (
-                <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12,marginBottom:12}}>
-                  <strong style={{color:'#dc2626'}}>Reject Reason: </strong>{viewModal.rejectReason}
-                </div>
-              )}
               {/* Bank balances snapshot */}
               {viewModal.bankBalances && Object.keys(viewModal.bankBalances).length > 0 && (
                 <>
@@ -1171,7 +1964,7 @@ export default function DisbursementsPage() {
               )}
               <div className="section-title">
                 <span>Lines ({(viewModal.lines||[]).length})</span>
-                {canReviewOrApprove && ['Pending Review','Pending Approval'].includes(viewModal.status||'') && (
+                {canReviewOrApprove && ['For Verification','Verified','For Approval'].includes(viewModal.status||'') && (
                   <span style={{fontSize:10,color:'#94a3b8'}}>You can remove lines before approval</span>
                 )}
               </div>
@@ -1183,11 +1976,24 @@ export default function DisbursementsPage() {
                         <th>#</th><th>Voucher ID</th><th>Type</th><th>Contact</th>
                         <th>Bank</th><th>Check No.</th><th>Ref No.</th>
                         <th style={{textAlign:'right'}}>Amount</th>
-                        {canReviewOrApprove && ['Pending Review','Pending Approval'].includes(viewModal.status||'') && <th></th>}
+                        {canReviewOrApprove && ['For Verification','Verified','For Approval'].includes(viewModal.status||'') && <th></th>}
                       </tr>
                     </thead>
                     <tbody>
-                      {(viewModal.lines||[]).map((l,i)=>(
+                      {(viewModal.lines||[]).map((l,i)=>{
+                        const liveV    = vouchers.find(v=>(v.voucherId||v.id)===l.voucherId);
+                        const vType    = l.voucherType || liveV?.voucherType || '';
+                        let liveCode   = l.bankCode || '';
+                        if (liveV) {
+                          if (PAYROLL_TYPES.includes(vType) && l.srcLineNo != null) {
+                            const pl = (liveV.lines||[]).find(x=>x.lineNo===l.srcLineNo);
+                            liveCode = pl?.lineBankCode || liveV.paymentFromAccountCode || l.bankCode || '';
+                          } else if (vType !== 'CHECK') {
+                            liveCode = liveV.paymentFromAccountCode || l.bankCode || '';
+                          }
+                        }
+                        const bankName = liveCode ? (bankAccounts.find(a=>a.code===liveCode)?.name || liveCode) : '—';
+                        return (
                         <tr key={i}>
                           <td>{l.lineNo||i+1}</td>
                           <td style={{fontWeight:700,color:'#f97316'}}>
@@ -1196,31 +2002,69 @@ export default function DisbursementsPage() {
                           </td>
                           <td>{l.voucherType||'—'}</td>
                           <td>{l.contact||'—'}</td>
-                          <td>{l.bankCode||'—'}</td>
+                          <td>{bankName}</td>
                           <td>{l.checkNo||'—'}</td>
                           <td>{l.refNo||'—'}</td>
                           <td style={{textAlign:'right',fontWeight:700}}>{fmt(l.amount)}</td>
-                          {canReviewOrApprove && ['Pending Review','Pending Approval'].includes(viewModal.status||'') && (
+                          {canReviewOrApprove && ['For Verification','Verified','For Approval'].includes(viewModal.status||'') && (
                             <td>
                               <button className="btn btn-ghost btn-xs" style={{color:'#dc2626'}} onClick={()=>removeLine(i)}>Remove</button>
                             </td>
                           )}
                         </tr>
-                      ))}
-                      <tr><td colSpan={canReviewOrApprove&&['Pending Review','Pending Approval'].includes(viewModal.status||'')?8:7} style={{textAlign:'right',fontWeight:800,color:'#64748b',fontSize:12}}>TOTAL</td><td style={{textAlign:'right',fontWeight:900}}>{fmt(viewModal.totalAmount)}</td></tr>
+                        );
+                      })}
+                      <tr><td colSpan={canReviewOrApprove&&['For Verification','Verified','For Approval'].includes(viewModal.status||'')?8:7} style={{textAlign:'right',fontWeight:800,color:'#64748b',fontSize:12}}>TOTAL</td><td style={{textAlign:'right',fontWeight:900}}>{fmt(viewModal.totalAmount)}</td></tr>
                     </tbody>
                   </table>
               }
               {viewModal.notes && <div style={{marginTop:10,fontSize:12,color:'#64748b'}}><strong>Notes:</strong> {viewModal.notes}</div>}
             </div>
             <div className="modal-f">
-              <button className="btn btn-ghost btn-sm" onClick={()=>openPdf(viewModal)}>🖨 Print PDF</button>
+              <button className="btn btn-ghost btn-sm" disabled={pdfLoading===viewModal?.id} onClick={()=>openPdf(viewModal)}>{pdfLoading===viewModal?.id ? '⏳ Generating…' : '🖨 Print PDF'}</button>
               {canEdit(viewModal) && <button className="btn btn-ghost" onClick={()=>{setViewModal(null);openEdit(viewModal);}}>Edit</button>}
-              {(viewModal.status==='Draft'||viewModal.status==='Rejected') && (
+              {/* Maker: submit Pending or Rejected */}
+              {['Pending','Rejected'].includes(viewModal.status||'Pending') && (viewRoute.isMaker || isAdmin) && (
                 <button className="btn btn-primary btn-sm" onClick={()=>{
                   setViewModal(null);
-                  setStatusModal({report:viewModal,newStatus:'Pending Review',reason:null});
+                  setStatusModal({ report:viewModal, action:'submit', newStatus: viewRoute.hasVerifier ? 'For Verification' : 'For Approval', reason:null });
                 }}>Submit for Approval</button>
+              )}
+              {/* Verifier: verify / reject */}
+              {viewModal.status === 'For Verification' && (viewRoute.isVerifier || isAdmin) && (<>
+                <button className="btn btn-primary btn-sm" style={{background:'#16a34a'}} onClick={()=>{
+                  setViewModal(null);
+                  setStatusModal({ report:viewModal, action:'verify', newStatus:'Verified', reason:null });
+                }}>✓ Verify</button>
+                <button className="btn btn-ghost btn-sm" style={{color:'#dc2626',border:'1px solid #fecaca'}} onClick={()=>{
+                  setViewModal(null);
+                  setStatusModal({ report:viewModal, action:'reject', newStatus:'Rejected', reason:'' });
+                }}>✗ Reject</button>
+              </>)}
+              {/* Verifier (or admin): forward Verified → For Approval */}
+              {viewModal.status === 'Verified' && (viewRoute.isVerifier || isAdmin) && (
+                <button className="btn btn-primary btn-sm" onClick={()=>{
+                  setViewModal(null);
+                  setStatusModal({ report:viewModal, action:'forward', newStatus:'For Approval', reason:null });
+                }}>→ Forward for Approval</button>
+              )}
+              {/* Approver: approve / reject */}
+              {viewModal.status === 'For Approval' && (viewRoute.isApprover || isAdmin) && (<>
+                <button className="btn btn-primary btn-sm" style={{background:'#16a34a'}} onClick={()=>{
+                  setViewModal(null);
+                  setStatusModal({ report:viewModal, action:'approve', newStatus:'Approved', reason:null });
+                }}>✓ Approve</button>
+                <button className="btn btn-ghost btn-sm" style={{color:'#dc2626',border:'1px solid #fecaca'}} onClick={()=>{
+                  setViewModal(null);
+                  setStatusModal({ report:viewModal, action:'reject', newStatus:'Rejected', reason:'' });
+                }}>✗ Reject</button>
+              </>)}
+              {/* Approver (or admin): mark disbursed */}
+              {viewModal.status === 'Approved' && (viewRoute.isApprover || isAdmin) && (
+                <button className="btn btn-primary btn-sm" style={{background:'#0ea5e9'}} onClick={()=>{
+                  setViewModal(null);
+                  setStatusModal({ report:viewModal, action:'disburse', newStatus:'Disbursed', reason:null });
+                }}>✓ Mark as Disbursed</button>
               )}
               <button className="btn btn-ghost" onClick={()=>setViewModal(null)}>Close</button>
             </div>
@@ -1232,7 +2076,15 @@ export default function DisbursementsPage() {
         <div className="backdrop" onClick={()=>setStatusModal(null)}>
           <div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
             <div className="modal-h">
-              <strong>Update Status → {statusModal.newStatus}</strong>
+              <strong>
+                {statusModal.action==='verify'   ? 'Verify Report' :
+                 statusModal.action==='forward'  ? 'Forward for Approval' :
+                 statusModal.action==='approve'  ? 'Approve Report' :
+                 statusModal.action==='disburse' ? 'Mark as Disbursed' :
+                 statusModal.action==='reject'   ? 'Reject Report' :
+                 statusModal.action==='submit'   ? 'Submit for Approval' :
+                 `Update Status → ${statusModal.newStatus}`}
+              </strong>
               <button className="btn btn-ghost btn-sm" onClick={()=>setStatusModal(null)}>✕</button>
             </div>
             <div className="modal-b">
@@ -1246,8 +2098,15 @@ export default function DisbursementsPage() {
             </div>
             <div className="modal-f">
               <button className="btn btn-ghost" onClick={()=>setStatusModal(null)}>Cancel</button>
-              <button className="btn btn-primary" onClick={doStatusUpdate} disabled={saving||(statusModal.newStatus==='Rejected'&&!statusModal.reason?.trim())}>
-                {saving?'Saving…':`Confirm — ${statusModal.newStatus}`}
+              <button className="btn btn-primary" style={statusModal.action==='reject'?{background:'#dc2626'}:{}} onClick={doStatusUpdate} disabled={saving||(statusModal.newStatus==='Rejected'&&!statusModal.reason?.trim())}>
+                {saving?'Saving…':
+                 statusModal.action==='verify'   ? 'Confirm Verify' :
+                 statusModal.action==='forward'  ? 'Confirm Forward' :
+                 statusModal.action==='approve'  ? 'Confirm Approve' :
+                 statusModal.action==='disburse' ? 'Confirm Disbursed' :
+                 statusModal.action==='reject'   ? 'Confirm Reject' :
+                 statusModal.action==='submit'   ? 'Confirm Submit' :
+                 `Confirm — ${statusModal.newStatus}`}
               </button>
             </div>
           </div>

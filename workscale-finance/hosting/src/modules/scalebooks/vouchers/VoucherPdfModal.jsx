@@ -58,7 +58,7 @@ const MODAL_CSS = `
 `;
 
 // ── Component ─────────────────────────────────────────────────────────────
-export default function VoucherPdfModal({ voucher, onClose }) {
+export default function VoucherPdfModal({ voucher, onClose, autoDownload = false }) {
   const [jeLines,        setJeLines]        = useState([]);
   const [profile,        setProfile]        = useState({});
   const [preparedByName, setPreparedByName] = useState('');
@@ -107,6 +107,13 @@ export default function VoucherPdfModal({ voucher, onClose }) {
     load();
     return () => { cancelled = true; };
   }, [voucher.id, voucher.linkedJeId, voucher.createdBy]);
+
+  // Auto-download: trigger as soon as data is loaded, then close
+  useEffect(() => {
+    if (!autoDownload || loading) return;
+    handleDownload().then(() => onClose());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoDownload, loading]);
 
   // ── Programmatic jsPDF generation (vector text + lines, no screenshot) ─────
   const handleDownload = async () => {
@@ -340,6 +347,8 @@ export default function VoucherPdfModal({ voucher, onClose }) {
   const typeLabel   = TYPE_LABELS[voucher.voucherType] || voucher.voucherType || 'Payment Voucher';
   const totalDebit  = jeLines.reduce((s, l) => s + (Number(l.debit)  || 0), 0);
   const totalCredit = jeLines.reduce((s, l) => s + (Number(l.credit) || 0), 0);
+
+  if (autoDownload) return null;
 
   return (
     <>

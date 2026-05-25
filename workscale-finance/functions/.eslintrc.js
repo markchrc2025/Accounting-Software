@@ -14,7 +14,12 @@ module.exports = {
     "no-restricted-globals": ["error", "name", "length"],
     "prefer-arrow-callback": "error",
     "quotes": ["error", "double", {"allowTemplateLiterals": true}],
+    "max-len": "off",
+    "require-jsdoc": "off",
+    "valid-jsdoc": "off",
+    "no-unused-vars": "warn",
   },
+  ignorePatterns: ["restore-appusers.js"],
   overrides: [
     {
       files: ["**/*.spec.*"],

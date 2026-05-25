@@ -2,9 +2,10 @@ import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc,
-  doc, serverTimestamp, writeBatch, getDocs, getDoc,
+  doc, serverTimestamp, writeBatch, getDocs, getDoc, limit,
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
 import { nextCheckVoucherId, nextJournalEntryId } from '../../../utils/documentIds.js';
@@ -44,10 +45,23 @@ const fmtN  = n => new Intl.NumberFormat('en-PH', { minimumFractionDigits:2, max
 
 const EMPTY_LINE = () => ({
   id: uid(),
+  checkGroupId: '',
   contactId:'', contact:'', expenseAccount:'', description:'',
   amount:'', taxRateId:'', taxType:'N/A', taxRate:0, taxAmt:0, inclusive:false,
   lineCheckNo:'', lineCheckDate:'',
 });
+
+// Creates a new physical check entry (one initial sub-line) for Multiple Checks mode
+const EMPTY_CHECK_GROUP = (checkNo = '', checkDate = '') => {
+  const groupId = uid();
+  return [{
+    id: uid(), checkGroupId: groupId,
+    contactId: '', contact: '',
+    lineCheckNo: checkNo, lineCheckDate: checkDate,
+    expenseAccount: '', description: '',
+    amount: '', taxRateId: '', taxType: 'N/A', taxRate: 0, taxAmt: 0, inclusive: false,
+  }];
+};
 
 const CSS = `
   .cr-wrap    { display:flex; flex-direction:column; height:100%; overflow:hidden; font-family:Inter,system-ui,sans-serif; background:#f8fafc; }
@@ -106,12 +120,21 @@ const CSS = `
   .jnl-tbl th,.jnl-tbl td { padding:8px 12px; border-bottom:1px solid #e5e7eb; }
   .jnl-tbl th { background:#f1f5f9; font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:.05em; }
   .jnl-tbl tfoot td { background:#f1f5f9; font-weight:800; border-top:2px solid #e2e8f0; }
-  .toast      { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:999; }
+  .toast         { position:fixed; top:20px; left:50%; transform:translateX(-50%); color:#fff; padding:12px 24px; border-radius:12px; font-size:13px; font-weight:600; z-index:9999; box-shadow:0 4px 20px rgba(0,0,0,.25); white-space:nowrap; animation:toast-in .18s ease; }
+  .toast-success  { background:#16a34a; }
+  .toast-error    { background:#dc2626; }
+  .toast-info     { background:#0b1220; }
+  @keyframes toast-in { from { opacity:0; transform:translateX(-50%) translateY(-10px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
   .bulk-bar   { display:flex; align-items:center; gap:10px; padding:8px 14px; background:#fff7ed; border:1px solid #fed7aa; border-radius:10px; margin-bottom:10px; flex-wrap:wrap; }
   @media(max-width:640px) { .kpi-row{grid-template-columns:repeat(3,1fr);} }
 `;
 
 export default function CheckRegistryPage() {
+  const { can } = usePermissions();
+  const cvCanMake    = can('Check Registry', 'Maker');
+  const cvCanVerify  = can('Check Registry', 'Verifier');
+  const cvCanApprove = can('Check Registry', 'Approver');
+
   // ── State ──────────────────────────────────────────────────────────────────
   const [checks,     setChecks]     = useState([]);
   const [checkbooks, setCheckbooks] = useState([]);
@@ -124,8 +147,9 @@ export default function CheckRegistryPage() {
   const [loans,          setLoans]          = useState([]);
 
   const [activeTab,    setActiveTab]    = useState('register');
-  const [cvModal,      setCvModal]      = useState(null);
-  const [cvPdfModal,   setCvPdfModal]   = useState(null);
+  const [cvModal,        setCvModal]        = useState(null);
+  const [cvPdfModal,     setCvPdfModal]     = useState(null);
+  const [cvDetailsModal, setCvDetailsModal] = useState(null); // { voucher, relatedChecks }
   const [cbModal,      setCbModal]      = useState(null);
   const [markModal,    setMarkModal]    = useState(null); // { referenceId, items:[{...check,newStatus,...}] }
   const [openMenu,     setOpenMenu]     = useState(null); // null or { id, top, right }
@@ -140,14 +164,14 @@ export default function CheckRegistryPage() {
   const [analyticsBucket, setAnalyticsBucket] = useState('month'); // 'week' | 'month' | 'year'
   const [analyticsBank,   setAnalyticsBank]   = useState('');
   const [saving,       setSaving]       = useState(false);
-  const [toast,        setToast]        = useState('');
+  const [toast,        setToast]        = useState(null); // { msg, type }
   const [selected,     setSelected]     = useState(new Set());
 
   // Check Voucher form state
   const [cvForm,  setCvForm]  = useState({});
   const [cvLines, setCvLines] = useState([EMPTY_LINE()]);
 
-  const showToast  = msg => { setToast(msg); setTimeout(() => setToast(''), 3200); };
+  const showToast  = (msg, type = 'success') => { setToast({ msg, type }); setTimeout(() => setToast(null), 3200); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
   const user = auth.currentUser?.email || '';
 
@@ -163,9 +187,11 @@ export default function CheckRegistryPage() {
     if (!ids.length) return;
     const voucherDocIds = ids.map(id => checks.find(c => c.id === id)?.voucherDocId).filter(Boolean);
     askConfirm(`Submit ${ids.length} check voucher(s) for approval?`, async () => {
-      await Promise.all(voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user })));
-      setSelected(new Set());
-      showToast(`${ids.length} check voucher(s) submitted for approval.`);
+      try {
+        await Promise.all(voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user })));
+        setSelected(new Set());
+        showToast(`${ids.length} check voucher(s) submitted for approval.`, 'success');
+      } catch(e) { showToast('Error: ' + e.message, 'error'); }
     });
   };
 
@@ -174,12 +200,14 @@ export default function CheckRegistryPage() {
     if (!ids.length) return;
     const voucherDocIds = ids.map(id => checks.find(c => c.id === id)?.voucherDocId).filter(Boolean);
     askConfirm(`Void ${ids.length} check voucher(s)? This cannot be undone.`, async () => {
-      await Promise.all([
-        ...voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
-        ...ids.map(id => updateDoc(doc(db,'checkRegister',id), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
-      ]);
-      setSelected(new Set());
-      showToast(`${ids.length} check voucher(s) voided.`);
+      try {
+        await Promise.all([
+          ...voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
+          ...ids.map(id => updateDoc(doc(db,'checkRegister',id), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
+        ]);
+        setSelected(new Set());
+        showToast(`${ids.length} check voucher(s) voided.`, 'success');
+      } catch(e) { showToast('Error: ' + e.message, 'error'); }
     });
   };
 
@@ -385,6 +413,25 @@ export default function CheckRegistryPage() {
   }, [expandedChecks, analyticsBucket, analyticsBank]);
 
   // ── Line helpers ───────────────────────────────────────────────────────────
+
+  // Sub-line field setter: account, description, amount, tax — per individual sub-line (by id)
+  const setSubLineField = (lineId, key, val) => setCvLines(prev => prev.map(l => {
+    if (l.id !== lineId) return l;
+    const updated = { ...l, [key]: val };
+    if (key === 'taxRateId') {
+      const item = taxRegistry.find(r => r.id === val);
+      if (item) { updated.taxType = item.name; updated.taxRate = item.rate || 0; }
+      else       { updated.taxType = 'N/A'; updated.taxRate = 0; }
+    }
+    const amt  = Number(updated.amount) || 0;
+    const rate = Number(updated.taxRate) || 0;
+    updated.taxAmt = updated.taxRateId
+      ? Math.round((cvForm.inclusive ? amt - amt/(1 + rate/100) : amt*(rate/100)) * 100) / 100
+      : 0;
+    return updated;
+  }));
+
+  // Single-check mode: set a field on a line by index
   const setLine = (i, key, val) => setCvLines(prev => prev.map((l, idx) => {
     if (idx !== i) return l;
     const updated = { ...l, [key]: val };
@@ -400,12 +447,47 @@ export default function CheckRegistryPage() {
       : 0;
     return updated;
   }));
-  const addLine = () => {
-    if (!cvForm.isMultipleChecks) {
-      setCvLines(prev => [...prev, EMPTY_LINE()]);
-      return;
-    }
-    // Auto-fill the new row's check number: next after the highest number already in use
+
+  // Check-group-level field setter — propagates checkNo / checkDate / contact to all sub-lines in the group
+  const setCheckGroupField = (groupId, key, val) => setCvLines(prev =>
+    prev.map(l => l.checkGroupId === groupId ? { ...l, [key]: val } : l)
+  );
+
+  // Add a sub-line to an existing check group
+  const addSubLine = (groupId) => {
+    setCvLines(prev => {
+      const firstInGroup = prev.find(l => l.checkGroupId === groupId) || {};
+      const newLine = {
+        id: uid(), checkGroupId: groupId,
+        contactId:     firstInGroup.contactId     || '',
+        contact:       firstInGroup.contact       || '',
+        lineCheckNo:   firstInGroup.lineCheckNo   || '',
+        lineCheckDate: firstInGroup.lineCheckDate || '',
+        expenseAccount: '', description: '',
+        amount: '', taxRateId: '', taxType: 'N/A', taxRate: 0, taxAmt: 0, inclusive: false,
+      };
+      const lastIdx = prev.map(l => l.checkGroupId).lastIndexOf(groupId);
+      const next = [...prev];
+      next.splice(lastIdx + 1, 0, newLine);
+      return next;
+    });
+  };
+
+  // Remove a sub-line; removes whole group if it's the only remaining sub-line
+  const removeSubLine = (lineId) => {
+    setCvLines(prev => {
+      const line = prev.find(l => l.id === lineId);
+      if (!line) return prev;
+      const groupLines = prev.filter(l => l.checkGroupId === line.checkGroupId);
+      if (groupLines.length > 1) return prev.filter(l => l.id !== lineId);
+      // Last sub-line in group — remove the whole group (keep at least 1 group)
+      const remaining = prev.filter(l => l.checkGroupId !== line.checkGroupId);
+      return remaining.length > 0 ? remaining : prev;
+    });
+  };
+
+  // Add a new physical check group in Multiple Checks mode
+  const addCheckGroup = () => {
     const cb = activeCheckbook(cvForm.bankCode);
     setCvLines(prev => {
       const usedNos = prev.map(l => parseInt(l.lineCheckNo || '0') || 0).filter(n => n > 0);
@@ -414,11 +496,13 @@ export default function CheckRegistryPage() {
         : (parseInt(cb?.nextCheckNumber) || 1) - 1;
       const next    = base + 1;
       const width   = cb ? String(cb.endingNumber || cb.nextCheckNumber).length : 10;
-      const newLine = cb
-        ? { ...EMPTY_LINE(), lineCheckNo: String(next).padStart(width, '0') }
-        : EMPTY_LINE();
-      return [...prev, newLine];
+      return [...prev, ...EMPTY_CHECK_GROUP(String(next).padStart(width, '0'), cvForm.issueDate || today())];
     });
+  };
+
+  const addLine = () => {
+    if (!cvForm.isMultipleChecks) { setCvLines(prev => [...prev, EMPTY_LINE()]); return; }
+    addCheckGroup();
   };
   const removeLine = (i) => setCvLines(prev => prev.filter((_,idx) => idx !== i));
 
@@ -437,83 +521,44 @@ export default function CheckRegistryPage() {
   const taxTotal  = cvLines.reduce((s,l) => s + (Number(l.taxAmt)||0),  0);
   const netCash   = lineTotal - taxTotal;
 
-  const journalLines = useMemo(() => {
-    const jl = [];
-
-    // Format account as "(code) Name"
-    const acctLabel = (codeOrFull, fallback = '—') => {
-      if (!codeOrFull) return fallback;
-      if (codeOrFull.includes(' — ')) {
-        const [c, ...rest] = codeOrFull.split(' — ');
-        return `(${c.trim()}) ${rest.join(' — ').trim()}`;
-      }
-      const found = accounts.find(a => a.code === codeOrFull);
-      return found ? `(${found.code}) ${found.name}` : codeOrFull;
+  // ── Journal Memo: expected settlement JE (reference only — no GL entry at CV prep) ─
+  const memoLines = useMemo(() => {
+    const acc = new Map(); // accountCode → { account, debit, credit }
+    const addLine = (code, label, debit, credit) => {
+      if (!code) return;
+      const prev = acc.get(code) || { account: label, debit: 0, credit: 0 };
+      acc.set(code, { ...prev, debit: prev.debit + debit, credit: prev.credit + credit });
     };
-
-    // Check Vouchers are purchases → use taxAccountPurchases for separate tracking
-    const taxRateLabel = (rateDoc) => {
-      const raw = rateDoc.trackingType === 'separate'
-        ? (rateDoc.taxAccountPurchases || rateDoc.taxAccountSingle || '')
-        : (rateDoc.taxAccountSingle || '');
-      return raw ? acctLabel(raw) : `Tax — ${rateDoc.name}`;
+    const acctLabel = (code) => {
+      const found = accounts.find(a => a.code === code);
+      return found ? `(${found.code}) ${found.name}` : code;
     };
-
-    let bankCreditTotal = 0;
-
+    let grossTotal = 0;
     cvLines.forEach(l => {
       const amt = Number(l.amount) || 0;
       const tax = Number(l.taxAmt)  || 0;
       if (!amt) return;
-
-      // 1. Expense debit (net of inclusive tax)
-      const expAmt = (tax > 0 && cvForm.inclusive) ? amt - tax : amt;
-      if (l.expenseAccount) {
-        jl.push({ account: acctLabel(l.expenseAccount), debit: expAmt, credit: 0 });
-      }
-
-      // 2. Tax debit lines (purchase = input tax)
+      const netAmt = (tax > 0 && cvForm.inclusive) ? amt - tax : amt;
+      const gross  = cvForm.inclusive ? amt : amt + tax;
+      if (l.expenseAccount) addLine(l.expenseAccount, acctLabel(l.expenseAccount), netAmt, 0);
       if (tax > 0 && l.taxRateId) {
         const rateDoc = taxRates.find(r => r.id === l.taxRateId);
-        if (rateDoc) {
-          jl.push({ account: taxRateLabel(rateDoc), debit: tax, credit: 0 });
-        } else {
-          // Tax group — split pro-rata across constituent rates
-          const groupDoc = taxGroups.find(g => g.id === l.taxRateId);
-          if (groupDoc?.rateNames?.length) {
-            const effectiveRate = groupDoc.rateNames.reduce((s, rn) => {
-              const r = taxRates.find(x => x.name === rn);
-              return s + (r?.rate || 0);
-            }, 0);
-            groupDoc.rateNames.forEach(rn => {
-              const r = taxRates.find(x => x.name === rn);
-              if (!r) return;
-              const share = effectiveRate > 0
-                ? Math.round((r.rate / effectiveRate) * tax * 100) / 100
-                : Math.round(tax / groupDoc.rateNames.length * 100) / 100;
-              jl.push({ account: taxRateLabel(r), debit: share, credit: 0 });
-            });
-          } else {
-            jl.push({ account: `Tax — ${l.taxType || 'Unknown'}`, debit: tax, credit: 0 });
-          }
-        }
+        const raw = rateDoc
+          ? (rateDoc.trackingType === 'separate'
+              ? (rateDoc.taxAccountPurchases || rateDoc.taxAccountSingle || '')
+              : (rateDoc.taxAccountSingle || ''))
+          : '';
+        if (raw) addLine(raw, acctLabel(raw), tax, 0);
+        else if (l.expenseAccount) addLine(l.expenseAccount, acctLabel(l.expenseAccount), tax, 0);
       }
-
-      // 3. Bank credit: gross amount paid
-      bankCreditTotal += cvForm.inclusive ? amt : amt + tax;
+      grossTotal += gross;
     });
-
-    // 4. Post-Dated Checks Issued credit (interim liability — clears to bank when check is encashed)
-    const pdcLabel = pdcAccount
-      ? `(${pdcAccount.code}) ${pdcAccount.name}`
-      : 'Post-Dated Checks Issued';
-    if (bankCreditTotal > 0) jl.push({ account: pdcLabel, debit: 0, credit: bankCreditTotal });
-
-    return jl;
-  }, [cvLines, cvForm.bankCode, cvForm.inclusive, bankAccounts, taxRates, taxGroups, accounts, pdcAccount]);
-
-  const jDebit  = journalLines.reduce((s,j) => s+j.debit,  0);
-  const jCredit = journalLines.reduce((s,j) => s+j.credit, 0);
+    const bank = bankAccounts.find(b => b.code === cvForm.bankCode || b.id === cvForm.bankCode);
+    if (grossTotal > 0 && bank) addLine(bank.code, `(${bank.code}) ${bank.name}`, 0, grossTotal);
+    return Array.from(acc.values());
+  }, [cvLines, cvForm.bankCode, cvForm.inclusive, bankAccounts, taxRates, accounts]);
+  const mDebit  = memoLines.reduce((s,j) => s + j.debit,  0);
+  const mCredit = memoLines.reduce((s,j) => s + j.credit, 0);
 
   // ── Open Check Voucher modal ───────────────────────────────────────────────
   const openNewCv = (prefill) => {
@@ -574,8 +619,8 @@ export default function CheckRegistryPage() {
     if (!check.voucherDocId) return alert('No voucher linked to this check.');
     const v = vouchers.find(x => x.id === check.voucherDocId);
     if (!v) return alert('Voucher not found.');
-    if (!['Pending','Draft'].includes(v.status))
-      return alert(`Cannot edit: voucher is "${v.status}". Only Pending vouchers can be edited.`);
+    if (['Paid','Voided'].includes(v.status))
+      return alert(`Cannot edit: voucher is "${v.status}". Paid/Voided vouchers cannot be edited.`);
     const isInclusive = !!(v.lines?.[0]?.inclusive);
     setCvForm({
       bankCode:         v.paymentFromAccountCode || '',
@@ -588,19 +633,26 @@ export default function CheckRegistryPage() {
       inclusive:        isInclusive,
       loanId:           v.loanId                 || '',
     });
-    setCvLines((v.lines || []).map((l, i) => ({
-      id:             Date.now() + i,
-      contactId:      l.contactId          || '',
-      contact:        l.contact            || '',
-      expenseAccount: l.expenseAccountCode || '',
-      description:    l.description        || '',
-      taxRateId:      l.taxRateId          || '',
-      taxRate:        Number(l.taxRate)    || 0,
-      amount:         Number(l.amount)     || 0,
-      taxAmt:         Number(l.taxAmt)     || 0,
-      lineCheckNo:    l.lineCheckNo        || '',
-      lineCheckDate:  l.lineCheckDate      || '',
-    })));
+    // Rebuild checkGroupId from physicalLineNo so sub-lines of the same check stay grouped
+    const groupIdMap = {};
+    setCvLines((v.lines || []).map((l, i) => {
+      const pln = l.physicalLineNo || (i + 1);
+      if (!groupIdMap[pln]) groupIdMap[pln] = uid();
+      return {
+        id:             uid(),
+        checkGroupId:   v.isMultipleChecks ? groupIdMap[pln] : '',
+        contactId:      l.contactId          || '',
+        contact:        l.contact            || '',
+        expenseAccount: l.expenseAccountCode || '',
+        description:    l.description        || '',
+        taxRateId:      l.taxRateId          || '',
+        taxRate:        Number(l.taxRate)    || 0,
+        amount:         Number(l.amount)     || 0,
+        taxAmt:         Number(l.taxAmt)     || 0,
+        lineCheckNo:    l.lineCheckNo        || '',
+        lineCheckDate:  l.lineCheckDate      || '',
+      };
+    }));
     const checkDocs = checks.filter(c => c.voucherDocId === check.voucherDocId);
     setCvModal({
       _edit:        true,
@@ -609,6 +661,7 @@ export default function CheckRegistryPage() {
       _linkedJeId:  v.linkedJeId  || '',
       _checkDocIds: checkDocs.map(c => c.id),
       _isMultiple:  !!v.isMultipleChecks,
+      _status:      v.status,
     });
   };
 
@@ -621,8 +674,19 @@ export default function CheckRegistryPage() {
     setSaving(true);
     try {
       const payeeSummary = [...new Set(cvLines.map(l => l.contact).filter(Boolean))].join(', ') || cvForm.purposeCategory || '';
+      // Build ordered check-group list for physicalLineNo
+      const checkGroupOrder = [];
+      if (cvModal._isMultiple) {
+        const seenGroups = new Set();
+        cvLines.forEach(l => {
+          const gid = l.checkGroupId || '_default';
+          if (!seenGroups.has(gid)) { seenGroups.add(gid); checkGroupOrder.push(gid); }
+        });
+      }
       const linesPayload = cvLines.map((l, i) => ({
         lineNo:             i + 1,
+        physicalLineNo:     cvModal._isMultiple ? (checkGroupOrder.indexOf(l.checkGroupId || '_default') + 1) : 1,
+        checkGroupId:       l.checkGroupId || '',
         contactId:          l.contactId          || '',
         contact:            l.contact            || '',
         expenseAccountCode: l.expenseAccount     || '',
@@ -638,6 +702,9 @@ export default function CheckRegistryPage() {
       }));
 
       // 1. Update the voucher doc
+      const statusRevert = ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(cvModal._status)
+        ? { status: 'For Verification' }
+        : {};
       await updateDoc(doc(db,'vouchers',cvModal._docId), {
         purposeCategory: cvForm.purposeCategory || '',
         contactSummary:  payeeSummary,
@@ -647,23 +714,11 @@ export default function CheckRegistryPage() {
         notes:           cvForm.notes || '',
         lines:           linesPayload,
         ...(cvForm.loanId ? { loanId: cvForm.loanId } : {}),
+        ...statusRevert,
         updatedAt:       serverTimestamp(), updatedBy: user,
       });
 
-      // 2. Regenerate the "For Clearing" JE
-      if (cvModal._linkedJeId) {
-        const cvJeLines = journalLines.map(j => {
-          const m = j.account.match(/^\(([^)]+)\)\s*(.*)/);
-          return { accountCode: m ? m[1] : j.account, accountName: m ? m[2] : j.account, description: '', debit: j.debit, credit: j.credit };
-        });
-        await updateDoc(doc(db,'journalEntries',cvModal._linkedJeId), {
-          description: `Check Voucher ${cvModal._voucherId}${cvForm.purposeCategory ? ' — ' + cvForm.purposeCategory : ''}`,
-          lines:       cvJeLines,
-          totalDebit:  cvJeLines.reduce((s,l) => s + l.debit,  0),
-          totalCredit: cvJeLines.reduce((s,l) => s + l.credit, 0),
-          updatedAt:   serverTimestamp(), updatedBy: user,
-        });
-      }
+      // 2. (No GL update — IFRS 9 §3.3.1: no JE at check voucher preparation)
 
       // 3. Sync check register amounts
       if (!cvModal._isMultiple && cvModal._checkDocIds?.length === 1) {
@@ -672,24 +727,75 @@ export default function CheckRegistryPage() {
           updatedAt: serverTimestamp(), updatedBy: user,
         });
       } else if (cvModal._isMultiple) {
+        // Sync one check register doc per check GROUP (not per sub-line)
         const checkDocs = checks.filter(c => cvModal._checkDocIds.includes(c.id));
-        for (const [idx, l] of cvLines.entries()) {
-          const lineAmt = Number(l.amount) || 0;
-          const lineTax = Number(l.taxAmt)  || 0;
-          const cd = checkDocs.find(c => c.lineNo === idx + 1);
+        const cb = activeCheckbook(cvForm.bankCode);
+        const syncPromises = [];
+        let newChecksAdded = false;
+        checkGroupOrder.forEach((groupId, gIdx) => {
+          const groupLines = cvLines.filter(l => (l.checkGroupId || '_default') === groupId);
+          const groupAmt   = groupLines.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+          const groupTax   = groupLines.reduce((s, l) => s + (Number(l.taxAmt) || 0), 0);
+          const firstLine  = groupLines[0] || {};
+          const cd = checkDocs.find(c => c.lineNo === gIdx + 1);
           if (cd) {
-            await updateDoc(doc(db,'checkRegister',cd.id), {
-              amount: lineAmt, netAmount: lineAmt - lineTax,
-              payeeName: l.contact || payeeSummary,
+            // Update existing check register doc
+            syncPromises.push(updateDoc(doc(db,'checkRegister',cd.id), {
+              amount: groupAmt, netAmount: groupAmt - groupTax,
+              payeeName: firstLine.contact || payeeSummary,
+              checkNumber: String(firstLine.lineCheckNo || cd.checkNumber || ''),
+              checkDate:   firstLine.lineCheckDate || cd.checkDate || '',
+              lineNo:      gIdx + 1,
+              updatedAt: serverTimestamp(), updatedBy: user,
+            }));
+          } else {
+            // New check group added during edit — create a new checkRegister doc
+            newChecksAdded = true;
+            const lineCheckNo = String(firstLine?.lineCheckNo || '').trim();
+            syncPromises.push(addDoc(collection(db, 'checkRegister'), {
+              checkId:          genCheckId(lineCheckNo),
+              checkbookId:      cb?.id || '',
+              bankCode:         cvForm.bankCode,
+              checkNumber:      lineCheckNo,
+              checkDate:        firstLine?.lineCheckDate || cvForm.issueDate,
+              issueDate:        cvForm.issueDate,
+              payeeName:        firstLine?.contact || payeeSummary,
+              amount:           groupAmt,
+              netAmount:        groupAmt - groupTax,
+              status:           'Issued',
+              referenceType:    'Check Voucher',
+              referenceId:      cvModal._voucherId,
+              voucherDocId:     cvModal._docId,
+              linkedJeId:       cvModal._linkedJeId || '',
+              isPartOfMultiple: true,
+              lineNo:           gIdx + 1,
+              voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
+              notes:            cvForm.notes || '',
+              createdAt: serverTimestamp(), createdBy: user,
+              updatedAt: serverTimestamp(), updatedBy: user,
+            }));
+          }
+        });
+        await Promise.all(syncPromises);
+
+        // If new checks were added, advance checkbook nextCheckNumber past the highest used number
+        if (newChecksAdded && cb) {
+          const end     = parseInt(cb.endingNumber) || 0;
+          const usedNos = cvLines.map(l => parseInt(l.lineCheckNo || '0') || 0).filter(n => n > 0);
+          const maxUsed = usedNos.length > 0 ? Math.max(...usedNos) : 0;
+          if (maxUsed > 0 && maxUsed >= (parseInt(cb.nextCheckNumber) || 0)) {
+            const nextNo = String(maxUsed + 1).padStart(String(end).length, '0');
+            await updateDoc(doc(db, 'checkbookMaster', cb.id), {
+              nextCheckNumber: nextNo,
               updatedAt: serverTimestamp(), updatedBy: user,
             });
           }
         }
       }
 
-      showToast(`Check Voucher ${cvModal._voucherId} updated.`);
+      showToast(`Check Voucher ${cvModal._voucherId} updated.`, 'success');
       setCvModal(null);
-    } catch(e) { console.error(e); alert('Update failed: ' + e.message); }
+    } catch(e) { console.error(e); showToast('Update failed: ' + e.message, 'error'); }
     setSaving(false);
   };
 
@@ -715,20 +821,25 @@ export default function CheckRegistryPage() {
 
     // ── Duplicate check-number safeguard ───────────────────────────────────
     const numbersToValidate = cvForm.isMultipleChecks
-      ? cvLines.map(l => String(l.lineCheckNo||'').trim()).filter(Boolean)
+      ? [...new Set(cvLines.map(l => String(l.lineCheckNo||'').trim()).filter(Boolean))]
       : [String(assignedCheckNo)];
 
     // 0. All lines must have a check number in Multiple Checks mode
     if (cvForm.isMultipleChecks && cvLines.some(l => !String(l.lineCheckNo||'').trim())) {
-      return alert('All lines need a check number in Multiple Checks mode. Use \"Use Next #\" to auto-fill.');
+      return alert('All lines need a check number in Multiple Checks mode. Use "Use Next #" to auto-fill.');
     }
 
-    // 1. Intra-form duplicates (multiple checks only)
+    // 1. Intra-form duplicates: check numbers must be unique ACROSS groups (sub-lines share the same number)
     if (cvForm.isMultipleChecks) {
+      const groupNos = new Map();
+      for (const l of cvLines) {
+        const gid = l.checkGroupId || '_default';
+        if (!groupNos.has(gid)) groupNos.set(gid, String(l.lineCheckNo || '').trim());
+      }
       const seen = new Set();
-      for (const n of numbersToValidate) {
-        if (seen.has(n)) return alert(`Duplicate check number within this voucher: ${n}. Each line must use a unique check number.`);
-        seen.add(n);
+      for (const [, no] of groupNos) {
+        if (seen.has(no)) return alert(`Duplicate check number within this voucher: ${no}. Each check must have a unique number.`);
+        seen.add(no);
       }
     }
 
@@ -751,21 +862,37 @@ export default function CheckRegistryPage() {
       const checkId      = genCheckId(assignedCheckNo);
       const payeeSummary = [...new Set(cvLines.map(l => l.contact).filter(Boolean))].join(', ') || cvForm.purposeCategory || '';
 
-      const linesPayload = cvLines.map((l, i) => ({
-        lineNo:             i + 1,
-        contactId:          l.contactId || '',
-        contact:            l.contact,
-        expenseAccountCode: l.expenseAccount,
-        description:        l.description,
-        amount:             Number(l.amount) || 0,
-        taxRateId:          l.taxRateId  || '',
-        taxType:            l.taxType    || 'N/A',
-        taxRate:            Number(l.taxRate) || 0,
-        taxAmt:             Number(l.taxAmt)  || 0,
-        inclusive:          !!l.inclusive,
-        lineCheckNo:   cvForm.isMultipleChecks ? (l.lineCheckNo||'')   : String(assignedCheckNo),
-        lineCheckDate: cvForm.isMultipleChecks ? (l.lineCheckDate||'') : (cvForm.globalCheckDate||cvForm.issueDate||''),
-      }));
+      const linesPayload = (() => {
+        // Build ordered check-group list for physicalLineNo
+        const checkGroupOrder = [];
+        if (cvForm.isMultipleChecks) {
+          const seenGroups = new Set();
+          cvLines.forEach(l => {
+            const gid = l.checkGroupId || '_default';
+            if (!seenGroups.has(gid)) { seenGroups.add(gid); checkGroupOrder.push(gid); }
+          });
+        }
+        // Store on outer scope so check-register creation can reuse it
+        createCheckVoucher._groupOrder = checkGroupOrder;
+        return cvLines.map((l, i) => ({
+          lineNo:             i + 1,
+          physicalLineNo:     cvForm.isMultipleChecks ? (checkGroupOrder.indexOf(l.checkGroupId || '_default') + 1) : 1,
+          checkGroupId:       l.checkGroupId || '',
+          contactId:          l.contactId || '',
+          contact:            l.contact,
+          expenseAccountCode: l.expenseAccount,
+          description:        l.description,
+          amount:             Number(l.amount) || 0,
+          taxRateId:          l.taxRateId  || '',
+          taxType:            l.taxType    || 'N/A',
+          taxRate:            Number(l.taxRate) || 0,
+          taxAmt:             Number(l.taxAmt)  || 0,
+          inclusive:          !!l.inclusive,
+          lineCheckNo:   cvForm.isMultipleChecks ? (l.lineCheckNo||'')   : String(assignedCheckNo),
+          lineCheckDate: cvForm.isMultipleChecks ? (l.lineCheckDate||'') : (cvForm.globalCheckDate||cvForm.issueDate||''),
+        }));
+      })();
+      const checkGroupOrder = createCheckVoucher._groupOrder || [];
 
       const batch      = writeBatch(db);
       const voucherRef = doc(collection(db, 'vouchers'));
@@ -794,29 +921,31 @@ export default function CheckRegistryPage() {
       });
 
       if (cvForm.isMultipleChecks) {
-        // One checkRegister doc per line — each with its own check number, date, and amount
-        cvLines.forEach((l, idx) => {
+        // One checkRegister doc per check GROUP (not per sub-line)
+        checkGroupOrder.forEach((groupId, gIdx) => {
+          const groupLines  = cvLines.filter(l => (l.checkGroupId || '_default') === groupId);
+          const firstLine   = groupLines[0];
+          const lineCheckNo = String(firstLine?.lineCheckNo || '').trim();
+          const groupAmt    = groupLines.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+          const groupTax    = groupLines.reduce((s, l) => s + (Number(l.taxAmt)  || 0), 0);
           const lineRef     = doc(collection(db, 'checkRegister'));
-          const lineCheckNo = String(l.lineCheckNo || '').trim();
-          const lineAmt     = Number(l.amount) || 0;
-          const lineTax     = Number(l.taxAmt)  || 0;
           checkRefs.push(lineRef);
           batch.set(lineRef, {
-            checkId:          genCheckId(lineCheckNo || (assignedCheckNo + idx)),
+            checkId:          genCheckId(lineCheckNo || (assignedCheckNo + gIdx)),
             checkbookId:      cb.id,
             bankCode:         cvForm.bankCode,
             checkNumber:      lineCheckNo,
-            checkDate:        l.lineCheckDate || cvForm.issueDate,
+            checkDate:        firstLine?.lineCheckDate || cvForm.issueDate,
             issueDate:        cvForm.issueDate,
-            payeeName:        l.contact || payeeSummary,
-            amount:           lineAmt,
-            netAmount:        lineAmt - lineTax,
+            payeeName:        firstLine?.contact || payeeSummary,
+            amount:           groupAmt,
+            netAmount:        groupAmt - groupTax,
             status:           'Issued',
             referenceType:    'Check Voucher',
             referenceId:      voucherId,
             voucherDocId:     voucherRef.id,
             isPartOfMultiple: true,
-            lineNo:           idx + 1,
+            lineNo:           gIdx + 1,
             voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
             notes:            cvForm.notes || '',
             createdAt: serverTimestamp(), createdBy: user,
@@ -861,35 +990,15 @@ export default function CheckRegistryPage() {
         updatedAt: serverTimestamp(), updatedBy: user,
       });
 
-      // Auto-create “For Clearing” JE (Dr. Expenses / Cr. Post-Dated Checks Issued)
-      const cvJeLines = journalLines.map(j => {
-        const m = j.account.match(/^\(([^)]+)\)\s*(.*)/);
-        return { accountCode: m ? m[1] : j.account, accountName: m ? m[2] : j.account, description: '', debit: j.debit, credit: j.credit };
-      });
-      const cvJeId = await nextJournalEntryId(cvForm.issueDate);
-      const jeRef  = await addDoc(collection(db, 'journalEntries'), {
-        jeId: cvJeId, date: cvForm.issueDate,
-        description: `Check Voucher ${voucherId}${cvForm.purposeCategory ? ' — ' + cvForm.purposeCategory : ''}`,
-        type: 'Check Voucher', reference: voucherId, sourceDocId: voucherRef.id, sourceDocType: 'voucher',
-        status: 'For Clearing',
-        lines: cvJeLines,
-        totalDebit: cvJeLines.reduce((s,l) => s + l.debit, 0),
-        totalCredit: cvJeLines.reduce((s,l) => s + l.credit, 0),
-        createdAt: serverTimestamp(), createdBy: user,
-        updatedAt: serverTimestamp(), updatedBy: user,
-      });
-      // Link JE id to the voucher and all check register entries
-      await Promise.all([
-        updateDoc(voucherRef, { linkedJeId: jeRef.id }),
-        ...checkRefs.map(ref => updateDoc(ref, { linkedJeId: jeRef.id })),
-      ]);
+      // No GL journal entry at check voucher preparation — IFRS 9 §3.3.1:
+      // financial liabilities are derecognized only on the settlement date.
 
       const checkSummary = cvForm.isMultipleChecks
-        ? `${cvLines.length} checks (#${cvLines.map(l => l.lineCheckNo).filter(Boolean).join(', ')})`
+        ? `${checkGroupOrder.length} check${checkGroupOrder.length !== 1 ? 's' : ''} (#${checkGroupOrder.map(gid => cvLines.find(l => l.checkGroupId === gid)?.lineCheckNo).filter(Boolean).join(', ')})`
         : `Check #${assignedCheckNo}`;
-      showToast(`Check Voucher ${voucherId} created · ${checkSummary}`);
+      showToast(`Check Voucher ${voucherId} created · ${checkSummary}`, 'success');
       setCvModal(null);
-    } catch(e) { console.error(e); alert('Error: ' + e.message); }
+    } catch(e) { console.error(e); showToast('Error: ' + e.message, 'error'); }
     setSaving(false);
   };
 
@@ -899,21 +1008,32 @@ export default function CheckRegistryPage() {
     let items;
     if (check.isPartOfMultiple && voucher?.lines?.length) {
       const siblingDocs = checks.filter(c => c.voucherDocId === check.voucherDocId);
-      items = voucher.lines.map((line, idx) => {
-        // Match line to its checkRegister doc: by lineNo (new schema), by checkNumber, or
-        // fall back to the single shared doc (old schema where one doc covers all lines)
+      // Annotate each line with its physicalLineNo, then deduplicate so sub-lines collapse into one entry
+      const allLinesWithPln = (voucher.lines || []).map((line, idx) => ({
+        ...line, _pln: line.physicalLineNo || (idx + 1),
+      }));
+      const seenPln = new Set();
+      const uniqueCheckLines = allLinesWithPln.filter(line => {
+        if (!seenPln.has(line._pln)) { seenPln.add(line._pln); return true; }
+        return false;
+      });
+      items = uniqueCheckLines.map(({ _pln: pln, ...line }) => {
         const matchedDoc =
-          siblingDocs.find(c => c.lineNo === idx + 1) ||
+          siblingDocs.find(c => c.lineNo === pln) ||
           siblingDocs.find(c => c.checkNumber === String(line.lineCheckNo || '').trim()) ||
           (siblingDocs.length === 1 ? siblingDocs[0] : null);
         const base = matchedDoc || check;
+        // Sum all sub-line amounts for this physical check
+        const groupTotal = allLinesWithPln
+          .filter(l => l._pln === pln)
+          .reduce((s, l) => s + (Number(l.amount) || 0), 0);
         return {
           ...base,
           checkNumber:    String(line.lineCheckNo || '').trim() || base.checkNumber || '—',
           checkDate:      line.lineCheckDate || base.checkDate || '',
-          amount:         Number(line.amount) || base.amount || 0,
+          amount:         groupTotal || base.amount || 0,
           payeeName:      line.contact || base.payeeName || '',
-          lineNo:         idx + 1,
+          lineNo:         pln,
           id:             matchedDoc?.id ?? null,
           newStatus:      base.status || check.status,
           newClearedDate: base.clearedDate  || today(),
@@ -942,6 +1062,31 @@ export default function CheckRegistryPage() {
   // opts.silent:          true → skip toast (caller will show one summary toast)
   const updateStatus = async (form, { batchClearedIds = new Set(), silent = false } = {}) => {
     if (form.status === 'Voided' && !form.voidReason?.trim()) return alert('Void reason is required.');
+
+    // ── Pre-flight LV gate: loan-linked checks require a Loan Voucher ─────────
+    // Must run BEFORE any writes so we can abort cleanly.
+    let preLoadedLv = null; // will be set if an LV is found
+    if (form.status === 'Cleared' && form.voucherDocId && !form.loanPaymentId) {
+      const vPreSnap = await getDoc(doc(db, 'vouchers', form.voucherDocId));
+      const vPre     = vPreSnap.exists() ? vPreSnap.data() : null;
+      if (vPre?.loanId) {
+        // Query for a PAYMENT-type LV whose checkVoucherId matches this CV's human-readable ID
+        const lvSnap = await getDocs(query(
+          collection(db, 'vouchers'),
+          where('voucherType', '==', 'LOAN'),
+          where('checkVoucherId', '==', vPre.voucherId || ''),
+        ));
+        if (lvSnap.empty) {
+          showToast(
+            'Cannot clear: A Loan Voucher (LV) of type PAYMENT must be created and linked to this CV before clearing.',
+            'error',
+          );
+          return; // abort — no writes made
+        }
+        preLoadedLv = { docId: lvSnap.docs[0].id, ...lvSnap.docs[0].data() };
+      }
+    }
+
     setSaving(true);
     try {
       const patch = { status:form.status, updatedAt:serverTimestamp(), updatedBy:user };
@@ -954,9 +1099,18 @@ export default function CheckRegistryPage() {
       // Voucher side effects: Cleared→Paid only when ALL sibling checks are cleared; Voided→Pending
       if (form.voucherDocId) {
         if (form.status === 'Cleared') {
-          const siblings     = checks.filter(c => c.voucherDocId === form.voucherDocId && c.id !== form.id);
-          const allCleared   = siblings.every(c => c.status === 'Cleared');
-          if (allCleared) {
+          const allSiblings = checks.filter(c => c.voucherDocId === form.voucherDocId && c.id !== form.id);
+          // A sibling counts as "will be cleared" if it's already Cleared in state OR is also being
+          // cleared in the same batch save (batchClearedIds tracks all IDs cleared in this pass).
+          const allWillBeCleared = allSiblings.every(c => c.status === 'Cleared' || batchClearedIds.has(c.id));
+          // Only fire the voucher→Paid update once per voucher: on the last check being cleared.
+          // If multiple checks share the same voucherDocId in this batch, only the last one triggers.
+          const batchForVoucher = [...batchClearedIds].filter(id => {
+            const c = checks.find(x => x.id === id);
+            return c?.voucherDocId === form.voucherDocId;
+          });
+          const isLastClearInBatch = batchForVoucher.length === 0 || batchForVoucher[batchForVoucher.length - 1] === form.id;
+          if (allWillBeCleared && isLastClearInBatch) {
             await updateDoc(doc(db,'vouchers',form.voucherDocId), { status:'Paid', updatedAt:serverTimestamp(), updatedBy:user });
           }
         }
@@ -965,93 +1119,145 @@ export default function CheckRegistryPage() {
         }
       }
 
-      // Clearing JEs: when check is encashed, finalise the issuance JE then record bank payment
+      // ── On clearing: post settlement JE + auto-record loan payment ──────────────
+      // IFRS 9 §3.3.1 — liability derecognized on settlement date only.
+      // JE: Dr expense/liability accounts (from voucher lines), Cr Cash in Bank.
       if (form.status === 'Cleared') {
         const clearDate = form.clearedDate || today();
-        const jeAmount  = Number(form.netAmount || form.amount || 0);
         const bankAcct  = accounts.find(a => a.code === form.bankCode || a.id === form.bankCode);
 
-        // 1. Mark the original “For Clearing” issuance JE as “Cleared” once ALL sibling checks clear
-        if (form.linkedJeId) {
-          const siblings   = checks.filter(c => c.voucherDocId === form.voucherDocId && c.id !== form.id);
-          const allCleared = siblings.every(c => c.status === 'Cleared');
-          if (allCleared) {
-            await updateDoc(doc(db,'journalEntries',form.linkedJeId), {
-              status: 'Cleared', updatedAt: serverTimestamp(), updatedBy: user,
+        // Fetch voucher once — used for settlement JE and loan payment
+        let vData = null;
+        if (form.voucherDocId) {
+          const vSnap = await getDoc(doc(db, 'vouchers', form.voucherDocId));
+          vData = vSnap.exists() ? vSnap.data() : null;
+        }
+
+        // Build settlement JE from voucher lines (Dr expense accts, Cr Cash in Bank)
+        if (bankAcct && vData?.lines?.length) {
+          const isInclusive = !!(vData.lines[0]?.inclusive);
+          const checkLines  = (vData.isMultipleChecks && form.lineNo)
+            ? vData.lines.filter(l => (l.physicalLineNo || 1) === form.lineNo)
+            : vData.lines;
+
+          const accMap = new Map(); // accountCode → { accountCode, accountName, debit }
+          const addDebit = (code, name, amt) => {
+            if (!code || !(amt > 0)) return;
+            const prev = accMap.get(code) || { accountCode: code, accountName: name, debit: 0 };
+            accMap.set(code, { ...prev, debit: prev.debit + amt });
+          };
+          let grossTotal = 0;
+
+          checkLines.forEach(l => {
+            const lineAmt = Number(l.amount) || 0;
+            const taxAmt  = Number(l.taxAmt)  || 0;
+            const netAmt  = isInclusive ? lineAmt - taxAmt : lineAmt;
+            const gross   = isInclusive ? lineAmt : lineAmt + taxAmt;
+            if (l.expenseAccountCode) {
+              const acct = accounts.find(a => a.code === l.expenseAccountCode);
+              addDebit(l.expenseAccountCode, acct?.name || l.expenseAccountCode, netAmt);
+            }
+            if (taxAmt > 0) {
+              const rateDoc = taxRates.find(r => r.id === l.taxRateId);
+              const raw = rateDoc
+                ? (rateDoc.trackingType === 'separate'
+                    ? (rateDoc.taxAccountPurchases || rateDoc.taxAccountSingle || '')
+                    : (rateDoc.taxAccountSingle || ''))
+                : '';
+              if (raw) {
+                const taxAcct = accounts.find(a => a.code === raw);
+                addDebit(raw, taxAcct?.name || raw, taxAmt);
+              } else if (l.expenseAccountCode) {
+                const acct = accounts.find(a => a.code === l.expenseAccountCode);
+                addDebit(l.expenseAccountCode, acct?.name || l.expenseAccountCode, taxAmt);
+              }
+            }
+            grossTotal += gross;
+          });
+
+          if (accMap.size > 0 && grossTotal > 0) {
+            const jeLines = [
+              ...Array.from(accMap.values()).map(({ accountCode, accountName, debit }) => ({
+                accountCode, accountName, description: '', debit, credit: 0,
+              })),
+              {
+                accountCode: bankAcct.code,
+                accountName: bankAcct.name,
+                description: `Check #${form.checkNumber} cleared`,
+                debit: 0, credit: grossTotal,
+              },
+            ];
+            const clearJeId = await nextJournalEntryId(clearDate);
+            await addDoc(collection(db, 'journalEntries'), {
+              jeId: clearJeId, date: clearDate,
+              description: `Check Cleared — ${form.referenceId || form.checkId} · Check #${form.checkNumber}`,
+              type: 'Check Cleared', reference: form.referenceId || form.checkId || '',
+              sourceDocId: form.voucherDocId || '', sourceDocType: 'voucher',
+              status: 'Posted',
+              lines: jeLines,
+              totalDebit: grossTotal, totalCredit: grossTotal,
+              createdAt: serverTimestamp(), createdBy: user,
+              updatedAt: serverTimestamp(), updatedBy: user,
             });
           }
         }
 
-        // 2. Create new “Posted” clearing JE (Dr. PDC Issued / Cr. Bank)
-        if (pdcAccount && bankAcct && jeAmount > 0) {
-          const clearJeId = await nextJournalEntryId(clearDate);
-          await addDoc(collection(db, 'journalEntries'), {
-            jeId: clearJeId, date: clearDate,
-            description: `PDC Cleared — ${form.referenceId || form.checkId} · Check #${form.checkNumber}`,
-            type: 'Check Cleared', reference: form.referenceId || form.checkId || '',
-            sourceDocId: form.voucherDocId || '', sourceDocType: 'voucher',
-            status: 'For Clearing',
-            lines: [
-              { accountCode: pdcAccount.code, accountName: pdcAccount.name, description: 'Post-dated check cleared', debit: jeAmount, credit: 0 },
-              { accountCode: bankAcct.code,   accountName: bankAcct.name,   description: 'Check encashed — bank payment', debit: 0, credit: jeAmount },
-            ],
-            totalDebit: jeAmount, totalCredit: jeAmount,
-            createdAt: serverTimestamp(), createdBy: user,
-            updatedAt: serverTimestamp(), updatedBy: user,
-          });
+        // Auto-post to loanPayments via the pre-vetted LV (preLoadedLv set in gate above)
+        if (vData?.loanId && !form.loanPaymentId) {
+          if (preLoadedLv?.loanPaymentId) {
+            // LV already consumed (edge case): just stamp loanPaymentId on this checkRegister row
+            await updateDoc(doc(db, 'checkRegister', form.id), {
+              loanPaymentId: preLoadedLv.loanPaymentId,
+              updatedAt: serverTimestamp(), updatedBy: user,
+            });
+          } else if (preLoadedLv) {
+            // LV found and available — use its lines to derive interest/principal/penalty
+            const total        = Number(form.netAmount || form.amount || 0);
+            const linesToParse = (vData.isMultipleChecks && form.checkNumber)
+              ? (preLoadedLv.lines || []).filter(l => l.lineCheckNo === form.checkNumber)
+              : (preLoadedLv.lines || []);
+            let interest = 0; let penalty = 0;
+            linesToParse.forEach(l => {
+              const acct = accounts.find(a => a.code === l.expenseAccountCode);
+              const name = (acct?.name || l.accountName || l.description || '').toLowerCase();
+              const amt  = Math.abs(Number(l.amount || l.debit || 0));
+              if (name.includes('interest') || name.includes('finance cost')) interest += amt;
+              else if (name.includes('penalty'))                               penalty  += amt;
+            });
+            const principal = Math.max(0, total - interest - penalty);
+            const lpRef = await addDoc(collection(db, 'loanPayments'), {
+              loanId:          vData.loanId,
+              loanName:        vData.loanName || '',
+              date:            clearDate,
+              interest, principal, penalty, total,
+              method:          'Check',
+              referenceNo:     form.checkNumber       || '',
+              bank:            form.bankCode          || '',
+              voucherId:       preLoadedLv.voucherId  || '',  // LV's human-readable ID
+              checkVoucherId:  vData.voucherId        || '',  // CV's human-readable ID
+              checkId:         form.checkId           || '',
+              checkRegisterId: form.id                || '',
+              notes:           'Auto-posted from Check Registry upon check clearing.',
+              allocations:     [],
+              createdAt:       serverTimestamp(), createdBy: user,
+            });
+            // Stamp checkRegister with loanPaymentId
+            await updateDoc(doc(db, 'checkRegister', form.id), {
+              loanPaymentId: lpRef.id,
+              updatedAt: serverTimestamp(), updatedBy: user,
+            });
+            // Mark the LV as consumed so it cannot be double-posted
+            await updateDoc(doc(db, 'vouchers', preLoadedLv.docId), {
+              loanPaymentId: lpRef.id,
+              updatedAt: serverTimestamp(), updatedBy: user,
+            });
+          }
+          // If preLoadedLv is null here, the gate already blocked us above — this path won't run.
         }
       }
 
-      // Auto-post to loanPayments when check Cleared and linked voucher has a loanId
-      if (form.status === 'Cleared' && form.voucherDocId && !form.loanPaymentId) {
-        const vSnap = await getDoc(doc(db, 'vouchers', form.voucherDocId));
-        const vData = vSnap.exists() ? vSnap.data() : null;
-        if (vData?.loanId) {
-          const clearDate = form.clearedDate || today();
-          const total     = Number(form.netAmount || form.amount || 0);
-          // For multi-check CVs scope to this check's line; for single-check use all lines
-          const linesToParse = (vData.isMultipleChecks && form.lineNo)
-            ? (vData.lines || []).filter(l => l.lineNo === form.lineNo)
-            : (vData.lines || []);
-          // Best-effort interest / penalty split from voucher lines
-          let interest = 0; let penalty = 0;
-          linesToParse.forEach(l => {
-            const name = (l.accountName || l.description || '').toLowerCase();
-            const amt  = Math.abs(Number(l.debit || l.amount || 0));
-            if (name.includes('interest') || name.includes('finance cost')) interest += amt;
-            else if (name.includes('penalty'))                               penalty  += amt;
-          });
-          const principal = Math.max(0, total - interest - penalty);
-          const lpRef = await addDoc(collection(db, 'loanPayments'), {
-            loanId:          vData.loanId,
-            loanName:        vData.loanName || '',
-            date:            clearDate,
-            interest,
-            principal,
-            penalty,
-            total,
-            method:          'Check',
-            referenceNo:     form.checkNumber       || '',
-            bank:            form.bankCode          || '',
-            voucherId:       vData.voucherId        || '',
-            checkVoucherId:  vData.voucherId        || '',
-            checkId:         form.checkId           || '',
-            checkRegisterId: form.id                || '',
-            notes:           'Auto-posted from Check Registry upon check clearing.',
-            allocations:     [],
-            createdAt:       serverTimestamp(),
-            createdBy:       user,
-          });
-          await updateDoc(doc(db, 'checkRegister', form.id), {
-            loanPaymentId: lpRef.id,
-            updatedAt:     serverTimestamp(),
-            updatedBy:     user,
-          });
-        }
-      }
-
-      if (!silent) showToast(`Check #${form.checkNumber} updated to ${form.status}.`);
-    } catch(e) { console.error(e); alert('Update failed: ' + e.message); }
+      if (!silent) showToast(`Check #${form.checkNumber} updated to ${form.status}.`, 'success');
+    } catch(e) { console.error(e); showToast('Update failed: ' + e.message, 'error'); }
     setSaving(false);
   };
 
@@ -1085,7 +1291,7 @@ export default function CheckRegistryPage() {
       }, { batchClearedIds, silent: true });
     }
     setMarkModal(null);
-    showToast(`${changed.length} check${changed.length > 1 ? 's' : ''} updated.`);
+    showToast(`${changed.length} check${changed.length > 1 ? 's' : ''} updated.`, 'success');
     setSaving(false);
   };
 
@@ -1122,8 +1328,8 @@ export default function CheckRegistryPage() {
       if (form.id) await updateDoc(doc(db,'checkbookMaster',form.id), payload);
       else await addDoc(collection(db,'checkbookMaster'), { ...payload, createdAt:serverTimestamp(), createdBy:user });
       setCbModal(null);
-      showToast('Checkbook saved.');
-    } catch(e) { console.error(e); alert('Save failed: ' + e.message); }
+      showToast('Checkbook saved.', 'success');
+    } catch(e) { console.error(e); showToast('Save failed: ' + e.message, 'error'); }
     setSaving(false);
   };
 
@@ -1131,35 +1337,118 @@ export default function CheckRegistryPage() {
   const flagStaleChecks = async () => {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 180);
     const stale = checks.filter(c => { if (c.status !== 'Issued') return false; const d = new Date(c.issueDate); return !isNaN(d) && d < cutoff; });
-    if (!stale.length) { showToast('No stale checks found.'); return; }
+    if (!stale.length) { showToast('No stale checks found.', 'info'); return; }
     askConfirm(`Mark ${stale.length} check(s) issued before ${cutoff.toLocaleDateString()} as Stale?`, async () => {
       await Promise.all(stale.map(c => updateDoc(doc(db,'checkRegister',c.id), { status:'Stale', staleDate:today(), updatedAt:serverTimestamp(), updatedBy:user })));
-      showToast(`${stale.length} check(s) flagged as Stale.`);
+      showToast(`${stale.length} check(s) flagged as Stale.`, 'success');
     });
   };
 
   const deleteCheck = (id) => {
     askConfirm('Delete this check entry? This cannot be undone.', async () => {
       const checkSnap = checks.find(c => c.id === id);
-      const voucherDocId = checkSnap?.voucherDocId || null;
+      let voucherDocId = checkSnap?.voucherDocId || null;
+      const checkbookId = checkSnap?.checkbookId || null;
+      const bankCode    = checkSnap?.bankCode    || null;
 
-      // 1. Delete all linked JEs (matched by sourceDocId = voucherDocId)
+      // Fallback: find voucher by referenceId when voucherDocId wasn't stored (legacy data)
+      if (!voucherDocId && checkSnap?.referenceId) {
+        const vFallback = await getDocs(query(collection(db,'vouchers'), where('voucherId','==',checkSnap.referenceId), limit(1)));
+        if (!vFallback.empty) voucherDocId = vFallback.docs[0].id;
+      }
+
+      // Collect all sibling check register entries
+      let siblingDocs = [];
       if (voucherDocId) {
+        const siblingSnap = await getDocs(query(collection(db,'checkRegister'), where('voucherDocId','==',voucherDocId)));
+        siblingDocs = siblingSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      } else {
+        siblingDocs = checkSnap ? [checkSnap] : [];
+      }
+
+      // Separate: 'Issued' checks → delete (return to inventory)
+      //           cancelled/voided/stopped/stale/cleared → keep as unlinked consumed records
+      const toDelete = siblingDocs.filter(c => c.status === 'Issued');
+      const toKeep   = siblingDocs.filter(c => c.status !== 'Issued');
+
+      // Unlink kept entries from the voucher (preserve the consumed check number)
+      if (toKeep.length > 0) {
+        await Promise.all(toKeep.map(c =>
+          updateDoc(doc(db,'checkRegister',c.id), {
+            voucherDocId:  null,
+            referenceId:   null,
+            referenceType: 'Consumed (Voucher Deleted)',
+            updatedAt: serverTimestamp(), updatedBy: user,
+          })
+        ));
+      }
+
+      if (voucherDocId) {
+        // 1. Delete all linked JEs
         const jeSnap = await getDocs(query(collection(db,'journalEntries'), where('sourceDocId','==',voucherDocId)));
         await Promise.all(jeSnap.docs.map(d => deleteDoc(d.ref)));
 
         // 2. Delete the voucher document itself
         await deleteDoc(doc(db,'vouchers',voucherDocId));
+      }
 
-        // 3. Delete all sibling checkRegister entries sharing the same voucherDocId
-        const siblingSnap = await getDocs(query(collection(db,'checkRegister'), where('voucherDocId','==',voucherDocId)));
-        await Promise.all(siblingSnap.docs.map(d => deleteDoc(d.ref)));
-      } else {
-        // No voucher link — just delete this single checkRegister entry
+      // 3. Delete only the 'Issued' check register entries
+      if (toDelete.length > 0) {
+        await Promise.all(toDelete.map(c => deleteDoc(doc(db,'checkRegister',c.id))));
+      } else if (!voucherDocId) {
+        // No voucher link and no entries to delete — delete this single entry
         await deleteDoc(doc(db,'checkRegister',id));
       }
 
-      showToast('Check entry and linked records deleted.');
+      // 4. Roll back nextCheckNumber to reflect freed numbers
+      const cbId = checkbookId || siblingDocs[0]?.checkbookId || null;
+      const cbRef = cbId ? checkbooks.find(b => b.id === cbId) : null;
+      const cbFallback = !cbRef && bankCode
+        ? checkbooks.find(b =>
+            b.bankCode === bankCode &&
+            toDelete.some(c => {
+              const n = parseInt(c.checkNumber);
+              return n >= parseInt(b.startingNumber) && n <= parseInt(b.endingNumber);
+            })
+          )
+        : null;
+      const cb = cbRef || cbFallback;
+
+      if (cb && toDelete.length > 0) {
+        // Query all remaining checkRegister entries for this checkbook to find the new max
+        const remainingSnap = await getDocs(query(
+          collection(db,'checkRegister'),
+          where('checkbookId','==',cb.id),
+        ));
+        const remainingNos = remainingSnap.docs
+          .map(d => parseInt(d.data().checkNumber || '0') || 0)
+          .filter(n => n > 0);
+
+        const width   = String(cb.endingNumber || cb.startingNumber).length;
+        const startNo = parseInt(cb.startingNumber) || 0;
+        const endNo   = parseInt(cb.endingNumber) || 0;
+        let newNext;
+        if (remainingNos.length > 0) {
+          const maxUsed = Math.max(...remainingNos);
+          if (maxUsed >= startNo && maxUsed <= endNo) {
+            newNext = String(maxUsed + 1).padStart(width, '0');
+          } else {
+            newNext = cb.startingNumber; // all remaining are outside range — reset
+          }
+        } else {
+          newNext = cb.startingNumber; // no checks left — reset to start
+        }
+
+        // Only update if we're actually rolling back (never advance forward here)
+        if (parseInt(newNext) < parseInt(cb.nextCheckNumber)) {
+          await updateDoc(doc(db,'checkbookMaster',cb.id), {
+            nextCheckNumber: newNext,
+            updatedAt: serverTimestamp(), updatedBy: user,
+          });
+        }
+      }
+
+      showToast('Check entry and linked records deleted.', 'success');
     });
   };
 
@@ -1310,10 +1599,10 @@ export default function CheckRegistryPage() {
                       <td style={{ fontFamily:'monospace', fontSize:11 }}>
                         {c.voucherDocId ? (
                           <button
-                            style={{ background:'none', border:'none', padding:0, cursor:'pointer', color:'#2563eb', fontFamily:'monospace', fontSize:11, fontWeight:700, textDecoration:'underline', textUnderlineOffset:2 }}
+                            style={{ background:'none', border:'none', padding:0, cursor:'pointer', color:'#f97316', fontFamily:'monospace', fontSize:11, fontWeight:700, textDecoration:'underline', textUnderlineOffset:2 }}
                             onClick={() => {
                               const v = vouchers.find(x => x.id === c.voucherDocId);
-                              if (v) setCvPdfModal({ voucher: v, relatedChecks: checks.filter(x => x.voucherDocId === v.id) });
+                              if (v) setCvDetailsModal({ voucher: v, relatedChecks: checks.filter(x => x.voucherDocId === v.id) });
                             }}
                           >{c.referenceId || '—'}</button>
                         ) : (
@@ -1378,6 +1667,234 @@ export default function CheckRegistryPage() {
             </div>
           </>
         )}
+      </div>
+    );
+  }
+
+  // ══ Check Voucher Details Modal ════════════════════════════════════════════
+  function CheckVoucherDetailsModal({ voucher, relatedChecks, onClose, onStatusChange }) {
+    const [actioning, setActioning] = useState(false);
+
+    const vSs = VOUCHER_STATUS_STYLES[voucher.status] || VOUCHER_STATUS_STYLES['Pending'];
+    const totalAmt = (voucher.lines || []).reduce((s, l) => s + (Number(l.amount) || 0), 0);
+    const fromAcct = accounts.find(a => a.code === voucher.paymentFromAccountCode || a.id === voucher.paymentFromAccountCode);
+
+    const STEPS = ['Pending', 'For Verification', 'Verified', 'For Approval', 'Approved', 'Paid'];
+    const stepIdx = STEPS.indexOf(voucher.status);
+
+    const doStatusChange = async (newStatus) => {
+      setActioning(true);
+      try {
+        await updateDoc(doc(db, 'vouchers', voucher.id), { status: newStatus, updatedAt: serverTimestamp(), updatedBy: user });
+        onStatusChange?.(newStatus);
+        showToast(`Voucher moved to "${newStatus}".`, 'success');
+      } catch (e) { showToast('Error: ' + e.message, 'error'); }
+      setActioning(false);
+    };
+
+    const nextActions = (() => {
+      const s = voucher.status;
+      if ((s === 'Draft' || s === 'Rejected') && (cvCanMake || cvCanVerify || cvCanApprove))
+        return [{ label:'Submit for Approval', next:'Pending',          color:'#f97316' }];
+      if (s === 'Pending' && (cvCanMake || cvCanVerify || cvCanApprove))
+        return [{ label:'Send for Verification', next:'For Verification', color:'#0369a1' }];
+      if (s === 'For Verification' && cvCanVerify)
+        return [{ label:'Mark Verified',        next:'Verified',        color:'#0369a1' }];
+      if (s === 'Verified' && cvCanVerify)
+        return [{ label:'Send for Approval',    next:'For Approval',    color:'#1d4ed8' }];
+      if (s === 'For Approval' && cvCanApprove)
+        return [{ label:'Approve',              next:'Approved',        color:'#15803d' }];
+      return [];
+    })();
+
+    const canReject = ['Pending','For Verification','Verified','For Approval'].includes(voucher.status)
+      && (cvCanVerify || cvCanApprove);
+    const canVoid   = !['Voided','Paid'].includes(voucher.status) && (cvCanApprove);
+    const canEdit   = ['Draft','Pending'].includes(voucher.status);
+
+    return (
+      <div className="backdrop" onClick={onClose}>
+        <div style={{ width:'min(780px,98vw)', maxHeight:'92vh', background:'#fff', borderRadius:16, display:'flex', flexDirection:'column', overflow:'hidden', boxShadow:'0 24px 64px rgba(0,0,0,.25)' }} onClick={e => e.stopPropagation()}>
+
+          {/* Header */}
+          <div style={{ display:'flex', alignItems:'center', gap:10, padding:'14px 20px', borderBottom:'1px solid #e5e7eb', background:'#f8fafc', flexShrink:0 }}>
+            <span style={{ fontFamily:'monospace', fontWeight:900, fontSize:15 }}>{voucher.voucherId || voucher.id}</span>
+            <span className="pill" style={{ background:vSs.background, borderColor:vSs.borderColor, color:vSs.color }}>{voucher.status || 'Pending'}</span>
+            <span style={{ fontSize:11, color:'#64748b', marginLeft:2 }}>Check Voucher</span>
+            <div style={{ marginLeft:'auto', display:'flex', gap:8, alignItems:'center' }}>
+              <button
+                className="btn btn-ghost btn-sm"
+                style={{ fontSize:12 }}
+                onClick={() => { setCvDetailsModal(null); setCvPdfModal({ voucher, relatedChecks }); }}
+              >⬇ Download PDF</button>
+              {canEdit && (
+                <button className="btn btn-ghost btn-sm" style={{ fontSize:12 }}
+                  onClick={() => { onClose(); openEditCv(relatedChecks[0]); }}>
+                  ✎ Edit
+                </button>
+              )}
+              <button style={{ background:'none', border:'none', fontSize:18, cursor:'pointer', color:'#94a3b8', lineHeight:1 }} onClick={onClose}>✕</button>
+            </div>
+          </div>
+
+          <div style={{ overflowY:'auto', flex:1, padding:'18px 20px' }}>
+
+            {/* Approval progress */}
+            <div style={{ marginBottom:18 }}>
+              <div style={{ position:'relative' }}>
+                {/* Track background */}
+                <div style={{ position:'absolute', top:10, left:`${100/STEPS.length/2}%`, right:`${100/STEPS.length/2}%`, height:2, background:'#e2e8f0', zIndex:0 }} />
+                {/* Completed fill */}
+                {stepIdx > 0 && (
+                  <div style={{ position:'absolute', top:10, left:`${100/STEPS.length/2}%`, width:`calc(${stepIdx/(STEPS.length-1)} * (100% - ${100/STEPS.length}%))`, height:2, background:'#22c55e', zIndex:1, transition:'width .3s' }} />
+                )}
+                {/* Steps */}
+                <div style={{ display:'flex', position:'relative', zIndex:2 }}>
+                  {STEPS.map((s, i) => {
+                    const done    = stepIdx > i || voucher.status === 'Paid';
+                    const current = stepIdx === i;
+                    const bg = done ? '#22c55e' : current ? '#f97316' : '#e2e8f0';
+                    const tc = done || current ? '#fff' : '#94a3b8';
+                    return (
+                      <div key={s} style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center' }}>
+                        <div style={{ width:22, height:22, borderRadius:'50%', background:bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800, color:tc }}>
+                          {done ? '✓' : i + 1}
+                        </div>
+                        <div style={{ fontSize:9, marginTop:4, fontWeight: current ? 800 : 500, color: current ? '#f97316' : '#64748b', whiteSpace:'nowrap', textAlign:'center' }}>{s}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Voucher info grid */}
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10, marginBottom:16, background:'#f8fafc', border:'1px solid #e5e7eb', borderRadius:10, padding:'12px 14px' }}>
+              <div>
+                <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Date</div>
+                <div style={{ fontWeight:700, fontSize:13 }}>{voucher.preparationDate || '—'}</div>
+              </div>
+              <div>
+                <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Payee</div>
+                <div style={{ fontWeight:700, fontSize:13 }}>{voucher.contactSummary || '—'}</div>
+              </div>
+              <div>
+                <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Total Amount</div>
+                <div style={{ fontWeight:900, fontSize:15, color:'#0b1220' }}>{fmt(voucher.totalAmount ?? totalAmt)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Purpose</div>
+                <div style={{ fontSize:12, color:'#374151' }}>{voucher.purposeCategory || '—'}</div>
+              </div>
+              <div>
+                <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Payment From</div>
+                <div style={{ fontSize:12, color:'#374151' }}>{fromAcct ? `${fromAcct.code} — ${fromAcct.name}` : (voucher.paymentFromAccountCode || '—')}</div>
+              </div>
+              {voucher.notes && (
+                <div style={{ gridColumn:'1/-1' }}>
+                  <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Notes</div>
+                  <div style={{ fontSize:12, color:'#374151' }}>{voucher.notes}</div>
+                </div>
+              )}
+            </div>
+
+            {/* Check schedule */}
+            {relatedChecks.length > 0 && (
+              <div style={{ marginBottom:16 }}>
+                <div style={{ fontSize:11, fontWeight:800, color:'#0b1220', marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em' }}>Checks</div>
+                <div style={{ border:'1px solid #e5e7eb', borderRadius:10, overflow:'hidden' }}>
+                  <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                    <thead><tr style={{ background:'#f8fafc' }}>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Check No.</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Date</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Bank</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'right', textTransform:'uppercase' }}>Amount</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Status</th>
+                    </tr></thead>
+                    <tbody>
+                      {relatedChecks.map((c, i) => {
+                        const bk  = bankAccounts.find(b => b.code === c.bankCode || b.id === c.bankCode);
+                        const cSs = STATUS_STYLES[c.status] || STATUS_STYLES.Issued;
+                        return (
+                          <tr key={c.id || i} style={{ borderTop:'1px solid #f1f5f9' }}>
+                            <td style={{ padding:'7px 10px', fontFamily:'monospace', fontWeight:700 }}>{c.checkNumber || '—'}</td>
+                            <td style={{ padding:'7px 10px' }}>{c.checkDate || c.issueDate || '—'}</td>
+                            <td style={{ padding:'7px 10px', fontSize:11, color:'#64748b' }}>{bk ? `${bk.code} — ${bk.name}` : (c.bankCode || '—')}</td>
+                            <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:700 }}>{fmt(c.amount)}</td>
+                            <td style={{ padding:'7px 10px' }}>
+                              <span className="pill" style={{ background:cSs.background, borderColor:cSs.borderColor, color:cSs.color, fontSize:10 }}>{c.status}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Payment lines */}
+            {(voucher.lines || []).length > 0 && (
+              <div style={{ marginBottom:8 }}>
+                <div style={{ fontSize:11, fontWeight:800, color:'#0b1220', marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em' }}>Payment Details</div>
+                <div style={{ border:'1px solid #e5e7eb', borderRadius:10, overflow:'hidden' }}>
+                  <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                    <thead><tr style={{ background:'#f8fafc' }}>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Contact</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Expense Acct</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Description</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'right', textTransform:'uppercase' }}>Amount</th>
+                      <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'right', textTransform:'uppercase' }}>Tax</th>
+                    </tr></thead>
+                    <tbody>
+                      {(voucher.lines || []).map((l, i) => (
+                        <tr key={i} style={{ borderTop:'1px solid #f1f5f9' }}>
+                          <td style={{ padding:'7px 10px' }}>{l.contact || '—'}</td>
+                          <td style={{ padding:'7px 10px', fontFamily:'monospace', fontSize:11 }}>{l.expenseAccountCode || '—'}</td>
+                          <td style={{ padding:'7px 10px', color:'#64748b' }}>{l.description || '—'}</td>
+                          <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:700 }}>{fmt(l.amount)}</td>
+                          <td style={{ padding:'7px 10px', textAlign:'right', fontSize:11, color:'#64748b' }}>{l.taxAmt ? fmt(l.taxAmt) : '—'}</td>
+                        </tr>
+                      ))}
+                      <tr style={{ borderTop:'2px solid #e5e7eb', background:'#f8fafc' }}>
+                        <td colSpan={3} style={{ padding:'7px 10px', fontWeight:800, textAlign:'right', fontSize:11, color:'#64748b' }}>GROSS TOTAL</td>
+                        <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:900, fontSize:13 }}>{fmt(totalAmt)}</td>
+                        <td />
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+          </div>
+
+          {/* Footer actions */}
+          <div style={{ display:'flex', gap:8, alignItems:'center', padding:'12px 20px', borderTop:'1px solid #e5e7eb', background:'#fff', flexShrink:0, flexWrap:'wrap' }}>
+            {nextActions.map(a => (
+              <button key={a.next} disabled={actioning} className="btn btn-sm"
+                style={{ background:a.color, color:'#fff', fontWeight:700 }}
+                onClick={() => doStatusChange(a.next)}>
+                {actioning ? '…' : a.label}
+              </button>
+            ))}
+            {canReject && (
+              <button disabled={actioning} className="btn btn-sm"
+                style={{ background:'#fef2f2', color:'#dc2626', border:'1px solid #fecaca', fontWeight:700 }}
+                onClick={() => doStatusChange('Rejected')}>
+                Reject
+              </button>
+            )}
+            {canVoid && (
+              <button disabled={actioning} className="btn btn-sm"
+                style={{ background:'#f8fafc', color:'#64748b', border:'1px solid #e2e8f0', fontWeight:700 }}
+                onClick={() => askConfirm('Void this check voucher?', () => doStatusChange('Voided'))}>
+                Void
+              </button>
+            )}
+            <button className="btn btn-ghost btn-sm" style={{ marginLeft:'auto' }} onClick={onClose}>Close</button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1513,7 +2030,7 @@ export default function CheckRegistryPage() {
                                 style={{ background:'none', border:'none', color:'#f97316', fontWeight:700, cursor:'pointer', fontSize:12, padding:0, textDecoration:'underline' }}
                                 onClick={() => {
                                   const v = vouchers.find(x => x.id === c.voucherDocId);
-                                  if (v) setCvPdfModal({ voucher: v, relatedChecks: checks.filter(x => x.voucherDocId === v.id) });
+                                  if (v) setCvDetailsModal({ voucher: v, relatedChecks: checks.filter(x => x.voucherDocId === v.id) });
                                 }}
                               >{c.referenceId || c.voucherDocId}</button>
                             ) : (c.referenceId || '—')}
@@ -1716,7 +2233,7 @@ export default function CheckRegistryPage() {
                       <td>
                         <div style={{ display:'flex', gap:4 }}>
                           <button className="btn btn-ghost btn-sm" onClick={() => setCbModal({ ...cb })}>Edit</button>
-                          <button onClick={() => askConfirm('Delete this checkbook?', async () => { await deleteDoc(doc(db,'checkbookMaster',cb.id)); showToast('Checkbook deleted.'); })} style={{ background:'none', border:'none', color:'#dc2626', cursor:'pointer', fontWeight:900, fontSize:13, padding:'3px 5px' }}>✕</button>
+                          <button onClick={() => askConfirm('Delete this checkbook?', async () => { try { await deleteDoc(doc(db,'checkbookMaster',cb.id)); showToast('Checkbook deleted.', 'success'); } catch(e) { showToast('Delete failed: ' + e.message, 'error'); } })} style={{ background:'none', border:'none', color:'#dc2626', cursor:'pointer', fontWeight:900, fontSize:13, padding:'3px 5px' }}>✕</button>
                         </div>
                       </td>
                     </tr>
@@ -1785,15 +2302,20 @@ export default function CheckRegistryPage() {
                 })()}
                 <button className="btn btn-ghost btn-sm" onClick={() => {
                   if (cvForm.isMultipleChecks) {
-                    // Always assign sequential numbers to all rows from the current next —
-                    // never preserve existing values, which would create cursor jumps and gaps.
+                    // Assign sequential numbers per check group (sub-lines share the same number)
                     const width = String(cb.nextCheckNumber).length;
                     let cursor = parseInt(cb.nextCheckNumber) || 0;
-                    setCvLines(prev => prev.map(l => {
-                      const filled = { ...l, lineCheckNo: String(cursor).padStart(width, '0') };
-                      cursor++;
-                      return filled;
-                    }));
+                    const groupNos = {};
+                    const seenGroups = new Set();
+                    const groups = [];
+                    cvLines.forEach(l => {
+                      const gid = l.checkGroupId || '_default';
+                      if (!seenGroups.has(gid)) { seenGroups.add(gid); groups.push(gid); }
+                    });
+                    groups.forEach(gid => { groupNos[gid] = String(cursor++).padStart(width, '0'); });
+                    setCvLines(prev => prev.map(l => ({
+                      ...l, lineCheckNo: groupNos[l.checkGroupId || '_default'] || l.lineCheckNo,
+                    })));
                   } else {
                     upd('globalCheckNo', cb.nextCheckNumber);
                   }
@@ -1825,7 +2347,16 @@ export default function CheckRegistryPage() {
               </div>
               <div className="col2" style={{ display:'flex', alignItems:'center' }}>
                 <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:13, fontWeight:600, whiteSpace:'nowrap' }}>
-                  <input type="checkbox" checked={!!cvForm.isMultipleChecks} onChange={e => upd('isMultipleChecks',e.target.checked)} />
+                  <input type="checkbox" checked={!!cvForm.isMultipleChecks} onChange={e => {
+                    const on = e.target.checked;
+                    setCvForm(f => ({ ...f, isMultipleChecks: on }));
+                    if (on) {
+                      // Give each existing line its own checkGroupId (one check per existing line)
+                      setCvLines(prev => prev.map(l => ({
+                        ...l, checkGroupId: l.checkGroupId || uid(),
+                      })));
+                    }
+                  }} />
                   Multiple Checks
                 </label>
               </div>
@@ -1876,73 +2407,180 @@ export default function CheckRegistryPage() {
                 Tax amounts are inclusive
               </label>
             </div>
-            <table className="lines-tbl" style={{ width:'100%' }}>
-              <thead>
-                <tr>
-                  <th style={{ width:28 }}>#</th>
-                  <th style={{ width:160 }}>Contact / Payee</th>
-                  <th>Account (COA)</th>
-                  <th>Description</th>
-                  {cvForm.isMultipleChecks && <th style={{ width:130 }}>Check #</th>}
-                  {cvForm.isMultipleChecks && <th style={{ width:110 }}>Check Date</th>}
-                  <th style={{ width:130 }}>EWT / Tax Rate</th>
-                  <th style={{ textAlign:'right', width:110 }}>Amount</th>
-                  <th style={{ textAlign:'right', width:90 }}>Tax Amt</th>
-                  <th style={{ width:32 }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {cvLines.map((l, i) => (
-                  <tr key={l.id}>
-                    <td style={{ textAlign:'center', color:'#94a3b8', fontWeight:700 }}>{i+1}</td>
-                    <td>
-                      <ContactPicker
-                        contacts={contacts}
-                        value={l.contactId}
-                        displayName={l.contact}
-                        defaultNewType="Supplier"
-                        onChange={({contactId, contactName})=>{ setLine(i,'contactId',contactId); setLine(i,'contact',contactName); }}
-                        compact
-                      />
-                    </td>
-                    <td>
-                      <AccountCombobox
-                        rawAccounts={accounts}
-                        value={l.expenseAccount}
-                        onChange={v => setLine(i,'expenseAccount',v)}
-                        placeholder="— Select Account —"
-                      />
-                    </td>
-                    <td><input value={l.description} onChange={e => setLine(i,'description',e.target.value)} placeholder="Description" /></td>
-                    {cvForm.isMultipleChecks && <td><input value={l.lineCheckNo} onChange={e => setLine(i,'lineCheckNo',e.target.value)} placeholder="Check #" /></td>}
-                    {cvForm.isMultipleChecks && <td><input type="date" value={l.lineCheckDate} onChange={e => setLine(i,'lineCheckDate',e.target.value)} /></td>}
-                    <td style={{ minWidth:160 }}>
-                      <select value={l.taxRateId||''} onChange={e => setLine(i,'taxRateId',e.target.value)}>
-                        <option value="">N/A</option>
-                        {taxRates.length > 0 && <optgroup label="— Rates —">{taxRates.map(r => <option key={r.id} value={r.id}>{r.name} ({(r.rate||0).toFixed(2)}%)</option>)}</optgroup>}
-                        {taxGroups.length > 0 && <optgroup label="— Groups —">{taxGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</optgroup>}
-                      </select>
-                    </td>
-                    <td><input type="number" style={{ textAlign:'right' }} value={l.amount} onChange={e => setLine(i,'amount',e.target.value)} placeholder="0.00" /></td>
-                    <td style={{ textAlign:'right', color:'#7c3aed', fontWeight:700, fontSize:12 }}>{l.taxAmt > 0 ? fmtN(l.taxAmt) : '—'}</td>
-                    <td><button className="btn btn-ghost btn-xs" style={{ color:'#dc2626' }} onClick={() => removeLine(i)} disabled={cvLines.length <= 1}>✕</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <button className="btn btn-ghost btn-sm" onClick={addLine}>+ Add New Row</button>
+            {cvForm.isMultipleChecks ? (
+              /* ── Multiple Checks mode: one card per physical check, sub-lines inside ── */
+              <>
+                {(() => {
+                  const groups = [];
+                  const seen = new Set();
+                  cvLines.forEach(l => {
+                    if (l.checkGroupId && !seen.has(l.checkGroupId)) {
+                      seen.add(l.checkGroupId); groups.push(l.checkGroupId);
+                    }
+                  });
+                  return groups.map((groupId, gIdx) => {
+                    const groupLines = cvLines.filter(l => l.checkGroupId === groupId);
+                    const firstLine  = groupLines[0] || {};
+                    const groupTotal = groupLines.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+                    const groupTax   = groupLines.reduce((s, l) => s + (Number(l.taxAmt)  || 0), 0);
+                    return (
+                      <div key={groupId} style={{ border:'1px solid #e2e8f0', borderRadius:10, marginBottom:8, overflow:'hidden' }}>
+                        {/* Check header: contact, check #, date, remove */}
+                        <div style={{ display:'grid', gridTemplateColumns:'28px 1fr 155px 125px 34px', gap:6, padding:'7px 10px', background:'#f0f9ff', borderBottom:'1px solid #e2e8f0', alignItems:'center' }}>
+                          <div style={{ fontWeight:800, color:'#0369a1', fontSize:12, textAlign:'center' }}>{gIdx+1}</div>
+                          <ContactPicker
+                            contacts={contacts}
+                            value={firstLine.contactId}
+                            displayName={firstLine.contact}
+                            defaultNewType="Supplier"
+                            compact
+                            onChange={({contactId: cid, contactName: cn}) => {
+                              setCvLines(prev => prev.map(l =>
+                                l.checkGroupId === groupId ? { ...l, contactId: cid, contact: cn } : l
+                              ));
+                            }}
+                          />
+                          <input
+                            value={firstLine.lineCheckNo || ''}
+                            onChange={e => setCheckGroupField(groupId, 'lineCheckNo', e.target.value)}
+                            placeholder="Check #"
+                            style={{ width:'100%', border:'1px solid #e2e8f0', borderRadius:8, padding:'5px 8px', fontSize:12, fontFamily:'inherit' }}
+                          />
+                          <input
+                            type="date"
+                            value={firstLine.lineCheckDate || ''}
+                            onChange={e => setCheckGroupField(groupId, 'lineCheckDate', e.target.value)}
+                            style={{ width:'100%', border:'1px solid #e2e8f0', borderRadius:8, padding:'5px 8px', fontSize:12, fontFamily:'inherit' }}
+                          />
+                          <button className="btn btn-ghost btn-xs" style={{ color:'#dc2626' }}
+                            onClick={() => removeSubLine(groupLines[0]?.id)}
+                            title="Remove this check"
+                            disabled={groups.length <= 1}>✕</button>
+                        </div>
+                        {/* Sub-lines table */}
+                        <table className="lines-tbl" style={{ width:'100%' }}>
+                          <thead>
+                            <tr>
+                              <th style={{ width:24 }}></th>
+                              <th>Account (COA)</th>
+                              <th>Description</th>
+                              <th style={{ width:130 }}>EWT / Tax Rate</th>
+                              <th style={{ textAlign:'right', width:110 }}>Amount</th>
+                              <th style={{ textAlign:'right', width:90 }}>Tax Amt</th>
+                              <th style={{ width:32 }}></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {groupLines.map((l, subIdx) => (
+                              <tr key={l.id}>
+                                <td style={{ textAlign:'center', color:'#94a3b8', fontSize:10, fontWeight:700 }}>{String.fromCharCode(97 + subIdx)}</td>
+                                <td>
+                                  <AccountCombobox rawAccounts={accounts} value={l.expenseAccount}
+                                    onChange={v => setSubLineField(l.id, 'expenseAccount', v)}
+                                    placeholder="— Select Account —" />
+                                </td>
+                                <td><input value={l.description} onChange={e => setSubLineField(l.id, 'description', e.target.value)} placeholder="Description" /></td>
+                                <td style={{ minWidth:130 }}>
+                                  <select value={l.taxRateId||''} onChange={e => setSubLineField(l.id, 'taxRateId', e.target.value)}>
+                                    <option value="">N/A</option>
+                                    {taxRates.length > 0 && <optgroup label="— Rates —">{taxRates.map(r => <option key={r.id} value={r.id}>{r.name} ({(r.rate||0).toFixed(2)}%)</option>)}</optgroup>}
+                                    {taxGroups.length > 0 && <optgroup label="— Groups —">{taxGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</optgroup>}
+                                  </select>
+                                </td>
+                                <td><input type="number" style={{ textAlign:'right' }} value={l.amount} onChange={e => setSubLineField(l.id, 'amount', e.target.value)} placeholder="0.00" /></td>
+                                <td style={{ textAlign:'right', color:'#7c3aed', fontWeight:700, fontSize:12 }}>{l.taxAmt > 0 ? fmtN(l.taxAmt) : '—'}</td>
+                                <td><button className="btn btn-ghost btn-xs" style={{ color:'#dc2626' }}
+                                  onClick={() => removeSubLine(l.id)}
+                                  disabled={groupLines.length <= 1 && groups.length <= 1}>✕</button></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'5px 10px', background:'#f8fafc', borderTop:'1px solid #f1f5f9' }}>
+                          <button className="btn btn-ghost btn-xs" onClick={() => addSubLine(groupId)}>+ Add Line</button>
+                          <div style={{ fontSize:11, color:'#64748b' }}>
+                            Check Total: <strong>{fmt(groupTotal)}</strong>
+                            {groupTax > 0 && <> · EWT: <span style={{ color:'#7c3aed' }}>{fmt(groupTax)}</span></>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+                <button className="btn btn-ghost btn-sm" onClick={addCheckGroup}>+ Add New Check</button>
+              </>
+            ) : (
+              /* ── Single Check mode: original flat table ── */
+              <>
+                <table className="lines-tbl" style={{ width:'100%' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width:28 }}>#</th>
+                      <th style={{ width:160 }}>Contact / Payee</th>
+                      <th>Account (COA)</th>
+                      <th>Description</th>
+                      <th style={{ width:130 }}>EWT / Tax Rate</th>
+                      <th style={{ textAlign:'right', width:110 }}>Amount</th>
+                      <th style={{ textAlign:'right', width:90 }}>Tax Amt</th>
+                      <th style={{ width:32 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cvLines.map((l, i) => (
+                      <tr key={l.id}>
+                        <td style={{ textAlign:'center', color:'#94a3b8', fontWeight:700 }}>{i+1}</td>
+                        <td>
+                          <ContactPicker
+                            contacts={contacts}
+                            value={l.contactId}
+                            displayName={l.contact}
+                            defaultNewType="Supplier"
+                            onChange={({contactId, contactName})=>{ setLine(i,'contactId',contactId); setLine(i,'contact',contactName); }}
+                            compact
+                          />
+                        </td>
+                        <td>
+                          <AccountCombobox
+                            rawAccounts={accounts}
+                            value={l.expenseAccount}
+                            onChange={v => setLine(i,'expenseAccount',v)}
+                            placeholder="— Select Account —"
+                          />
+                        </td>
+                        <td><input value={l.description} onChange={e => setLine(i,'description',e.target.value)} placeholder="Description" /></td>
+                        <td style={{ minWidth:160 }}>
+                          <select value={l.taxRateId||''} onChange={e => setLine(i,'taxRateId',e.target.value)}>
+                            <option value="">N/A</option>
+                            {taxRates.length > 0 && <optgroup label="— Rates —">{taxRates.map(r => <option key={r.id} value={r.id}>{r.name} ({(r.rate||0).toFixed(2)}%)</option>)}</optgroup>}
+                            {taxGroups.length > 0 && <optgroup label="— Groups —">{taxGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</optgroup>}
+                          </select>
+                        </td>
+                        <td><input type="number" style={{ textAlign:'right' }} value={l.amount} onChange={e => setLine(i,'amount',e.target.value)} placeholder="0.00" /></td>
+                        <td style={{ textAlign:'right', color:'#7c3aed', fontWeight:700, fontSize:12 }}>{l.taxAmt > 0 ? fmtN(l.taxAmt) : '—'}</td>
+                        <td><button className="btn btn-ghost btn-xs" style={{ color:'#dc2626' }} onClick={() => removeLine(i)} disabled={cvLines.length <= 1}>✕</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <button className="btn btn-ghost btn-sm" onClick={addLine}>+ Add New Row</button>
+              </>
+            )}
             <div className="tfoot-row">
               <div style={{ display:'flex', gap:20 }}><span style={{ color:'#94a3b8' }}>Gross Total:</span><span>{fmt(lineTotal)}</span></div>
               <div style={{ display:'flex', gap:20 }}><span style={{ color:'#94a3b8' }}>Total EWT:</span><span style={{ color:'#7c3aed' }}>{fmt(taxTotal)}</span></div>
               <div style={{ display:'flex', gap:20, fontSize:15, fontWeight:900 }}><span style={{ color:'#64748b' }}>NET CHECK AMOUNT</span><span style={{ color:'#0b1220' }}>{fmt(netCash)}</span></div>
             </div>
 
-            {/* Journal Entry */}
-            <div className="sec-title" style={{ marginTop:20 }}>Journal Entry (Auto-Generated)</div>
+            {/* Journal Memo — settlement entry that will post when each check clears */}
+            <div className="sec-title" style={{ marginTop:20 }}>Journal Memo (On-Clearing Entry)</div>
+            <div style={{ marginBottom:6, fontSize:11, color:'#64748b', fontStyle:'italic' }}>
+              For reference only — no GL entry is posted at CV preparation (IFRS 9 §3.3.1).
+              This entry will be automatically posted when each check clears the bank.
+            </div>
             <table className="jnl-tbl">
               <thead><tr><th style={{ width:'55%' }}>COA Account</th><th style={{ textAlign:'right' }}>Debit</th><th style={{ textAlign:'right' }}>Credit</th></tr></thead>
               <tbody>
-                {journalLines.map((j, i) => (
+                {memoLines.map((j, i) => (
                   <tr key={i}>
                     <td style={{ fontFamily:'monospace', fontSize:12, paddingLeft: j.credit > 0 ? 28 : 8 }}>{j.account}</td>
                     <td style={{ textAlign:'right', fontWeight:700, color:j.debit?'#1d4ed8':'#94a3b8' }}>{j.debit ? fmtN(j.debit) : '—'}</td>
@@ -1952,22 +2590,27 @@ export default function CheckRegistryPage() {
               </tbody>
               <tfoot><tr>
                 <td style={{ fontWeight:900 }}>TOTAL</td>
-                <td style={{ textAlign:'right', fontWeight:900, color:jDebit===jCredit?'#15803d':'#dc2626' }}>{fmtN(jDebit)}</td>
-                <td style={{ textAlign:'right', fontWeight:900, color:jDebit===jCredit?'#15803d':'#dc2626' }}>{fmtN(jCredit)}</td>
+                <td style={{ textAlign:'right', fontWeight:900, color:mDebit===mCredit?'#15803d':'#dc2626' }}>{fmtN(mDebit)}</td>
+                <td style={{ textAlign:'right', fontWeight:900, color:mDebit===mCredit?'#15803d':'#dc2626' }}>{fmtN(mCredit)}</td>
               </tr></tfoot>
             </table>
-            {jDebit !== jCredit && <div style={{ color:'#dc2626', fontSize:11, marginTop:4, fontWeight:700 }}>⚠ Journal is unbalanced — verify all line amounts.</div>}
+            {mDebit !== mCredit && <div style={{ color:'#dc2626', fontSize:11, marginTop:4, fontWeight:700 }}>⚠ Memo is unbalanced — verify all line amounts.</div>}
 
             <div className="field" style={{ marginTop:12 }}>
               <label>Notes</label>
               <textarea rows={2} value={cvForm.notes||''} onChange={e => upd('notes',e.target.value)} style={{ resize:'vertical' }} />
             </div>
           </div>
+          {cvModal._edit && ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(cvModal._status) && (
+            <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:10,padding:'10px 14px',margin:'0 20px 12px',fontSize:12,fontWeight:700,color:'#92400e'}}>
+              ⚠ This check voucher is in <strong>{cvModal._status}</strong> status. Saving changes will revert it to <strong>For Verification</strong> for re-processing.
+            </div>
+          )}
           <div className="modal-f">
             <button className="btn btn-ghost" onClick={() => setCvModal(null)}>Cancel</button>
             {cvModal._edit ? (
               <button className="btn btn-primary" disabled={saving} onClick={updateCheckVoucher}>
-                {saving ? 'Saving…' : 'Save Changes'}
+                {saving ? 'Saving…' : (['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(cvModal._status) ? 'Save & Re-submit' : 'Save Changes')}
               </button>
             ) : (
               <button className="btn btn-primary" disabled={saving || !cb} onClick={createCheckVoucher}>
@@ -2154,11 +2797,20 @@ export default function CheckRegistryPage() {
         {activeTab === 'checkbooks' && <CheckbooksTab />}
       </div>
       {CheckVoucherModal()}
+      {cvDetailsModal && (
+        <CheckVoucherDetailsModal
+          voucher={cvDetailsModal.voucher}
+          relatedChecks={cvDetailsModal.relatedChecks}
+          onClose={() => setCvDetailsModal(null)}
+          onStatusChange={newStatus => setCvDetailsModal(prev => prev ? { ...prev, voucher: { ...prev.voucher, status: newStatus } } : prev)}
+        />
+      )}
       {cvPdfModal && (
         <CheckVoucherPdfModal
           voucher={cvPdfModal.voucher}
           relatedChecks={cvPdfModal.relatedChecks}
           bankAccounts={bankAccounts}
+          accounts={accounts}
           onClose={() => setCvPdfModal(null)}
         />
       )}
@@ -2179,7 +2831,7 @@ export default function CheckRegistryPage() {
           </div>
         </div>
       )}
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
     </div>
   );
 }

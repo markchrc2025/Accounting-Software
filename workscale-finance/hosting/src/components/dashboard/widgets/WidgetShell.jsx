@@ -14,9 +14,9 @@ export function WidgetShell({
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className={`h-full flex flex-col bg-white rounded-xl border border-[#E5E7EB] shadow-sm p-5 overflow-hidden ${className}`}>
+    <div className={`h-full flex flex-col bg-white rounded-xl border border-[#E5E7EB] shadow-sm p-3 overflow-hidden ${className}`}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-3 flex-shrink-0">
+      <div className="flex items-center justify-between mb-2 flex-shrink-0">
         <span className="text-[11px] font-semibold uppercase tracking-[0.05em] text-[#6B7280]">
           {label}
         </span>
@@ -33,7 +33,7 @@ export function WidgetShell({
       </div>
 
       {/* Footer */}
-      <div className="flex items-center justify-between mt-3 pt-2 border-t border-[#F3F4F6] flex-shrink-0">
+      <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#F3F4F6] flex-shrink-0">
         <div className="text-[12px]">{footer}</div>
 
         {/* 3-dot menu */}

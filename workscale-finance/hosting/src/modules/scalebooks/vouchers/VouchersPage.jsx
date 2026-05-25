@@ -114,7 +114,10 @@ export default function VouchersPage() {
   const [taxRates,         setTaxRates]         = useState([]);
   const [taxGroups,        setTaxGroups]        = useState([]);
   const [purposeCategories, setPurposeCategories] = useState([]);
-  const [loans, setLoans] = useState([]); // for LOAN voucher → loanId picker
+  const [loans,      setLoans]      = useState([]); // for LOAN voucher → loanId picker
+  const [cvList,     setCvList]     = useState([]); // loan-linked CVs for checkVoucherId picker
+  const [cvSearch,   setCvSearch]   = useState('');
+  const [cvDropOpen, setCvDropOpen] = useState(false);
 
   // Filters
   const [search,        setSearch]       = useState('');
@@ -137,6 +140,7 @@ export default function VouchersPage() {
   // Modals
   const [showModal,    setShowModal]   = useState(false);
   const [viewModal,    setViewModal]   = useState(null);
+  const [previewJe,    setPreviewJe]   = useState(null);
   const [pdfModal,     setPdfModal]    = useState(null);
   const [openMenuId,   setOpenMenuId]  = useState(null);
   const [menuPos,      setMenuPos]     = useState({ top:0, right:0 });
@@ -171,6 +175,15 @@ export default function VouchersPage() {
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
   const user = auth.currentUser?.email || '';
 
+  // Fetch linked JE when viewModal opens
+  useEffect(() => {
+    setPreviewJe(null);
+    if (!viewModal?.linkedJeId) return;
+    getDoc(doc(db, 'journalEntries', viewModal.linkedJeId))
+      .then(snap => { if (snap.exists()) setPreviewJe({ id: snap.id, ...snap.data() }); })
+      .catch(() => {});
+  }, [viewModal]);
+
   // Live data
   useEffect(() => {
     const unsub = onSnapshot(
@@ -187,6 +200,10 @@ export default function VouchersPage() {
       const data = snap.data() || {};
       setLoans(Array.isArray(data.loans) ? data.loans : []);
     });
+    // Loan-linked CVs (for checkVoucherId picker on Loan Vouchers)
+    getDocs(query(collection(db,'vouchers'), where('voucherType','==','CHECK'))).then(snap => {
+      setCvList(snap.docs.map(d => ({ docId:d.id, ...d.data() })).filter(v => v.loanId));
+    }).catch(() => {});
     return () => { unsub(); unsubAccounts(); unsubContacts(); unsubRates(); unsubGroups(); unsubCats(); };
   }, []);
 
@@ -252,11 +269,17 @@ export default function VouchersPage() {
 
   const bulkSubmit = () => {
     if (!selected.size) return;
-    const count = selected.size;
-    askConfirm(`Submit ${count} voucher(s) for approval?`, async () => {
-      await Promise.all([...selected].map(id => updateDoc(doc(db,'vouchers',id), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user })));
+    const submittable = vouchers.filter(v => selected.has(v.id) && ['Draft', 'Pending'].includes(v.status));
+    const skipped     = selected.size - submittable.length;
+    if (!submittable.length) {
+      showToast('No eligible vouchers to submit (only Draft vouchers can be submitted).');
+      return;
+    }
+    const skipNote = skipped > 0 ? ` (${skipped} already submitted/approved will be skipped)` : '';
+    askConfirm(`Submit ${submittable.length} Draft voucher(s) for verification?${skipNote}`, async () => {
+      await Promise.all(submittable.map(v => updateDoc(doc(db,'vouchers',v.id), { status:'For Verification', updatedAt:serverTimestamp(), updatedBy:user })));
       setSelected(new Set());
-      showToast(`${count} voucher(s) submitted.`);
+      showToast(`${submittable.length} voucher(s) submitted for verification.`);
     });
   };
 
@@ -313,7 +336,7 @@ export default function VouchersPage() {
         taxRateId:   prefill.taxRateId || '',
       }]);
     } else {
-      setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'', inclusive:false, loanId:'' });
+      setForm({ voucherType:'PAYMENT', preparationDate:today(), purposeCategory:'', paymentFrom:'', status:'Pending', notes:'', inclusive:false, loanId:'', checkVoucherId:'' });
       setLines([EMPTY_LINE()]);
     }
     setShowModal(true);
@@ -334,7 +357,7 @@ export default function VouchersPage() {
 
   const openEdit = (v) => {
     setEditing(v);
-    setForm({ voucherType:v.voucherType||'PAYMENT', preparationDate:v.preparationDate||today(), purposeCategory:v.purposeCategory||'', paymentFrom:v.paymentFromAccountCode||'', status:v.status||'Pending', notes:v.notes||'', inclusive: !!(v.lines||[]).find(l=>l.taxRateId)?.inclusive, loanId: v.loanId || '' });
+    setForm({ voucherType:v.voucherType||'PAYMENT', preparationDate:v.preparationDate||today(), purposeCategory:v.purposeCategory||'', paymentFrom:v.paymentFromAccountCode||'', status:v.status||'Pending', notes:v.notes||'', inclusive: !!(v.lines||[]).find(l=>l.taxRateId)?.inclusive, loanId: v.loanId || '', checkVoucherId: v.checkVoucherId || '' });
     setLines((v.lines||[]).map(l => ({ id:uid(), contactId:l.contactId||'', contact:l.contact||'', expenseAccount:l.expenseAccountCode||'', description:l.description||'', amount:String(l.amount||''), category:l.category||'', taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:l.taxRate||0, taxAmt:l.taxAmt||0, inclusive:l.inclusive||false })));
     if ((v.lines||[]).length === 0) setLines([EMPTY_LINE()]);
     setShowModal(true);
@@ -366,7 +389,11 @@ export default function VouchersPage() {
   const saveVoucher = async (newStatus) => {
     const totalAmount = lines.reduce((s,l) => s + (Number(l.amount)||0), 0);
     const contactSummary = [...new Set(lines.map(l=>l.contact).filter(Boolean))].join(', ');
-    const status = newStatus || form.status;
+    let status = newStatus || form.status;
+    // Editing a voucher that's already in the approval workflow → revert to For Verification
+    if (editing && ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(editing.status)) {
+      status = 'For Verification';
+    }
     const payload = {
       voucherType:           form.voucherType,
       preparationDate:       form.preparationDate,
@@ -377,6 +404,7 @@ export default function VouchersPage() {
       status,
       notes:                 form.notes||'',
       loanId: isLoanLinked ? (form.loanId || '') : '',
+      checkVoucherId: isLoan ? (form.checkVoucherId || '') : '',
       lines: lines.map((l,i) => ({ lineNo:i+1, contactId:l.contactId||'', contact:l.contact, expenseAccountCode:l.expenseAccount, description:l.description, amount:Number(l.amount)||0, category:l.category, taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:Number(l.taxRate)||0, taxAmt:Number(l.taxAmt)||0, inclusive:!!l.inclusive })),
       ...(form.linkedScheduleId   ? { linkedScheduleId:   form.linkedScheduleId }   : {}),
       ...(form.linkedScheduleDate ? { linkedScheduleDate: form.linkedScheduleDate } : {}),
@@ -395,14 +423,24 @@ export default function VouchersPage() {
         await updateDoc(doc(db,'vouchers',editing.id), payload);
         // Always sync JE lines if already linked
         if (editing.linkedJeId) {
-          const jeLines = buildJeLines();
-          await updateDoc(doc(db,'journalEntries',editing.linkedJeId), {
-            lines: jeLines,
-            totalDebit:  jeLines.reduce((s,l)=>s+l.debit, 0),
-            totalCredit: jeLines.reduce((s,l)=>s+l.credit, 0),
-            date: form.preparationDate,
-            updatedAt: serverTimestamp(), updatedBy: user
-          });
+          // If this LV was saved without checkVoucherId but now has one, the JE
+          // would double-post. Void it so the clearing JE is the only GL entry.
+          if (form.voucherType === 'LOAN' && form.checkVoucherId) {
+            await updateDoc(doc(db,'journalEntries',editing.linkedJeId), {
+              status: 'Voided', notes: 'Voided — JE will be posted by linked check clearing.',
+              updatedAt: serverTimestamp(), updatedBy: user
+            });
+            await updateDoc(doc(db,'vouchers',editing.id), { linkedJeId: null, updatedAt: serverTimestamp() });
+          } else {
+            const jeLines = buildJeLines();
+            await updateDoc(doc(db,'journalEntries',editing.linkedJeId), {
+              lines: jeLines,
+              totalDebit:  jeLines.reduce((s,l)=>s+l.debit, 0),
+              totalCredit: jeLines.reduce((s,l)=>s+l.credit, 0),
+              date: form.preparationDate,
+              updatedAt: serverTimestamp(), updatedBy: user
+            });
+          }
         }
         // Create JE if not yet linked (e.g. old voucher pre-dating this feature)
         if (!editing.linkedJeId) {
@@ -423,19 +461,25 @@ export default function VouchersPage() {
       } else {
         const voucherId = await nextVoucherId(form.voucherType, form.preparationDate);
         const voucherRef = await addDoc(collection(db,'vouchers'), { ...payload, voucherId, createdAt:serverTimestamp(), createdBy:user });
-        // Always auto-create JE immediately on voucher creation
-        const jeLines = buildJeLines();
-        const jeId = await nextJournalEntryId(form.preparationDate);
-        const voucherLabel = VOUCHER_TYPES.find(t=>t.value===form.voucherType)?.label || form.voucherType;
-        const jeRef = await addDoc(collection(db,'journalEntries'), {
-          jeId, date: form.preparationDate,
-          description: `${voucherLabel} ${voucherId}${form.purposeCategory?' — '+form.purposeCategory:''}`,
-          type: 'Voucher', reference: voucherId, sourceDocId: voucherRef.id, sourceDocType: 'voucher',
-          status: 'For Clearing',
-          lines: jeLines, totalDebit: jeLines.reduce((s,l)=>s+l.debit,0), totalCredit: jeLines.reduce((s,l)=>s+l.credit,0),
-          createdAt: serverTimestamp(), createdBy: user, updatedAt: serverTimestamp(), updatedBy: user
-        });
-        await updateDoc(voucherRef, { linkedJeId: jeRef.id });
+        // Check-linked Loan Vouchers are non-posting: the GL entry is created when
+        // the linked check is cleared in Check Registry. Skip JE here to prevent
+        // double-booking (LV JE + clearing settlement JE would both Dr expense / Cr Cash).
+        const isCheckLinkedLv = form.voucherType === 'LOAN' && !!(form.checkVoucherId);
+        if (!isCheckLinkedLv) {
+          // Always auto-create JE immediately on voucher creation
+          const jeLines = buildJeLines();
+          const jeId = await nextJournalEntryId(form.preparationDate);
+          const voucherLabel = VOUCHER_TYPES.find(t=>t.value===form.voucherType)?.label || form.voucherType;
+          const jeRef = await addDoc(collection(db,'journalEntries'), {
+            jeId, date: form.preparationDate,
+            description: `${voucherLabel} ${voucherId}${form.purposeCategory?' — '+form.purposeCategory:''}`,
+            type: 'Voucher', reference: voucherId, sourceDocId: voucherRef.id, sourceDocType: 'voucher',
+            status: 'For Clearing',
+            lines: jeLines, totalDebit: jeLines.reduce((s,l)=>s+l.debit,0), totalCredit: jeLines.reduce((s,l)=>s+l.credit,0),
+            createdAt: serverTimestamp(), createdBy: user, updatedAt: serverTimestamp(), updatedBy: user
+          });
+          await updateDoc(voucherRef, { linkedJeId: jeRef.id });
+        }
         showToast('Voucher created.');
       }
       setShowModal(false);
@@ -507,10 +551,58 @@ export default function VouchersPage() {
   };
 
   // isAutoBank: hide Purpose/PaymentFrom for PAYROLL, FINAL_PAY (matches GAS toggleVoucherMode)
-  const isAutoBank = AUTO_BANK_TYPES.includes(form.voucherType);
+  const isAutoBank    = AUTO_BANK_TYPES.includes(form.voucherType);
   const isLoan        = form.voucherType === 'LOAN';
   const isLoanLinked  = form.voucherType === 'LOAN' || form.voucherType === 'PAYMENT';
-  const showTax = TAX_VISIBLE_TYPES.includes(form.voucherType);
+  const showTax       = TAX_VISIBLE_TYPES.includes(form.voucherType);
+
+  // Derived loan helpers
+  const selectedLoan  = isLoan ? (loans.find(l => String(l.id) === String(form.loanId)) || null) : null;
+  const isCheckLoan   = !selectedLoan || selectedLoan.paymentMethod === 'Check' || !selectedLoan.paymentMethod;
+
+  // When the linked loan changes: pre-fill lines with contact + categories, clear stale CV
+  const handleLoanChange = (newLoanId) => {
+    const ln = loans.find(l => String(l.id) === String(newLoanId)) || null;
+    const isCheck = !ln || ln.paymentMethod === 'Check' || !ln.paymentMethod;
+    // Prioritise "Finance Cost" account; fall back to "Interest Expense" if absent
+    const intAcct = accounts.find(a => /finance.?cost/i.test(a.name))
+                 || accounts.find(a => /interest.?exp/i.test(a.name));
+    const priAcct = accounts.find(a => /loans?.payable/i.test(a.name));
+    setForm(f => ({
+      ...f,
+      loanId: newLoanId,
+      checkVoucherId: isCheck ? f.checkVoucherId : '', // clear if switching to non-check loan
+    }));
+    if (newLoanId && ln) {
+      // Only pre-fill if lines are still at default (single empty row)
+      const isDefaultLines = lines.length === 1 && !lines[0].contact && !lines[0].amount && !lines[0].expenseAccount;
+      if (isDefaultLines) {
+        // Compute period-1 interest & principal from loan parameters
+        const P  = parseFloat(ln.principal) || 0;
+        const r  = (parseFloat(ln.annualRate) || 0) / 100 / 12;
+        const tm = Math.max(parseInt(ln.termMonths) || 1, 1);
+        let intAmt = 0, priAmt = 0;
+        if (P > 0) {
+          if (ln.interestMethod === 'Straight-Line' || ln.interestMethod === 'Straight-Line (Monthly Rate)') {
+            priAmt = +(P / tm).toFixed(2);
+            intAmt = +(P * r).toFixed(2);
+          } else if (ln.interestMethod === 'Fixed') {
+            priAmt = +(P / tm).toFixed(2);
+            intAmt = +(P * (parseFloat(ln.annualRate) || 0) / 100 / 12).toFixed(2);
+          } else {
+            // Reducing Balance (default)
+            const pmt = r === 0 ? P / tm : P * r * Math.pow(1+r,tm) / (Math.pow(1+r,tm)-1);
+            intAmt = +(P * r).toFixed(2);
+            priAmt = +(Math.max(pmt - intAmt, 0)).toFixed(2);
+          }
+        }
+        setLines([
+          { ...EMPTY_LINE(), contact: ln.name || '', description: 'Interest / Finance Cost', category: 'Finance Cost',  expenseAccount: intAcct?.code || '', amount: intAmt || '' },
+          { ...EMPTY_LINE(), contact: ln.name || '', description: 'Principal Repayment',      category: 'Loans Payable', expenseAccount: priAcct?.code || '', amount: priAmt || '' },
+        ]);
+      }
+    }
+  };
 
   const lineTotal = lines.reduce((s,l) => s + (Number(l.amount)||0), 0);
   const taxTotal  = showTax ? lines.reduce((s,l) => s + (Number(l.taxAmt)||0), 0) : 0;
@@ -601,7 +693,7 @@ export default function VouchersPage() {
   const jDebit  = journalLines.reduce((s,j)=>s+j.debit,0);
   const jCredit = journalLines.reduce((s,j)=>s+j.credit,0);
 
-  const canEdit = (v) => ['Draft','Pending'].includes(v.status);
+  const canEdit = (v) => !['Paid','Voided'].includes(v.status);
 
   return (
     <div className="vp-wrap">
@@ -614,7 +706,7 @@ export default function VouchersPage() {
           {selected.size > 0 && (
             <div className="bulk-bar" style={{margin:0}}>
               <span style={{fontSize:12,fontWeight:800,color:'#c2410c'}}>{selected.size} Selected</span>
-              <button className="btn btn-ghost btn-sm" onClick={bulkSubmit}>Submit for Review</button>
+              <button className="btn btn-ghost btn-sm" onClick={bulkSubmit}>Submit for Approval</button>
               <button className="btn btn-ghost btn-sm" style={{color:'#dc2626'}} onClick={bulkVoid}>Void</button>
               <button className="btn btn-ghost btn-sm" style={{color:'#dc2626'}} onClick={bulkDelete}>Delete</button>
               <button className="btn btn-ghost btn-sm" onClick={()=>setSelected(new Set())}>Clear</button>
@@ -709,7 +801,7 @@ export default function VouchersPage() {
               )}
               {paginated.map(v => {
                 return (
-                  <tr key={v.id} style={{cursor:'pointer'}}>
+                  <tr key={v.id} style={{cursor:'pointer'}} onClick={() => setViewModal(v)}>
                     <td style={{textAlign:'center'}} onClick={e=>e.stopPropagation()}>
                       <input type="checkbox" checked={selected.has(v.id)} onChange={()=>toggleSel(v.id)} />
                     </td>
@@ -742,24 +834,14 @@ export default function VouchersPage() {
                             background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,
                             boxShadow:'0 8px 24px rgba(0,0,0,.12)',minWidth:140,padding:'4px 0',
                           }}>
-                            <button className="km-item" onClick={()=>{setViewModal(v);setOpenMenuId(null);}}>
-                              👁 View
-                            </button>
-                            <button className="km-item" onClick={()=>{setPdfModal(v);setOpenMenuId(null);}}>
-                              📄 Download PDF
-                            </button>
+                            <button className="km-item" onClick={()=>{setViewModal(v);setOpenMenuId(null);}}>View</button>
+                            <button className="km-item" onClick={()=>{setPdfModal(v);setOpenMenuId(null);}}>Download PDF</button>
                             {canEdit(v) && (
-                              <button className="km-item" onClick={()=>{openEdit(v);setOpenMenuId(null);}}>
-                                ✏️ Edit
-                              </button>
+                              <button className="km-item" onClick={()=>{openEdit(v);setOpenMenuId(null);}}>Edit</button>
                             )}
-                            <button className="km-item" onClick={()=>{duplicate(v);setOpenMenuId(null);}}>
-                              📋 Duplicate
-                            </button>
+                            <button className="km-item" onClick={()=>{duplicate(v);setOpenMenuId(null);}}>Duplicate</button>
                             {v.status === 'Draft' && (
-                              <button className="km-item" style={{color:'#dc2626'}} onClick={()=>{deleteVoucher(v);setOpenMenuId(null);}}>
-                                🗑 Delete
-                              </button>
+                              <button className="km-item" style={{color:'#dc2626'}} onClick={()=>{deleteVoucher(v);setOpenMenuId(null);}}>Delete</button>
                             )}
                           </div>
                         )}
@@ -797,6 +879,7 @@ export default function VouchersPage() {
       {pdfModal && (
         <VoucherPdfModal
           voucher={pdfModal}
+          autoDownload={!!pdfModal._autoDownload}
           onClose={() => setPdfModal(null)}
         />
       )}
@@ -810,6 +893,11 @@ export default function VouchersPage() {
               <button className="btn btn-ghost btn-sm" onClick={()=>setShowModal(false)}>✕</button>
             </div>
             <div className="modal-b">
+              {editing && ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(editing.status) && (
+                <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:12,fontWeight:700,color:'#92400e'}}>
+                  ⚠ This voucher is in <strong>{editing.status}</strong> status. Saving will revert it to <strong>For Verification</strong> for re-processing.
+                </div>
+              )}
               <div className="grid6">
                 {/* Row 1: Voucher ID (read-only) | Voucher Type | Preparation Date */}
                 <div className="field col2">
@@ -869,29 +957,91 @@ export default function VouchersPage() {
                     ℹ️ Final Pay Voucher — Payment bank is resolved per employee line. Add final pay lines manually.
                   </div>
                 )}
-                {isLoanLinked && (
+                {isLoan && (
                   <>
-                    <div className="field col6" style={{background:'#fdf4ff',border:'1px solid #e9d5ff',borderRadius:10,padding:'10px 14px',fontSize:12,color:'#7c3aed',fontWeight:700}}>
-                      {isLoan
-                        ? <>ℹ️ Loan Voucher — Used to record loan releases or amortization payments. When this voucher is paid through a Disbursement Report, a payment will auto-post to <strong>Loan Monitoring</strong>.</>
-                        : <>ℹ️ Check Voucher (CV) — Link to a loan so that when this check clears in the Check Registry, a payment is auto-posted to <strong>Loan Monitoring</strong>.</>}
+                    <div className="field col6" style={{background:'#fdf4ff',border:'1px solid #e9d5ff',borderRadius:10,padding:'7px 14px',fontSize:12,color:'#7c3aed',fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                      ℹ️ Loan Voucher — Records loan releases or amortization payments. Auto-posts to Loan Monitoring when paid via Disbursement Report.
                     </div>
                     <div className="field col3">
                       <label>Linked Loan</label>
-                      <select value={form.loanId||''} onChange={e=>setForm(f=>({...f,loanId:e.target.value}))}>
+                      <select value={form.loanId||''} onChange={e=>handleLoanChange(e.target.value)}>
                         <option value="">— None (skip auto-post) —</option>
                         {loans.filter(l=>l.status!=='Disposed').map(l => (
                           <option key={l.id} value={l.id}>{l.name||`Loan ${l.id}`} — {l.loanType||'Loan'}</option>
                         ))}
                       </select>
                     </div>
-                    <div className="field col3" style={{justifyContent:'flex-end'}}>
-                      <label>&nbsp;</label>
+                    {isCheckLoan && (
+                    <div className="field col3">
+                      <label>Linked Check Voucher (CV) <span style={{fontWeight:400,color:'#94a3b8'}}>— optional, for check payments</span></label>
+                      {/* Searchable CV picker — shows only loan-linked CVs */}
+                      <div style={{position:'relative'}}>
+                        <input
+                          value={cvDropOpen ? cvSearch : (form.checkVoucherId || '')}
+                          onChange={e => { setCvSearch(e.target.value); setCvDropOpen(true); setForm(f=>({...f,checkVoucherId:''})); }}
+                          onFocus={() => { setCvSearch(''); setCvDropOpen(true); }}
+                          onBlur={() => setTimeout(() => setCvDropOpen(false), 180)}
+                          placeholder="Search CV…"
+                          autoComplete="off"
+                          style={{fontFamily:'monospace', width:'100%'}}
+                        />
+                        {cvDropOpen && (() => {
+                          const loanCvs = cvList.filter(cv =>
+                            (!form.loanId || String(cv.loanId) === String(form.loanId)) &&
+                            (!cvSearch.trim() || (cv.voucherId||'').toLowerCase().includes(cvSearch.trim().toLowerCase()) ||
+                              (cv.contactSummary||'').toLowerCase().includes(cvSearch.trim().toLowerCase()))
+                          );
+                          return (
+                            <div style={{position:'absolute',top:'100%',left:0,right:0,zIndex:50,background:'#fff',border:'1px solid #d1d5db',borderRadius:8,boxShadow:'0 8px 24px rgba(0,0,0,.12)',maxHeight:200,overflowY:'auto'}}>
+                              {loanCvs.length === 0
+                                ? <div style={{padding:'10px 12px',fontSize:12,color:'#94a3b8'}}>
+                                    {form.loanId ? 'No CVs found for this loan.' : 'No loan-linked CVs found.'}
+                                  </div>
+                                : loanCvs.map(cv => (
+                                  <div
+                                    key={cv.docId}
+                                    onMouseDown={() => { setForm(f=>({...f,checkVoucherId:cv.voucherId})); setCvSearch(''); setCvDropOpen(false); }}
+                                    style={{padding:'8px 12px',cursor:'pointer',fontSize:12,borderBottom:'1px solid #f1f5f9',background:'#fff'}}
+                                    onMouseEnter={e=>e.currentTarget.style.background='#f0f9ff'}
+                                    onMouseLeave={e=>e.currentTarget.style.background='#fff'}
+                                  >
+                                    <strong style={{fontFamily:'monospace',color:'#0369a1'}}>{cv.voucherId}</strong>
+                                    {cv.contactSummary ? <span style={{color:'#64748b'}}> · {cv.contactSummary}</span> : null}
+                                    {cv.totalAmount ? <span style={{color:'#f97316',fontWeight:700}}> · ₱{Number(cv.totalAmount).toLocaleString('en-PH',{minimumFractionDigits:2})}</span> : null}
+                                    {cv.preparationDate ? <span style={{color:'#94a3b8'}}> · {cv.preparationDate}</span> : null}
+                                  </div>
+                                ))
+                              }
+                            </div>
+                          );
+                        })()}
+                      </div>
+                      {form.checkVoucherId && !cvDropOpen && (
+                        <span style={{fontSize:10,color:'#0369a1',marginTop:3,display:'block'}}>
+                          ✓ CV linked — check will be auto-cleared when payment is recorded.
+                          <button
+                            type="button"
+                            onClick={() => setForm(f=>({...f,checkVoucherId:''}))}
+                            style={{marginLeft:8,background:'none',border:'none',color:'#ef4444',cursor:'pointer',fontSize:10,fontWeight:700,padding:0}}
+                          >✕ Remove</button>
+                        </span>
+                      )}
+                      {!form.checkVoucherId && !cvDropOpen && (
+                        <span style={{fontSize:10,color:'#94a3b8',marginTop:3,display:'block'}}>Optional — skip for auto-debit / bank transfer payments.</span>
+                      )}
+                    </div>
+                    )}{/* end isCheckLoan */}
+                    <div className="field col6" style={{marginTop:4}}>
                       <div style={{fontSize:11,color:'#64748b',fontWeight:600,padding:'9px 0'}}>
                         {form.loanId
                           ? <>✅ Auto-post enabled. Tag lines with category <code>Finance Cost</code> (interest) or <code>Loans Payable</code> (principal) for accurate split.</>
                           : 'No loan linked — payment will not auto-post.'}
                       </div>
+                      {form.checkVoucherId && (
+                        <div style={{marginTop:6,padding:'8px 12px',background:'#eff6ff',border:'1px solid #bfdbfe',borderLeft:'3px solid #2563eb',borderRadius:8,fontSize:11,color:'#1e40af',lineHeight:1.5}}>
+                          📒 <strong>Non-posting LV</strong> — No journal entry will be created when this voucher is saved. The GL entry (Dr. Interest / Dr. Principal / Cr. Cash in Bank) will be posted automatically when the linked check <strong>{form.checkVoucherId}</strong> is cleared in Check Registry.
+                        </div>
+                      )}
                     </div>
                   </>
                 )}
@@ -1016,84 +1166,217 @@ export default function VouchersPage() {
             </div>
             <div className="modal-f">
               <button className="btn btn-ghost" onClick={()=>setShowModal(false)}>Cancel</button>
-              <button className="btn btn-ghost" onClick={()=>saveVoucher('Draft')} disabled={saving}>Save Draft</button>
-              <button className="btn btn-primary" onClick={()=>saveVoucher('Pending')} disabled={saving}>{saving?'Saving…':'Submit'}</button>
+              {!(editing && ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(editing.status)) && (
+                <button className="btn btn-ghost" onClick={()=>saveVoucher('Draft')} disabled={saving}>Save Draft</button>
+              )}
+              <button className="btn btn-primary" onClick={()=>saveVoucher('For Verification')} disabled={saving}>
+                {saving ? 'Saving…' : (editing && ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(editing.status) ? 'Save & Re-submit' : 'Submit')}
+              </button>
             </div>
           </div>
         </div>
       )}
 
       {/* View Modal */}
-      {viewModal && (
-        <div className="backdrop" onClick={()=>setViewModal(null)}>
-          <div className="modal" onClick={e=>e.stopPropagation()}>
-            <div className="modal-h">
-              <strong>Voucher — {viewModal.voucherId||viewModal.id}</strong>
-              <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                <StatusPill status={viewModal.status} />
-                <button className="btn btn-ghost btn-sm" onClick={()=>setViewModal(null)}>✕</button>
-              </div>
-            </div>
-            <div className="modal-b">
-              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:20}}>
-                {[
-                  ['Type', viewModal.voucherType],
-                  ['Date', viewModal.preparationDate],
-                  ['Purpose', viewModal.purposeCategory],
-                  ['Payment From', viewModal.paymentFromAccountCode],
-                  ['Contact', viewModal.contactSummary],
-                  ['Check No.', viewModal.checkNumber||'—'],
-                  ['Check Date', viewModal.checkDate||'—'],
-                  ['Reviewed By', viewModal.reviewedBy||'—'],
-                  ['Approved By', viewModal.approvedBy||'—'],
-                  ['Created By', viewModal.createdBy||'—'],
-                ].map(([k,v]) => (
-                  <div key={k}><div style={{fontSize:10,fontWeight:800,color:'#94a3b8',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:4}}>{k}</div><div style={{fontWeight:700}}>{v||'—'}</div></div>
-                ))}
-              </div>
-              {viewModal.rejectReason && (
-                <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12,marginBottom:12}}>
-                  <span style={{fontSize:11,fontWeight:800,color:'#dc2626'}}>REJECT REASON: </span>{viewModal.rejectReason}
+      {viewModal && (() => {
+        const v         = viewModal;
+        const vLines    = v.lines || [];
+        const totalAmt  = vLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
+        const typeLabel = VOUCHER_TYPES.find(t => t.value === v.voucherType)?.label || v.voucherType || 'Voucher';
+        const vSs       = STATUS_STYLES[v.status] || STATUS_STYLES['Pending'];
+        const fromAcct  = accounts.find(a => a.code === v.paymentFromAccountCode || a.id === v.paymentFromAccountCode);
+        const STEPS     = ['Pending','For Verification','Verified','For Approval','Approved','Paid'];
+        const stepIdx   = STEPS.indexOf(v.status);
+        const jeLines   = previewJe?.lines || [];
+        const jeTotalDr = jeLines.reduce((s,l) => s + (l.debit  || 0), 0);
+        const jeTotalCr = jeLines.reduce((s,l) => s + (l.credit || 0), 0);
+        const jeStatus  = previewJe?.status;
+        const jeId      = previewJe?.jeId || previewJe?.id;
+
+        return (
+          <div className="backdrop" onClick={() => setViewModal(null)}>
+            <div style={{ width:'min(860px,98vw)', maxHeight:'92vh', background:'#fff', borderRadius:16, display:'flex', flexDirection:'column', overflow:'hidden', boxShadow:'0 24px 64px rgba(0,0,0,.25)' }} onClick={e => e.stopPropagation()}>
+
+              {/* Header */}
+              <div style={{ display:'flex', alignItems:'center', gap:10, padding:'14px 20px', borderBottom:'1px solid #e5e7eb', background:'#f8fafc', flexShrink:0 }}>
+                <span style={{ fontFamily:'monospace', fontWeight:900, fontSize:15 }}>{v.voucherId || v.id}</span>
+                <span className="pill" style={{ background:vSs.background, borderColor:vSs.borderColor, color:vSs.color }}>{v.status || 'Pending'}</span>
+                <span style={{ fontSize:11, color:'#64748b', marginLeft:2 }}>{typeLabel}</span>
+                <div style={{ marginLeft:'auto', display:'flex', gap:8, alignItems:'center' }}>
+                  <button className="btn btn-ghost btn-sm" style={{ fontSize:12 }}
+                    onClick={() => setPdfModal({ ...v, _autoDownload: true })}>⬇ Download PDF</button>
+                  {canEdit(v) && (
+                    <button className="btn btn-ghost btn-sm" style={{ fontSize:12 }}
+                      onClick={() => { setViewModal(null); openEdit(v); }}>✎ Edit</button>
+                  )}
+                  <button style={{ background:'none', border:'none', fontSize:18, cursor:'pointer', color:'#94a3b8', lineHeight:1 }} onClick={() => setViewModal(null)}>✕</button>
                 </div>
-              )}
-              {viewModal.notes && (
-                <div style={{background:'#f8fafc',borderRadius:10,padding:12,marginBottom:12,fontSize:13}}>{viewModal.notes}</div>
-              )}
-              <div className="section-title">Expense Lines</div>
-              {(viewModal.lines||[]).length === 0
-                ? <div className="empty">No lines recorded.</div>
-                : <table className="lines-tbl">
-                    <thead>
-                      <tr><th>#</th><th>Contact</th><th>Account</th><th>Description</th><th>Category</th><th>Tax</th><th style={{textAlign:'right'}}>Amount</th></tr>
-                    </thead>
-                    <tbody>
-                      {(viewModal.lines||[]).map((l,i) => (
-                        <tr key={i}>
-                          <td>{l.lineNo||i+1}</td>
-                          <td>{l.contact||'—'}</td>
-                          <td>{l.expenseAccountCode||'—'}</td>
-                          <td>{l.description||'—'}</td>
-                          <td>{l.category||'—'}</td>
-                          <td>{l.taxType||'—'}</td>
-                          <td style={{textAlign:'right',fontWeight:700}}>{fmt(l.amount)}</td>
-                        </tr>
-                      ))}
-                      <tr>
-                        <td colSpan={6} style={{textAlign:'right',fontWeight:800,color:'#64748b',fontSize:12}}>TOTAL</td>
-                        <td style={{textAlign:'right',fontWeight:900}}>{fmt(viewModal.totalAmount)}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-              }
-            </div>
-            <div className="modal-f">
-              {canEdit(viewModal) && <button className="btn btn-ghost" onClick={()=>{setViewModal(null);openEdit(viewModal);}}>Edit</button>}
-              <button className="btn btn-ghost" onClick={()=>duplicate(viewModal)}>📋 Duplicate</button>
-              <button className="btn btn-ghost" onClick={()=>setViewModal(null)}>Close</button>
+              </div>
+
+              <div style={{ overflowY:'auto', flex:1, padding:'18px 20px' }}>
+
+                {/* Approval progress */}
+                <div style={{ marginBottom:18 }}>
+                  <div style={{ position:'relative' }}>
+                    <div style={{ position:'absolute', top:10, left:`${100/STEPS.length/2}%`, right:`${100/STEPS.length/2}%`, height:2, background:'#e2e8f0', zIndex:0 }} />
+                    {stepIdx > 0 && (
+                      <div style={{ position:'absolute', top:10, left:`${100/STEPS.length/2}%`, width:`calc(${stepIdx/(STEPS.length-1)} * (100% - ${100/STEPS.length}%))`, height:2, background:'#22c55e', zIndex:1, transition:'width .3s' }} />
+                    )}
+                    <div style={{ display:'flex', position:'relative', zIndex:2 }}>
+                      {STEPS.map((s, i) => {
+                        const done    = stepIdx > i || v.status === 'Paid';
+                        const current = stepIdx === i;
+                        const bg = done ? '#22c55e' : current ? '#f97316' : '#e2e8f0';
+                        const tc = done || current ? '#fff' : '#94a3b8';
+                        return (
+                          <div key={s} style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center' }}>
+                            <div style={{ width:22, height:22, borderRadius:'50%', background:bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800, color:tc }}>
+                              {done ? '✓' : i + 1}
+                            </div>
+                            <div style={{ fontSize:9, marginTop:4, fontWeight: current ? 800 : 500, color: current ? '#f97316' : '#64748b', whiteSpace:'nowrap', textAlign:'center' }}>{s}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Voucher info grid */}
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10, marginBottom:16, background:'#f8fafc', border:'1px solid #e5e7eb', borderRadius:10, padding:'12px 14px' }}>
+                  <div>
+                    <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Date</div>
+                    <div style={{ fontWeight:700, fontSize:13 }}>{v.preparationDate || '—'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Payee</div>
+                    <div style={{ fontWeight:700, fontSize:13 }}>{v.contactSummary || '—'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Total Amount</div>
+                    <div style={{ fontWeight:900, fontSize:15, color:'#0b1220' }}>{fmt(v.totalAmount ?? totalAmt)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Purpose</div>
+                    <div style={{ fontSize:12, color:'#374151' }}>{v.purposeCategory || '—'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Payment From</div>
+                    <div style={{ fontSize:12, color:'#374151' }}>{fromAcct ? `${fromAcct.code} — ${fromAcct.name}` : (v.paymentFromAccountCode || '—')}</div>
+                  </div>
+                  {v.notes && (
+                    <div style={{ gridColumn:'1/-1' }}>
+                      <div style={{ fontSize:9, fontWeight:800, color:'#94a3b8', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:3 }}>Notes</div>
+                      <div style={{ fontSize:12, color:'#374151' }}>{v.notes}</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Payment lines */}
+                {vLines.length > 0 && (
+                  <div style={{ marginBottom:16 }}>
+                    <div style={{ fontSize:11, fontWeight:800, color:'#0b1220', marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em' }}>Payment Details</div>
+                    <div style={{ border:'1px solid #e5e7eb', borderRadius:10, overflow:'hidden' }}>
+                      <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                        <thead><tr style={{ background:'#f8fafc' }}>
+                          <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Contact</th>
+                          <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Expense Acct</th>
+                          <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Description</th>
+                          <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Tax Rate</th>
+                          <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'right', textTransform:'uppercase' }}>Amount</th>
+                          <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'right', textTransform:'uppercase' }}>Tax</th>
+                        </tr></thead>
+                        <tbody>
+                          {vLines.map((l, i) => (
+                            <tr key={i} style={{ borderTop:'1px solid #f1f5f9' }}>
+                              <td style={{ padding:'7px 10px' }}>{l.contact || '—'}</td>
+                              <td style={{ padding:'7px 10px', fontSize:12 }}>{accounts.find(a => a.code === l.expenseAccountCode || a.id === l.expenseAccountCode)?.name || l.expenseAccountCode || '—'}</td>
+                              <td style={{ padding:'7px 10px', color:'#64748b' }}>{l.description || '—'}</td>
+                              <td style={{ padding:'7px 10px', fontSize:11, color:'#374151' }}>
+                                {l.taxType && l.taxType !== 'N/A' ? (l.taxRate > 0 ? `${l.taxType} ${l.taxRate}%` : l.taxType) : '—'}
+                              </td>
+                              <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:700 }}>{fmt(l.amount)}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right', fontSize:11, color:'#64748b' }}>{l.taxAmt > 0 ? fmt(l.taxAmt) : '—'}</td>
+                            </tr>
+                          ))}
+                          <tr style={{ borderTop:'2px solid #e5e7eb', background:'#f8fafc' }}>
+                            <td colSpan={4} style={{ padding:'7px 10px', fontWeight:800, textAlign:'right', fontSize:11, color:'#64748b' }}>GROSS TOTAL</td>
+                            <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:900, fontSize:13 }}>{fmt(v.totalAmount ?? totalAmt)}</td>
+                            <td />
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Journal Entry section */}
+                {(v.linkedJeId || previewJe) && (
+                  <div>
+                    <div style={{ fontSize:11, fontWeight:800, color:'#0b1220', marginBottom:6, textTransform:'uppercase', letterSpacing:'.05em', display:'flex', alignItems:'center', gap:8 }}>
+                      Journal Entry
+                      {jeId && <span style={{ fontFamily:'monospace', fontWeight:700, fontSize:11, padding:'2px 8px', borderRadius:6, background:'#eff6ff', color:'#1e40af', border:'1px solid #bfdbfe' }}>{jeId}</span>}
+                      {jeStatus && (
+                        <span style={{ fontSize:10, fontWeight:700, padding:'2px 8px', borderRadius:20,
+                          background: jeStatus === 'Posted' ? '#d1fae5' : jeStatus === 'For Clearing' ? '#fffbeb' : '#f1f5f9',
+                          color:      jeStatus === 'Posted' ? '#065f46' : jeStatus === 'For Clearing' ? '#92400e' : '#64748b',
+                          border:     jeStatus === 'Posted' ? '1px solid #a7f3d0' : jeStatus === 'For Clearing' ? '1px solid #fde68a' : '1px solid #e2e8f0',
+                        }}>{jeStatus}</span>
+                      )}
+                      {!previewJe && v.linkedJeId && <span style={{ fontSize:11, color:'#94a3b8', fontWeight:400 }}>Loading…</span>}
+                    </div>
+                    {jeLines.length > 0 && (
+                      <div style={{ border:'1px solid #e5e7eb', borderRadius:10, overflow:'hidden' }}>
+                        <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+                          <thead><tr style={{ background:'#f8fafc' }}>
+                            <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Account Code</th>
+                            <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Account Name</th>
+                            <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'left', textTransform:'uppercase' }}>Description</th>
+                            <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'right', textTransform:'uppercase' }}>Debit</th>
+                            <th style={{ padding:'7px 10px', fontWeight:800, fontSize:10, color:'#64748b', textAlign:'right', textTransform:'uppercase' }}>Credit</th>
+                          </tr></thead>
+                          <tbody>
+                            {jeLines.map((l, i) => (
+                              <tr key={i} style={{ borderTop:'1px solid #f1f5f9' }}>
+                                <td style={{ padding:'7px 10px', fontFamily:'monospace', fontSize:11, color:'#475569' }}>{l.accountCode || '—'}</td>
+                                <td style={{ padding:'7px 10px', fontWeight:600, color:'#0f172a', paddingLeft: l.debit === 0 ? 24 : 10 }}>{l.accountName || '—'}</td>
+                                <td style={{ padding:'7px 10px', color:'#94a3b8', fontSize:11 }}>{l.description || ''}</td>
+                                <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:700, color: l.debit > 0 ? '#15803d' : '#d1d5db' }}>{l.debit > 0 ? fmt(l.debit) : '—'}</td>
+                                <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:700, color: l.credit > 0 ? '#1d4ed8' : '#d1d5db' }}>{l.credit > 0 ? fmt(l.credit) : '—'}</td>
+                              </tr>
+                            ))}
+                            <tr style={{ borderTop:'2px solid #e5e7eb', background:'#f8fafc' }}>
+                              <td colSpan={3} style={{ padding:'7px 10px', fontWeight:800, textAlign:'right', fontSize:11, color:'#64748b' }}>Total</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:900, fontSize:13, color:'#15803d' }}>{fmt(jeTotalDr)}</td>
+                              <td style={{ padding:'7px 10px', textAlign:'right', fontWeight:900, fontSize:13, color:'#1d4ed8' }}>{fmt(jeTotalCr)}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              </div>
+
+              {/* Footer */}
+              <div style={{ display:'flex', gap:8, alignItems:'center', padding:'12px 20px', borderTop:'1px solid #e5e7eb', background:'#fff', flexShrink:0, flexWrap:'wrap' }}>
+                <button className="btn btn-ghost btn-sm" onClick={() => duplicate(v)}>Duplicate</button>
+                {v.status === 'Pending' && (
+                  <button className="btn btn-ghost btn-sm" style={{ color:'#c2410c', borderColor:'#fed7aa' }}
+                    onClick={async () => {
+                      await updateDoc(doc(db, 'vouchers', v.id), { status: 'For Verification', updatedAt: serverTimestamp(), updatedBy: user });
+                      setViewModal(prev => prev ? { ...prev, status: 'For Verification' } : null);
+                      showToast('Voucher re-submitted for verification.');
+                    }}>
+                    Re-submit for Verification
+                  </button>
+                )}
+                <button className="btn btn-ghost btn-sm" style={{ marginLeft:'auto' }} onClick={() => setViewModal(null)}>Close</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {confirmModal && (
         <div className="backdrop" onClick={() => setConfirmModal(null)}>

@@ -3,7 +3,7 @@ const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {defineSecret} = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const {getFirestore} = require("firebase-admin/firestore");
-const nodemailer = require("nodemailer");
+const {Resend} = require("resend");
 
 setGlobalOptions({maxInstances: 10});
 
@@ -12,17 +12,16 @@ admin.initializeApp();
 // Named 'scalebooks' Firestore database
 const db = getFirestore("scalebooks");
 
-// Gmail credentials stored as Firebase secrets
-const gmailUser = defineSecret("GMAIL_USER");
-const gmailPass = defineSecret("GMAIL_APP_PASS");
+// Resend API key stored as Firebase secret
+const resendApiKey = defineSecret("RESEND_API_KEY");
 
 /**
- * Invites a user: sends a branded invitation email via Gmail.
+ * Invites a user: sends a branded invitation email via Resend.
  * The invited user signs in with their Google account — no password needed.
  * Called from SettingsPage (new invite) and the Resend Invite button.
  */
 exports.createAuthUser = onCall(
-    {secrets: ["GMAIL_USER", "GMAIL_APP_PASS"]},
+    {secrets: ["RESEND_API_KEY"]},
     async (request) => {
       if (!request.auth) {
         throw new HttpsError("unauthenticated", "You must be signed in.");
@@ -50,19 +49,12 @@ exports.createAuthUser = onCall(
         );
       }
 
-      // Send invitation email — user signs in via Google, no password setup needed
+      // Send invitation email via Resend
       const appUrl = "https://scalebooks-9a629.web.app/login";
+      const resend = new Resend(resendApiKey.value());
 
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-          user: gmailUser.value(),
-          pass: gmailPass.value(),
-        },
-      });
-
-      await transporter.sendMail({
-        from: `"ScaleBooks Finance Portal" <${gmailUser.value()}>`,
+      const {error} = await resend.emails.send({
+        from: "ScaleBooks Finance Portal <noreply@accountingsystem.online>",
         to: email.trim().toLowerCase(),
         subject: "You've been invited to ScaleBooks Finance Portal",
         html: `
@@ -87,6 +79,10 @@ exports.createAuthUser = onCall(
           </div>
         `,
       });
+
+      if (error) {
+        throw new HttpsError("internal", `Email send failed: ${error.message}`);
+      }
 
       return {sent: true};
     },

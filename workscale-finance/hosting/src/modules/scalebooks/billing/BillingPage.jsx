@@ -369,7 +369,7 @@ export default function BillingPage() {
             <div className="modal-f">
               <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
               <button className="btn btn-ghost" onClick={()=>save('Draft')} disabled={saving}>Save Draft</button>
-              <button className="btn btn-primary" onClick={()=>save('Pending Review')} disabled={saving}>{saving?'Saving…':'Submit for Review'}</button>
+              <button className="btn btn-primary" onClick={()=>save('Pending Review')} disabled={saving}>{saving?'Saving…':'Submit for Approval'}</button>
             </div>
           </div>
         </div>

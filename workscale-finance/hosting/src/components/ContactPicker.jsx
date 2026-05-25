@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';
 
@@ -36,8 +37,10 @@ export default function ContactPicker({
   const [query, setQuery] = useState('');
   const [highlighted, setHighlighted] = useState(0);
   const [creating, setCreating] = useState(false);
+  const [dropRect, setDropRect] = useState(null);
   const wrapRef = useRef(null);
   const inputRef = useRef(null);
+  const listRef = useRef(null);
 
   const wantedTypes = useMemo(() => {
     if (!typeFilter) return null;
@@ -156,10 +159,29 @@ export default function ContactPicker({
   const openIt = () => { setQuery(''); setHighlighted(0); setOpen(true); setTimeout(() => inputRef.current?.focus(), 0); };
 
   useEffect(() => {
-    const onDoc = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    const onDoc = (e) => {
+      if (wrapRef.current && wrapRef.current.contains(e.target)) return;
+      if (listRef.current && listRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, []);
+
+  // Track wrapper rect for portal positioning
+  useEffect(() => {
+    if (!open) { setDropRect(null); return; }
+    const update = () => {
+      if (wrapRef.current) setDropRect(wrapRef.current.getBoundingClientRect());
+    };
+    update();
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [open]);
 
   // Styles
   const padY = compact ? 6 : 9;
@@ -178,12 +200,15 @@ export default function ContactPicker({
     padding: `${padY}px 10px`, fontSize: fz,
     background: 'transparent', fontFamily: 'inherit', color: '#0b1220', minWidth: 0,
   };
-  const dropS = {
-    position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+  const dropS = dropRect ? {
+    position: 'fixed',
+    top: dropRect.bottom + 4,
+    left: dropRect.left,
+    width: Math.max(dropRect.width, 260),
     background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10,
-    boxShadow: '0 8px 24px rgba(0,0,0,.12)', zIndex: 9999,
+    boxShadow: '0 8px 24px rgba(0,0,0,.12)', zIndex: 10000,
     maxHeight: 280, overflowY: 'auto', minWidth: 220,
-  };
+  } : { display: 'none' };
   const optS = (active, stub) => ({
     padding: '8px 12px', fontSize: 12, cursor: 'pointer',
     background: active ? '#fff7ed' : 'transparent',
@@ -232,8 +257,8 @@ export default function ContactPicker({
         >▾</span>
       </div>
 
-      {open && (
-        <div style={dropS}>
+      {open && dropRect && createPortal(
+        <div ref={listRef} style={dropS}>
           {filtered.length === 0 && !showCreate && (
             <div style={{ padding: '12px', fontSize: 12, color: '#94a3b8' }}>
               {query ? 'No matches.' : 'Start typing to search…'}
@@ -276,7 +301,8 @@ export default function ContactPicker({
           {creating && (
             <div style={{ padding: '10px 12px', fontSize: 12, color: '#64748b' }}>Creating contact…</div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

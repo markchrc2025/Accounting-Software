@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { collection, addDoc, getDocs, serverTimestamp } from 'firebase/firestore';
+import {
+  collection, addDoc, getDocs, updateDoc, doc,
+  query, where, serverTimestamp,
+} from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
-import { nextVoucherId } from '../../../utils/documentIds.js';
-import { issueCheck, getActiveCheckbook } from '../../../utils/issueCheck.js';
 
 const fmtPHP = (n) => new Intl.NumberFormat('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
 const fmtCur = (n) => '₱' + fmtPHP(n);
@@ -11,17 +12,13 @@ const PAYMENT_METHODS = ['Check', 'Auto-Debit', 'Bank Transfer', 'Cash', 'Online
 
 /**
  * Modal to record an actual loan payment against a loan.
- * Writes a single document to `loanPayments` collection.
- *
- * Props:
- *   loan          — the loan object
- *   loanState     — output of recomputeLoanState(loan, payments)
- *   onClose()
- *   onSaved(payment)  — called after successful Firestore write
+ * Requires a pre-existing Loan Voucher (LV, voucherType:'PAYMENT') as pre-requisite.
+ * If the LV has a linked Check Voucher (checkVoucherId), the associated check(s)
+ * are automatically cleared and the CV is marked Paid when the payment is saved.
  */
 export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }) {
   const today = new Date().toISOString().slice(0, 10);
-  const nextRow = loanState?.schedule?.find(r => r.status !== 'paid');
+  const nextRow    = loanState?.schedule?.find(r => r.status !== 'paid');
   const nextDueInt = nextRow ? Math.max(0, nextRow.scheduledInterest  - nextRow.paidInterest)  : 0;
   const nextDuePri = nextRow ? Math.max(0, nextRow.scheduledPrincipal - nextRow.paidPrincipal) : 0;
 
@@ -33,157 +30,148 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
     method: loan.paymentMethod || 'Check',
     referenceNo: '',
     bank: loan.pmBtBank || loan.pmAdaBank || '',
-    voucherId: '',
-    autoVoucher: true,
-    checkVoucherId: '',
     notes: nextRow ? `Payment for ${nextRow.label} (Period ${nextRow.period})` : '',
     appliedPeriod: nextRow ? nextRow.period : null,
   });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const [bankAccounts, setBankAccounts] = useState([]);
-  const [activeCb,     setActiveCb]     = useState(null);
+  const [saving,          setSaving]          = useState(false);
+  const [error,           setError]           = useState('');
+  const [lvs,             setLvs]             = useState([]);
+  const [lvsLoading,      setLvsLoading]      = useState(true);
+  const [selectedLvDocId, setSelectedLvDocId] = useState('');
 
-  // Load bank/cash accounts for the bank dropdown
+  // Derived: currently selected LV object
+  const selectedLv = lvs.find(l => l.docId === selectedLvDocId) || null;
+
+  // ── Load available LVs (PAYMENT type, same loan, not yet consumed) ─────────
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const snap = await getDocs(collection(db, 'coaAccounts'));
-        const banks = snap.docs.map(d => ({ id:d.id, ...d.data() }))
-          .filter(a => /cash|bank/i.test(a.parentName || a.category || a.name || ''));
-        setBankAccounts(banks);
-      } catch { /* ignore */ }
+        const snap = await getDocs(query(
+          collection(db, 'vouchers'),
+          where('voucherType', '==', 'LOAN'),
+        ));
+        if (cancelled) return;
+        const forLoan = snap.docs
+          .map(d => ({ docId: d.id, ...d.data() }))
+          .filter(v => String(v.loanId) === String(loan.id) && !v.loanPaymentId);
+        setLvs(forLoan);
+      } catch (e) {
+        console.error('Failed to load LVs:', e);
+      } finally {
+        if (!cancelled) setLvsLoading(false);
+      }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [loan.id]);
 
-  // Whenever bank changes (and method is Check), look up active checkbook
+  // ── Auto-fill amounts when LV is selected ─────────────────────────────────
   useEffect(() => {
-    if (form.method !== 'Check' || !form.bank) { setActiveCb(null); return; }
-    let cancel = false;
-    getActiveCheckbook(form.bank).then(cb => { if (!cancel) setActiveCb(cb); }).catch(() => setActiveCb(null));
-    return () => { cancel = true; };
-  }, [form.bank, form.method]);
-
-  // Auto-fill ref no with next check # when applicable
-  useEffect(() => {
-    if (form.method === 'Check' && activeCb && !form.referenceNo) {
-      setForm(f => ({ ...f, referenceNo: String(activeCb.nextCheckNumber || '') }));
-    }
-  }, [activeCb, form.method]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!selectedLv) return;
+    const lines = selectedLv.lines || [];
+    let interest = 0, principal = 0, penalty = 0;
+    lines.forEach(l => {
+      const name = (l.category || l.description || '').toLowerCase();
+      const code = l.expenseAccountCode || '';
+      const amt  = Math.abs(Number(l.amount) || 0);
+      if (name.includes('penalty'))                                                                  penalty  += amt;
+      else if (name.includes('interest') || name.includes('finance cost') || code.startsWith('500')) interest += amt;
+      else if (name.includes('principal') || name.includes('loans payable'))                         principal += amt;
+    });
+    setForm(f => ({
+      ...f,
+      interest:  interest  > 0 ? interest.toFixed(2)  : f.interest,
+      principal: principal > 0 ? principal.toFixed(2) : f.principal,
+      penalty:   penalty   > 0 ? penalty.toFixed(2)   : f.penalty,
+      method: selectedLv.checkVoucherId ? 'Check' : f.method,
+    }));
+  }, [selectedLvDocId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { setError(''); }, [form]);
 
-  const total = (Number(form.interest) || 0) + (Number(form.principal) || 0) + (Number(form.penalty) || 0);
-
+  const total    = (Number(form.interest) || 0) + (Number(form.principal) || 0) + (Number(form.penalty) || 0);
   const setField = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const fillNextDue = () => {
     if (!nextRow) return;
     setForm(f => ({
       ...f,
-      interest: nextDueInt.toFixed(2),
-      principal: nextDuePri.toFixed(2),
+      interest:      nextDueInt.toFixed(2),
+      principal:     nextDuePri.toFixed(2),
       appliedPeriod: nextRow.period,
-      notes: `Payment for ${nextRow.label} (Period ${nextRow.period})`,
+      notes:         `Payment for ${nextRow.label} (Period ${nextRow.period})`,
     }));
   };
 
+  // ── Save ──────────────────────────────────────────────────────────────────
   const handleSave = async () => {
-    if (!form.date) { setError('Payment date is required.'); return; }
-    if (total <= 0) { setError('Enter at least one of Interest / Principal / Penalty.'); return; }
-    if (form.method === 'Check' && !form.bank) { setError('Select a bank account to issue the check.'); return; }
-    if (form.method === 'Check' && !activeCb)  { setError('No active checkbook for this bank. Open Check Registry → Checkbook Management.'); return; }
+    if (!form.date)       { setError('Payment date is required.');                                   return; }
+    if (!selectedLvDocId) { setError('Select a Loan Voucher (LV) — required before recording.'); return; }
+    if (total <= 0)       { setError('Enter at least one of Interest / Principal / Penalty.');       return; }
     setSaving(true);
     try {
       const user = auth.currentUser?.email || '';
-      const loanLabel = loan.name || `Loan ${loan.id}`;
 
-      // --- Auto-create Loan Voucher ---
-      let finalVoucherId = form.voucherId || '';
-      let voucherDocId   = '';
-      if (form.autoVoucher) {
-        const vLines = [];
-        let lineNo = 1;
-        if (Number(form.interest) > 0) {
-          vLines.push({ lineNo: lineNo++, description: `Interest — ${loanLabel}`, amount: Number(form.interest) || 0, category: 'Finance Cost', expenseAccountCode: '', contactId: '', contact: loanLabel, taxType: 'N/A', taxRate: 0, taxAmt: 0 });
-        }
-        if (Number(form.principal) > 0) {
-          vLines.push({ lineNo: lineNo++, description: `Principal — ${loanLabel}`, amount: Number(form.principal) || 0, category: 'Loans Payable', expenseAccountCode: '', contactId: '', contact: loanLabel, taxType: 'N/A', taxRate: 0, taxAmt: 0 });
-        }
-        if (Number(form.penalty) > 0) {
-          vLines.push({ lineNo: lineNo++, description: `Penalty — ${loanLabel}`, amount: Number(form.penalty) || 0, category: 'Finance Cost', expenseAccountCode: '', contactId: '', contact: loanLabel, taxType: 'N/A', taxRate: 0, taxAmt: 0 });
-        }
-        const vId = await nextVoucherId('LOAN', form.date);
-        const vRef = await addDoc(collection(db, 'vouchers'), {
-          voucherId:              vId,
-          voucherType:            'LOAN',
-          preparationDate:        form.date,
-          purposeCategory:        'Loan Payment',
-          paymentFromAccountCode: form.bank || '',
-          contactSummary:         loanLabel,
-          totalAmount:            total,
-          status:                 'Pending',
-          notes:                  form.notes || '',
-          loanId:                 loan.id,
-          checkVoucherId:         form.method === 'Check' ? (form.checkVoucherId || '') : '',
-          lines:                  vLines,
-          createdAt:              serverTimestamp(),
-          createdBy:              user,
-          updatedAt:              serverTimestamp(),
-          updatedBy:              user,
-        });
-        finalVoucherId = vId;
-        voucherDocId   = vRef.id;
-      }
-
-      // --- Issue check from active checkbook ---
-      let checkInfo = null;
-      if (form.method === 'Check' && activeCb) {
-        checkInfo = await issueCheck({
-          bankCode:      form.bank,
-          payeeName:     loanLabel,
-          amount:        total,
-          netAmount:     total,
-          issueDate:     form.date,
-          checkNumber:   form.referenceNo || undefined,
-          referenceType: 'Loan Payment',
-          referenceId:   loan.id,
-          voucherDocId,
-          notes:         form.notes || `Loan payment — ${loanLabel}`,
-          user,
-        });
-      }
-
-      // --- Save loan payment record ---
+      // 1. Write the loanPayments record referencing the LV (and CV if linked)
       const payload = {
-        loanId: loan.id,
-        loanName: loan.name || `Loan ${loan.id}`,
-        date: form.date,
-        interest: Number(form.interest) || 0,
-        principal: Number(form.principal) || 0,
-        penalty: Number(form.penalty) || 0,
+        loanId:          loan.id,
+        loanName:        loan.name || `Loan ${loan.id}`,
+        date:            form.date,
+        interest:        Number(form.interest)  || 0,
+        principal:       Number(form.principal) || 0,
+        penalty:         Number(form.penalty)   || 0,
         total,
-        method: form.method,
-        referenceNo: checkInfo?.checkNumber || form.referenceNo || '',
-        bank: form.bank || '',
-        voucherId: finalVoucherId,
-        checkVoucherId: form.method === 'Check' ? (form.checkVoucherId || '') : '',
-        checkId:    checkInfo?.checkId        || '',
-        checkRegisterId: checkInfo?.checkRegisterId || '',
-        notes: form.notes || '',
-        allocations: form.appliedPeriod
-          ? [{
-              period: form.appliedPeriod,
-              interest:  Number(form.interest)  || 0,
-              principal: Number(form.principal) || 0,
-              penalty:   Number(form.penalty)   || 0,
-            }]
+        method:          form.method,
+        referenceNo:     form.referenceNo || '',
+        bank:            form.bank        || '',
+        voucherId:       selectedLv.voucherId      || '',   // LV human-readable ID
+        checkVoucherId:  selectedLv.checkVoucherId || '',   // CV human-readable ID (if any)
+        checkId:         '',
+        checkRegisterId: '',
+        notes:           form.notes || '',
+        allocations:     form.appliedPeriod
+          ? [{ period: form.appliedPeriod, interest: Number(form.interest) || 0, principal: Number(form.principal) || 0, penalty: Number(form.penalty) || 0 }]
           : [],
         createdAt: serverTimestamp(),
         createdBy: user,
       };
-      const ref = await addDoc(collection(db, 'loanPayments'), payload);
-      onSaved && onSaved({ id: ref.id, ...payload });
+      const lpRef = await addDoc(collection(db, 'loanPayments'), payload);
+
+      // 2. Mark the LV as consumed so it cannot be used for another payment
+      await updateDoc(doc(db, 'vouchers', selectedLvDocId), {
+        loanPaymentId: lpRef.id,
+        updatedAt: serverTimestamp(), updatedBy: user,
+      });
+
+      // 3. If LV is linked to a CV: clear the associated check(s) and mark the CV Paid
+      if (selectedLv.checkVoucherId) {
+        try {
+          const crSnap = await getDocs(query(
+            collection(db, 'checkRegister'),
+            where('referenceId', '==', selectedLv.checkVoucherId),
+          ));
+          let cvFirestoreDocId = null;
+          for (const crDoc of crSnap.docs) {
+            const crData = crDoc.data();
+            if (!cvFirestoreDocId && crData.voucherDocId) cvFirestoreDocId = crData.voucherDocId;
+            const patch = { loanPaymentId: lpRef.id, updatedAt: serverTimestamp(), updatedBy: user };
+            if (crData.status === 'Issued') {
+              patch.status      = 'Cleared';
+              patch.clearedDate = form.date;
+            }
+            await updateDoc(doc(db, 'checkRegister', crDoc.id), patch);
+          }
+          if (cvFirestoreDocId) {
+            await updateDoc(doc(db, 'vouchers', cvFirestoreDocId), {
+              status: 'Paid', updatedAt: serverTimestamp(), updatedBy: user,
+            });
+          }
+        } catch (e) {
+          console.warn('Could not auto-clear check:', e);
+        }
+      }
+
+      onSaved && onSaved({ id: lpRef.id, ...payload });
       onClose();
     } catch (e) {
       setError(e.message || 'Failed to save.');
@@ -192,6 +180,7 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
     }
   };
 
+  // ── Styles ────────────────────────────────────────────────────────────────
   const inpS = {
     border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 10px',
     fontSize: 13, width: '100%', boxSizing: 'border-box', fontFamily: 'inherit', background: '#fff',
@@ -210,18 +199,18 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
       onClick={e => e.target === e.currentTarget && onClose()}
     >
       <div style={{
-        width: 'min(640px,98vw)', maxHeight: '92vh', background: '#fff',
+        width: 'min(660px,98vw)', maxHeight: '92vh', background: '#fff',
         borderRadius: 16, display: 'flex', flexDirection: 'column',
         overflow: 'hidden', boxShadow: '0 24px 64px rgba(0,0,0,.25)',
       }}>
+
         {/* Header */}
         <div style={{ background: '#f97316', color: '#fff', padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <strong style={{ fontSize: 16, fontWeight: 900 }}>💰 Record Loan Payment</strong>
             <button onClick={onClose} style={{
               background: 'rgba(255,255,255,.25)', border: 'none', color: '#fff',
-              borderRadius: 8, width: 28, height: 28, cursor: 'pointer',
-              fontSize: 14, fontWeight: 900,
+              borderRadius: 8, width: 28, height: 28, cursor: 'pointer', fontSize: 14, fontWeight: 900,
             }}>✕</button>
           </div>
           <div style={{ fontSize: 12, opacity: .9, marginTop: 4, fontWeight: 600 }}>
@@ -231,7 +220,60 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
 
         {/* Body */}
         <div style={{ padding: '18px 20px', overflowY: 'auto', flex: 1 }}>
-          {/* Next due summary */}
+
+          {/* ── Step 1: Select Loan Voucher (pre-requisite) ─────────────── */}
+          <div style={{
+            marginBottom: 14, padding: '12px 14px',
+            background: selectedLvDocId ? '#f0fdf4' : '#fef9c3',
+            border: `1px solid ${selectedLvDocId ? '#86efac' : '#fde047'}`,
+            borderLeft: `4px solid ${selectedLvDocId ? '#16a34a' : '#eab308'}`,
+            borderRadius: 10,
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 6, color: selectedLvDocId ? '#15803d' : '#854d0e' }}>
+              Step 1 — Select Loan Voucher (LV) · Required
+            </div>
+            {lvsLoading ? (
+              <div style={{ fontSize: 12, color: '#64748b' }}>Loading available vouchers…</div>
+            ) : lvs.length === 0 ? (
+              <div>
+                <div style={{ fontSize: 12, color: '#92400e', fontWeight: 600, marginBottom: 4 }}>
+                  No Loan Vouchers (LV) available for this loan.
+                </div>
+                <div style={{ fontSize: 11, color: '#78350f', lineHeight: 1.5 }}>
+                  Go to <strong>Vouchers</strong> and create a new voucher with type <strong>PAYMENT</strong>, select this loan, and optionally link a Check Voucher (CV). Come back here once it is created.
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <select
+                  style={{ ...inpS, borderColor: selectedLvDocId ? '#86efac' : '#fde047', fontWeight: selectedLvDocId ? 700 : 400 }}
+                  value={selectedLvDocId}
+                  onChange={e => setSelectedLvDocId(e.target.value)}
+                >
+                  <option value="">— Select a Loan Voucher —</option>
+                  {lvs.map(lv => (
+                    <option key={lv.docId} value={lv.docId}>
+                      {lv.voucherId || lv.docId}
+                      {lv.checkVoucherId ? ` · CV: ${lv.checkVoucherId}` : ''}
+                      {lv.totalAmount   ? ` · ${fmtCur(lv.totalAmount)}` : ''}
+                      {lv.preparationDate ? ` · ${lv.preparationDate}` : ''}
+                    </option>
+                  ))}
+                </select>
+                {selectedLv && (
+                  <div style={{ fontSize: 11, color: '#15803d', display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 2 }}>
+                    <span>✓ LV: <strong>{selectedLv.voucherId}</strong></span>
+                    {selectedLv.checkVoucherId
+                      ? <span>· Linked CV: <strong>{selectedLv.checkVoucherId}</strong> — check will be auto-cleared on save</span>
+                      : <span style={{ color: '#64748b' }}>· No linked CV (non-check payment)</span>
+                    }
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ── Next due summary ─────────────────────────────────────────── */}
           {nextRow && (
             <div style={{
               background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10,
@@ -250,149 +292,89 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
               </div>
               <button
                 onClick={fillNextDue}
-                style={{
-                  background: '#f97316', color: '#fff', border: 'none', borderRadius: 8,
-                  padding: '6px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                }}
+                style={{ background: '#f97316', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
               >Fill Next Due</button>
             </div>
           )}
 
-          {/* Row 1: date / method */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 12, marginBottom: 12 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Payment Date</label>
-              <input type="date" style={inpS} value={form.date} onChange={e => setField('date', e.target.value)} />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Method</label>
-              <select style={inpS} value={form.method} onChange={e => setForm(f => ({ ...f, method: e.target.value, ...(e.target.value !== 'Check' ? { checkVoucherId: '' } : {}) }))}>
-                {PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
-              </select>
-            </div>
-          </div>
+          {/* ── Step 2: Payment details (dim until LV selected) ─────────── */}
+          <div style={{ opacity: selectedLvDocId ? 1 : 0.4, pointerEvents: selectedLvDocId ? 'auto' : 'none', transition: 'opacity .2s' }}>
 
-          {/* Checkbook banner shown when method is Check */}
-          {form.method === 'Check' && form.bank && (
-            activeCb ? (
-              <div style={{
-                background:'#eff6ff', border:'1px solid #bfdbfe', borderLeft:'4px solid #1d4ed8',
-                borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'#1e3a8a',
-                display:'flex', flexWrap:'wrap', gap:10, alignItems:'center',
-              }}>
-                <span>📋 <strong>Active Checkbook</strong></span>
-                <span>{activeCb.checkbookType}</span>
-                <span>Range: <strong>{activeCb.startingNumber}–{activeCb.endingNumber}</strong></span>
-                <span>Next: <strong style={{ color:'#f97316' }}>{activeCb.nextCheckNumber}</strong></span>
+            {/* Row 1: date / method */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 12, marginBottom: 12 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <label style={lblS}>Payment Date</label>
+                <input type="date" style={inpS} value={form.date} onChange={e => setField('date', e.target.value)} />
               </div>
-            ) : (
-              <div style={{
-                background:'#fff7ed', border:'1px solid #fed7aa', borderLeft:'4px solid #f97316',
-                borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'#9a3412',
-              }}>⚠️ No active checkbook for this bank. Open <strong>Check Registry → Checkbook Management</strong> to add one before issuing checks.</div>
-            )
-          )}
-
-          {/* Row 2: interest / principal / penalty */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 12 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Interest ₱</label>
-              <input type="number" step="0.01" style={{ ...inpS, textAlign: 'right' }}
-                value={form.interest} onChange={e => setField('interest', e.target.value)} />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Principal ₱</label>
-              <input type="number" step="0.01" style={{ ...inpS, textAlign: 'right' }}
-                value={form.principal} onChange={e => setField('principal', e.target.value)} />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Penalty ₱</label>
-              <input type="number" step="0.01" style={{ ...inpS, textAlign: 'right' }}
-                value={form.penalty} onChange={e => setField('penalty', e.target.value)} />
-            </div>
-          </div>
-
-          {/* Row 3: bank / reference / voucher */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 12 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Bank / Account</label>
-              {bankAccounts.length > 0 ? (
-                <select style={inpS} value={form.bank} onChange={e => setField('bank', e.target.value)}>
-                  <option value="">— Select —</option>
-                  {bankAccounts.map(b => (
-                    <option key={b.id} value={b.code || b.id}>{b.code} — {b.name}</option>
-                  ))}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <label style={lblS}>Method</label>
+                <select
+                  style={{ ...inpS, ...(selectedLv?.checkVoucherId ? { background: '#f8fafc', color: '#64748b' } : {}) }}
+                  value={form.method}
+                  disabled={!!(selectedLv?.checkVoucherId)}
+                  onChange={e => setField('method', e.target.value)}
+                >
+                  {PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
                 </select>
-              ) : (
+                {selectedLv?.checkVoucherId && (
+                  <span style={{ fontSize: 10, color: '#94a3b8' }}>Locked to Check — linked CV detected</span>
+                )}
+              </div>
+            </div>
+
+            {/* Row 2: interest / principal / penalty */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 12 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <label style={lblS}>Interest ₱</label>
+                <input type="number" step="0.01" style={{ ...inpS, textAlign: 'right' }}
+                  value={form.interest} onChange={e => setField('interest', e.target.value)} />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <label style={lblS}>Principal ₱</label>
+                <input type="number" step="0.01" style={{ ...inpS, textAlign: 'right' }}
+                  value={form.principal} onChange={e => setField('principal', e.target.value)} />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <label style={lblS}>Penalty ₱</label>
+                <input type="number" step="0.01" style={{ ...inpS, textAlign: 'right' }}
+                  value={form.penalty} onChange={e => setField('penalty', e.target.value)} />
+              </div>
+            </div>
+
+            {/* Row 3: bank / reference */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 12, marginBottom: 12 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <label style={lblS}>Bank / Account</label>
                 <input style={inpS} value={form.bank} onChange={e => setField('bank', e.target.value)} placeholder="e.g. BDO 1234" />
-              )}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <label style={lblS}>{form.method === 'Check' ? 'Check No.' : 'Reference No.'}</label>
+                <input style={inpS} value={form.referenceNo} onChange={e => setField('referenceNo', e.target.value)} placeholder={form.method === 'Check' ? 'Check #' : 'Txn No.'} />
+              </div>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>{form.method === 'Check' ? 'Check No.' : 'Reference No.'}</label>
-              <input style={inpS} value={form.referenceNo} onChange={e => setField('referenceNo', e.target.value)} placeholder={form.method === 'Check' ? 'Check #' : 'Txn No.'} />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={lblS}>Loan Voucher</label>
-              {form.autoVoucher ? (
-                <div style={{
-                  ...inpS, display: 'flex', alignItems: 'center', gap: 8,
-                  background: '#f0fdf4', borderColor: '#86efac', color: '#15803d', fontWeight: 600,
-                }}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#15803d" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                  Auto-create LV on save
-                </div>
-              ) : (
-                <input style={inpS} value={form.voucherId} onChange={e => setField('voucherId', e.target.value)} placeholder="e.g. LV202605-0001" />
-              )}
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#64748b', cursor: 'pointer', marginTop: 2 }}>
-                <input type="checkbox" checked={form.autoVoucher} onChange={e => setField('autoVoucher', e.target.checked)} style={{ margin: 0 }} />
-                Auto-create Loan Voucher
-              </label>
-            </div>
-          </div>
 
-          {/* Row 4: Linked Check Voucher (CV) — only for Check payments */}
-          {form.method === 'Check' && (
-          <div style={{ marginBottom: 12, padding: '10px 12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderLeft: '4px solid #64748b', borderRadius: 8 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <label style={{ ...lblS, color: '#475569' }}>Linked Check Voucher (CV) — Optional</label>
-              <input
-                style={inpS}
-                value={form.checkVoucherId}
-                onChange={e => setField('checkVoucherId', e.target.value)}
-                placeholder="e.g. CV202605-0001"
-              />
-              <span style={{ fontSize: 10, color: '#94a3b8', lineHeight: 1.5 }}>
-                Link the Check Voucher already issued by the disbursement team for this payment.
-                Both the LV (classification) and CV (instrument) will appear in Payment History.
-              </span>
+            {/* Notes */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 8 }}>
+              <label style={lblS}>Notes</label>
+              <input style={inpS} value={form.notes} onChange={e => setField('notes', e.target.value)} />
             </div>
-          </div>
-          )}
 
-          {/* Notes */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 8 }}>
-            <label style={lblS}>Notes</label>
-            <input style={inpS} value={form.notes} onChange={e => setField('notes', e.target.value)} />
-          </div>
+          </div>{/* end step 2 */}
 
-          {/* Total card */}
+          {/* Total */}
           <div style={{
             marginTop: 10, padding: '12px 16px', borderRadius: 12,
             background: '#0f172a', color: '#fff', display: 'flex',
             alignItems: 'center', justifyContent: 'space-between',
           }}>
-            <span style={{ fontSize: 11, fontWeight: 800, color: '#94a3b8', letterSpacing: '.06em' }}>
-              TOTAL PAYMENT
-            </span>
+            <span style={{ fontSize: 11, fontWeight: 800, color: '#94a3b8', letterSpacing: '.06em' }}>TOTAL PAYMENT</span>
             <strong style={{ fontSize: 20, fontWeight: 900 }}>{fmtCur(total)}</strong>
           </div>
 
           {error && (
             <div style={{
               marginTop: 12, padding: '9px 12px', borderRadius: 8,
-              background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c',
-              fontSize: 12, fontWeight: 600,
+              background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', fontSize: 12, fontWeight: 600,
             }}>{error}</div>
           )}
         </div>
@@ -412,11 +394,12 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
           >Cancel</button>
           <button
             onClick={handleSave}
-            disabled={saving || total <= 0}
+            disabled={saving || total <= 0 || !selectedLvDocId || lvsLoading}
             style={{
               border: 0, borderRadius: 10, padding: '9px 18px', fontWeight: 800, fontSize: 13,
-              background: '#f97316', color: '#fff', cursor: saving ? 'wait' : 'pointer',
-              fontFamily: 'inherit', opacity: (saving || total <= 0) ? .6 : 1,
+              background: '#f97316', color: '#fff', fontFamily: 'inherit',
+              cursor: (saving || !selectedLvDocId) ? 'not-allowed' : 'pointer',
+              opacity: (saving || total <= 0 || !selectedLvDocId) ? .5 : 1,
             }}
           >{saving ? 'Saving…' : 'Record Payment'}</button>
         </div>

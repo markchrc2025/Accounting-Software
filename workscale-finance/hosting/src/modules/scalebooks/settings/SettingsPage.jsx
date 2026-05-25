@@ -3,6 +3,7 @@ import {
   doc, getDoc, setDoc, serverTimestamp,
   collection, onSnapshot, addDoc, updateDoc, deleteDoc, getDocs, writeBatch, query, orderBy, where,
 } from 'firebase/firestore';
+import { updateProfile } from 'firebase/auth';
 import { db, auth, storage, functions } from '../../../firebase.js';
 import { httpsCallable } from 'firebase/functions';
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
@@ -11,7 +12,7 @@ import { invalidateDocIdSettings } from '../../../utils/documentIds.js';
 
 const GLOBAL_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
 const MODULE_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
-const ROUTING_DOC_TYPES = ['Vouchers', 'Weekly Projections', 'Disbursements', 'Check Voucher'];
+const ROUTING_DOC_TYPES = ['Vouchers', 'Weekly Projections', 'Disbursements', 'Check Voucher', 'Journal'];
 // Roles that Admin implicitly includes (all of them)
 const ADMIN_INHERITS = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
 const MODULE_GROUPS = [
@@ -361,6 +362,10 @@ export default function SettingsPage() {
         }
       } else {
         await updateDoc(doc(db, 'appUsers', id), { ...data, updatedAt:serverTimestamp(), updatedBy:me });
+        // If Admin changed the name of the currently logged-in user, sync Firebase Auth immediately
+        if (auth.currentUser && auth.currentUser.email === data.email && data.fullName !== auth.currentUser.displayName) {
+          await updateProfile(auth.currentUser, { displayName: data.fullName });
+        }
         showToast('User saved.');
       }
       setUserModal(null);

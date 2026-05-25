@@ -294,7 +294,7 @@ export default function ProjectionsPage() {
           </div>
           <div className="modal-f">
             <div style={{display:'flex',gap:8}}>
-              {isEdit&&form.status==='Draft'&&<button className="btn btn-ghost btn-sm" onClick={()=>{upd('status','Pending Review');showToast('Status set to Pending Review — save to confirm.');}}>Submit for Review</button>}
+              {isEdit&&form.status==='Draft'&&<button className="btn btn-ghost btn-sm" onClick={()=>{upd('status','Pending Review');showToast('Status set to Pending Review — save to confirm.');}}>Submit for Approval</button>}
             </div>
             <div style={{display:'flex',gap:8}}>
               <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
@@ -317,7 +317,7 @@ export default function ProjectionsPage() {
           <div className="action-dropdown">
             <button className="action-item" onClick={()=>{setModal({...proj});setOpenMenuId(null);}}>✏️ Edit / View</button>
             <button className="action-item" onClick={()=>{duplicateProjection(proj);setOpenMenuId(null);}}>📋 Duplicate</button>
-            {proj.status==='Draft'&&<button className="action-item" onClick={()=>{submitForApproval(proj.id);setOpenMenuId(null);}}>📤 Submit for Review</button>}
+            {proj.status==='Draft'&&<button className="action-item" onClick={()=>{submitForApproval(proj.id);setOpenMenuId(null);}}>📤 Submit for Approval</button>}
             <button className="action-item" style={{color:'#dc2626'}} onClick={()=>{deleteProjection(proj.id);setOpenMenuId(null);}}>🗑 Delete</button>
           </div>
         )}
@@ -395,7 +395,7 @@ export default function ProjectionsPage() {
         {selected.size>0&&(
           <div className="bulk-bar">
             <span style={{fontWeight:700,fontSize:13}}>{selected.size} selected</span>
-            <button className="btn btn-ghost btn-sm" onClick={bulkSubmit}>📤 Submit for Review</button>
+            <button className="btn btn-ghost btn-sm" onClick={bulkSubmit}>📤 Submit for Approval</button>
             <button className="btn btn-danger btn-sm" onClick={bulkDelete}>🗑 Delete Selected</button>
             <button className="btn btn-ghost btn-sm" onClick={()=>setSelected(new Set())}>Clear</button>
           </div>

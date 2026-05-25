@@ -184,6 +184,19 @@ export async function nextJournalEntryId(date) {
   return nextDocumentId(s.jePrefix, date);
 }
 
+// Accrual JE IDs are globally sequential (no year/month period), always ACJE-NNNN.
+export async function nextAccrualJEId() {
+  const counterRef = doc(db, 'documentCounters', 'ACJE');
+  const seq = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(counterRef);
+    const cur  = snap.exists() ? Number(snap.data().seq || 0) : 0;
+    const next = cur + 1;
+    tx.set(counterRef, { prefix: 'ACJE', periodKey: 'ACJE', seq: next, updatedAt: serverTimestamp() }, { merge: true });
+    return next;
+  });
+  return `ACJE-${String(seq).padStart(4, '0')}`;
+}
+
 export async function nextBankTransactionId(date) {
   const s = await getDocIdSettings();
   return nextDocumentId(s.btPrefix, date);

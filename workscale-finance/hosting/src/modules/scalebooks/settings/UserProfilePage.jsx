@@ -1,12 +1,10 @@
 import { useState, useEffect } from 'react';
 import {
-  updateProfile,
-  updateEmail,
   updatePassword,
   reauthenticateWithCredential,
   EmailAuthProvider,
 } from 'firebase/auth';
-import { doc, getDoc, getDocs, collection, query, orderBy } from 'firebase/firestore';
+import { doc, getDoc, getDocs, onSnapshot, collection, query, where, orderBy } from 'firebase/firestore';
 import { auth, db } from '../../../firebase.js';
 
 // ─── Section card ─────────────────────────────────────────────────────────────
@@ -55,11 +53,25 @@ export default function UserProfilePage() {
   // Detect Google / OAuth sign-in — hide Change Password for these users
   const isGoogleUser = user?.providerData?.some(p => p.providerId === 'google.com') ?? false;
 
-  // Profile fields
-  const [displayName, setDisplayName] = useState(user?.displayName ?? '');
-  const [email,       setEmail]       = useState(user?.email ?? '');
-  const [profileMsg,  setProfileMsg]  = useState({ type: '', text: '' });
-  const [profileBusy, setProfileBusy] = useState(false);
+  // Both fields are Admin-managed (read-only); source of truth is appUsers
+  const [displayName, setDisplayName] = useState('');
+  const [workEmail,   setWorkEmail]   = useState('');
+
+  useEffect(() => {
+    if (!user?.email) return;
+    const q = query(collection(db, 'appUsers'), where('email', '==', user.email));
+    const unsub = onSnapshot(q, snap => {
+      const d = snap.docs[0]?.data();
+      if (d) {
+        setDisplayName(d.fullName || d.displayName || user.displayName || '');
+        setWorkEmail(d.workEmail || '');
+      } else {
+        setDisplayName(user.displayName || '');
+        setWorkEmail('');
+      }
+    });
+    return unsub;
+  }, [user?.email]);
 
   // Password fields
   const [currentPw,  setCurrentPw]  = useState('');
@@ -101,33 +113,6 @@ export default function UserProfilePage() {
   const nameFor = (email) => email
     ? (userNames[(email ?? '').toLowerCase()] || email)
     : '—';
-
-  // ── Save profile info ──────────────────────────────────────────────────────
-  async function handleSaveProfile(e) {
-    e.preventDefault();
-    if (!user) return;
-    setProfileBusy(true);
-    setProfileMsg({ type: '', text: '' });
-    try {
-      const promises = [];
-      if (displayName !== user.displayName) {
-        promises.push(updateProfile(user, { displayName }));
-      }
-      if (email !== user.email) {
-        promises.push(updateEmail(user, email));
-      }
-      await Promise.all(promises);
-      setProfileMsg({ type: 'success', text: 'Profile updated successfully.' });
-    } catch (err) {
-      if (err.code === 'auth/requires-recent-login') {
-        setProfileMsg({ type: 'error', text: 'Session expired. Please sign out and sign in again to change your email.' });
-      } else {
-        setProfileMsg({ type: 'error', text: err.message });
-      }
-    } finally {
-      setProfileBusy(false);
-    }
-  }
 
   // ── Change password ────────────────────────────────────────────────────────
   async function handleChangePassword(e) {
@@ -194,35 +179,28 @@ export default function UserProfilePage() {
       <div className="flex flex-col gap-6">
         {/* ── Profile information ──────────────────────────────────────── */}
         <Card title="Profile Information">
-          <form onSubmit={handleSaveProfile} className="flex flex-col gap-4">
-            <Field
-              label="Display Name"
-              id="displayName"
-              value={displayName}
-              onChange={setDisplayName}
-              placeholder="Your full name"
-              autoComplete="name"
-            />
-            <Field
-              label="Email Address"
-              id="email"
-              type="email"
-              value={email}
-              onChange={setEmail}
-              placeholder="you@example.com"
-              autoComplete="email"
-            />
-            <div className="flex items-center gap-3 pt-1">
-              <button
-                type="submit"
-                disabled={profileBusy}
-                className="h-9 px-5 rounded-lg bg-[#F97316] text-white text-sm font-semibold hover:bg-[#EA6C0A] disabled:opacity-50 transition-colors"
-              >
-                {profileBusy ? 'Saving…' : 'Save changes'}
-              </button>
+          <div className="flex flex-col gap-4">
+            {/* Display Name — read-only; managed by Admin in Settings → Users & Roles */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[13px] font-medium text-[#374151]">
+                Display Name
+                <span className="ml-2 text-[11px] font-normal text-[#9CA3AF]">Managed by Admin</span>
+              </label>
+              <div className="h-9 rounded-lg border border-[#E5E7EB] bg-[#F9FAFB] px-3 flex items-center text-sm text-[#6B7280] select-none cursor-not-allowed">
+                {displayName || '—'}
+              </div>
             </div>
-            <Alert type={profileMsg.type} message={profileMsg.text} />
-          </form>
+            {/* Work Email — read-only; managed by Admin in Settings → Users & Roles */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[13px] font-medium text-[#374151]">
+                Work Email
+                <span className="ml-2 text-[11px] font-normal text-[#9CA3AF]">Managed by Admin</span>
+              </label>
+              <div className="h-9 rounded-lg border border-[#E5E7EB] bg-[#F9FAFB] px-3 flex items-center text-sm text-[#6B7280] select-none cursor-not-allowed">
+                {workEmail || '—'}
+              </div>
+            </div>
+          </div>
         </Card>
 
         {/* ── Change password — hidden for Google/OAuth users ──────────── */}

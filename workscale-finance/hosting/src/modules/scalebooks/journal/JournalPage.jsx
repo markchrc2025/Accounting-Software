@@ -5,24 +5,80 @@ import {
   addDoc, updateDoc, doc, serverTimestamp, deleteDoc
 } from 'firebase/firestore';
 import { db, auth } from '../../../firebase.js';
-import { nextJournalEntryId } from '../../../utils/documentIds.js';
+import { nextJournalEntryId, nextAccrualJEId } from '../../../utils/documentIds.js';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
+import AccountCombobox from '../../../components/AccountCombobox.jsx';
+import ContactPicker from '../../../components/ContactPicker.jsx';
 
-const JE_TYPES = ['Manual','Adjusting','Closing','Reversing','Voucher'];
+const JE_TYPES = ['Manual','Adjusting','Accrual','Closing','Reversing'];
 const PAGE_SIZES = [20, 50, 100];
 const uid = () => Math.random().toString(36).slice(2,10).toUpperCase();
+
+/* Comma-formatted amount input — shows commas when blurred, raw value when editing */
+function AmountInput({ value, onChange }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft]     = useState('');
+
+  const handleFocus = () => {
+    setEditing(true);
+    const v = (value != null && value !== '' && Number(value) !== 0) ? String(value) : '';
+    setDraft(v);
+  };
+
+  const handleChange = (e) => {
+    let raw = e.target.value.replace(/[^0-9.]/g, '');
+    const parts = raw.split('.');
+    if (parts.length > 2) raw = parts[0] + '.' + parts.slice(1).join('');
+    setDraft(raw);
+    onChange(raw);
+  };
+
+  const handleBlur = () => {
+    setEditing(false);
+    const clean = draft.replace(/\.$/, '');
+    if (clean !== draft) onChange(clean);
+  };
+
+  const display = (() => {
+    if (editing) return draft;
+    const v = (value != null && value !== '') ? String(value) : '';
+    if (v === '' || Number(v) === 0) return '';
+    const n = parseFloat(v);
+    if (isNaN(n)) return '';
+    const dotIdx = v.indexOf('.');
+    const fractionLen = dotIdx >= 0 ? v.length - dotIdx - 1 : 0;
+    return new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: fractionLen,
+      maximumFractionDigits: 20,
+    }).format(n);
+  })();
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={display}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
+      onChange={handleChange}
+      style={{ textAlign:'right', width:'100%', border:'1px solid #e5e7eb', borderRadius:6, padding:'5px 7px', fontSize:13, fontFamily:'inherit', boxSizing:'border-box' }}
+    />
+  );
+}
 
 const fmtPHP = n => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtCur = n => '₱' + fmtPHP(n);
 
 const STATUS_STYLES = {
-  'Draft':         {bg:'#fef9c3',border:'#fde68a',color:'#a16207'},
-  'For Clearing':  {bg:'#eff6ff',border:'#bfdbfe',color:'#1d4ed8'},
-  'Cleared':       {bg:'#ecfdf5',border:'#6ee7b7',color:'#065f46'},
-  'For Posting':   {bg:'#fff7ed',border:'#fed7aa',color:'#c2410c'},
-  'Posted':        {bg:'#f0fdf4',border:'#bbf7d0',color:'#15803d'},
-  'Reversed':      {bg:'#fff7ed',border:'#fed7aa',color:'#c2410c'},
-  'Voided':        {bg:'#fef2f2',border:'#fecaca',color:'#b91c1c'},
+  'Draft':            {bg:'#fef9c3',border:'#fde68a',color:'#a16207'},
+  'Pending Review':   {bg:'#fffbeb',border:'#fde68a',color:'#92400e'},
+  'Pending Approval': {bg:'#eff6ff',border:'#bfdbfe',color:'#1d4ed8'},
+  'For Clearing':     {bg:'#eff6ff',border:'#bfdbfe',color:'#1d4ed8'},
+  'Cleared':          {bg:'#ecfdf5',border:'#6ee7b7',color:'#065f46'},
+  'For Posting':      {bg:'#fff7ed',border:'#fed7aa',color:'#c2410c'},
+  'Posted':           {bg:'#f0fdf4',border:'#bbf7d0',color:'#15803d'},
+  'Reversed':         {bg:'#fff7ed',border:'#fed7aa',color:'#c2410c'},
+  'Voided':           {bg:'#fef2f2',border:'#fecaca',color:'#b91c1c'},
 };
 
 const CSS = `
@@ -48,7 +104,7 @@ const CSS = `
   .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid;}
   .empty{padding:48px;text-align:center;color:#94a3b8;}
   .backdrop{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:100;}
-  .modal{width:min(820px,98vw);max-height:95vh;background:#fff;border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.25);}
+  .modal{width:min(1280px,98vw);max-height:95vh;background:#fff;border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.25);}
   .modal-h{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #e5e7eb;background:#f8fafc;flex-shrink:0;}
   .modal-b{padding:20px;overflow-y:auto;flex:1;}
   .modal-f{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 20px;border-top:1px solid #e5e7eb;flex-shrink:0;}
@@ -61,7 +117,7 @@ const CSS = `
   .line-table{width:100%;border-collapse:collapse;}
   .line-table th{padding:4px 6px;background:#f8fafc;color:#94a3b8;font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;text-align:left;}
   .line-table td{padding:4px;border-bottom:1px solid #f1f5f9;}
-  .line-table input{border:1px solid #e5e7eb;border-radius:6px;padding:5px 7px;font-size:11px;font-family:inherit;width:100%;box-sizing:border-box;}
+  .line-table input{border:1px solid #e5e7eb;border-radius:6px;padding:5px 7px;font-size:13px;font-family:inherit;width:100%;box-sizing:border-box;}
   .balance-bar{display:flex;gap:16px;background:#f8fafc;border-radius:10px;padding:10px 14px;margin-top:10px;font-size:12px;align-items:center;}
   .je-row{background:#fff;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:8px;overflow:hidden;}
   .je-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;cursor:pointer;gap:8px;}
@@ -79,6 +135,7 @@ export default function JournalPage() {
   const { can } = usePermissions();
   const canPost        = can('Journal', 'Poster') || can('Journal', 'Approver');
   const canApprovePost = can('Journal', 'Approver');
+  const canSubmit      = can('Journal', 'Maker') || canPost;
   const [entries, setEntries]   = useState([]);
   const [expanded, setExpanded] = useState(new Set());
   const [search, setSearch]     = useState('');
@@ -94,6 +151,8 @@ export default function JournalPage() {
   const [page, setPage]         = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [selected, setSelected] = useState(new Set());
+  const [accounts,  setAccounts]  = useState([]);
+  const [contacts,  setContacts]  = useState([]);
 
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
@@ -103,6 +162,14 @@ export default function JournalPage() {
       query(collection(db,'journalEntries'), orderBy('date','desc')),
       snap => { setEntries(snap.docs.map(d=>({id:d.id,...d.data()}))); setPage(1); }
     );
+  }, []);
+
+  useEffect(() => {
+    return onSnapshot(query(collection(db,'accounts'), orderBy('code')), s => setAccounts(s.docs.map(d=>({id:d.id,...d.data()}))));
+  }, []);
+
+  useEffect(() => {
+    return onSnapshot(query(collection(db,'contacts'), orderBy('name')), s => setContacts(s.docs.map(d=>({id:d.id,...d.data()}))));
   }, []);
 
   /* ── Filter ────────────────────────────────────────────────── */
@@ -137,8 +204,8 @@ export default function JournalPage() {
   function openNew() {
     setModal({jeId:'', date:new Date().toISOString().slice(0,10), description:'', type:'Manual', status:'Draft', reference:''});
     setLines([
-      {id:uid(),accountCode:'',accountName:'',description:'',debit:'',credit:''},
-      {id:uid(),accountCode:'',accountName:'',description:'',debit:'',credit:''},
+      {id:uid(),contactId:'',contactName:'',accountCode:'',accountName:'',description:'',debit:'',credit:''},
+      {id:uid(),contactId:'',contactName:'',accountCode:'',accountName:'',description:'',debit:'',credit:''},
     ]);
   }
 
@@ -161,12 +228,14 @@ export default function JournalPage() {
       const totalDebit  = validLines.reduce((s,l)=>s+(parseFloat(l.debit)||0),0);
       const totalCredit = validLines.reduce((s,l)=>s+(parseFloat(l.credit)||0),0);
       if (Math.abs(totalDebit-totalCredit)>0.005) { alert('Debits must equal Credits before saving.'); setSaving(false); return; }
-      const jeId = form.id ? (form.jeId||'') : (form.jeId || await nextJournalEntryId(form.date));
+      const isNewAccrual = !form.id && form.type === 'Accrual';
+      const jeId = form.id ? (form.jeId||'') : (form.jeId || (isNewAccrual ? await nextAccrualJEId() : await nextJournalEntryId(form.date)));
+      const savedLines = validLines.map(l=>({contactId:l.contactId||'',contactName:l.contactName||'',accountCode:l.accountCode||'',accountName:l.accountName||'',description:l.description||'',debit:parseFloat(l.debit)||0,credit:parseFloat(l.credit)||0}));
       const payload = {
         jeId, date: form.date||'', description: form.description||'',
         type: form.type||'Manual', reference: form.reference||'',
         status: form.status||'Draft',
-        lines: validLines.map(l=>({accountCode:l.accountCode||'',accountName:l.accountName||'',description:l.description||'',debit:parseFloat(l.debit)||0,credit:parseFloat(l.credit)||0})),
+        lines: savedLines,
         totalDebit, totalCredit,
         updatedAt: serverTimestamp(), updatedBy: auth.currentUser?.email||'',
       };
@@ -175,7 +244,32 @@ export default function JournalPage() {
         showToast('JE updated.');
       } else {
         await addDoc(collection(db,'journalEntries'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
-        showToast('JE saved as draft.');
+        if (isNewAccrual) {
+          // Compute 1st of the following month as the reversal date
+          const [yr, mo] = (form.date||new Date().toISOString().slice(0,10)).split('-').map(Number);
+          const revYear  = mo === 12 ? yr + 1 : yr;
+          const revMonth = mo === 12 ? 1 : mo + 1;
+          const reversalDate = `${revYear}-${String(revMonth).padStart(2,'0')}-01`;
+          const revJeId = await nextAccrualJEId();
+          const reversalLines = savedLines.map(l=>({...l, debit:l.credit, credit:l.debit}));
+          await addDoc(collection(db,'journalEntries'), {
+            jeId: revJeId,
+            date: reversalDate,
+            description: `Accrual Reversal of ${jeId}`,
+            type: 'Reversing',
+            reference: jeId,
+            status: 'Draft',
+            lines: reversalLines,
+            totalDebit: totalCredit,
+            totalCredit: totalDebit,
+            accrualReversalOf: jeId,
+            createdAt: serverTimestamp(), createdBy: auth.currentUser?.email||'',
+            updatedAt: serverTimestamp(), updatedBy: auth.currentUser?.email||'',
+          });
+          showToast(`Accrual JE ${jeId} saved. Auto-reversal ${revJeId} created for ${reversalDate}.`);
+        } else {
+          showToast('JE saved as draft.');
+        }
       }
       setModal(null);
     } catch(e) { console.error(e); alert('Save failed.'); }
@@ -183,8 +277,8 @@ export default function JournalPage() {
   }
 
   async function postEntry(id) {
-    await updateDoc(doc(db,'journalEntries',id),{status:'For Posting',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
-    showToast('Submitted for posting.');
+    await updateDoc(doc(db,'journalEntries',id),{status:'Pending Review',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
+    showToast('Submitted for approval.');
   }
 
   async function clearEntry(id) {
@@ -195,6 +289,16 @@ export default function JournalPage() {
   async function requestPost(id) {
     await updateDoc(doc(db,'journalEntries',id),{status:'For Posting',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
     showToast('Submitted for posting.');
+  }
+
+  async function bulkSubmitForApproval() {
+    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'Draft'));
+    if (!ids.length) return showToast('No "Draft" entries selected.');
+    askConfirm(`Submit ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'} for approval?`, async () => {
+      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'Pending Review', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
+      setSelected(new Set());
+      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} submitted for approval.`);
+    });
   }
 
   async function approvePost(id) {
@@ -254,7 +358,8 @@ export default function JournalPage() {
 
   /* ── Line helpers ───────────────────────────────────────────── */
   const updLine=(id,k,v)=>setLines(ls=>ls.map(l=>l.id===id?{...l,[k]:v}:l));
-  const addLine=()=>setLines(ls=>[...ls,{id:uid(),accountCode:'',accountName:'',description:'',debit:'',credit:''}]);
+  const updLineAccount=(id,code)=>{const acct=accounts.find(a=>(a.code||a.id)===code);setLines(ls=>ls.map(l=>l.id===id?{...l,accountCode:code,accountName:acct?.name||''}:l));};
+  const addLine=()=>setLines(ls=>[...ls,{id:uid(),contactId:'',contactName:'',accountCode:'',accountName:'',description:'',debit:'',credit:''}]);
   const removeLine=id=>setLines(ls=>ls.filter(l=>l.id!==id));
   const totalDebit=lines.reduce((s,l)=>s+(parseFloat(l.debit)||0),0);
   const totalCredit=lines.reduce((s,l)=>s+(parseFloat(l.credit)||0),0);
@@ -281,27 +386,35 @@ export default function JournalPage() {
               <div className="field"><label>Date *</label><input type="date" value={modal.date} onChange={e=>setModal(m=>({...m,date:e.target.value}))} /></div>
               <div className="field"><label>Type</label><select value={modal.type||'Manual'} onChange={e=>setModal(m=>({...m,type:e.target.value}))}>{JE_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
               <div className="field"><label>Reference</label><input value={modal.reference||''} onChange={e=>setModal(m=>({...m,reference:e.target.value}))} /></div>
+              {modal.type==='Accrual'&&!modal.id&&(()=>{
+                const [yr,mo]=(modal.date||new Date().toISOString().slice(0,10)).split('-').map(Number);
+                const revY=mo===12?yr+1:yr; const revM=mo===12?1:mo+1;
+                const revDate=`${revY}-${String(revM).padStart(2,'0')}-01`;
+                return <div className="col4" style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:8,padding:'8px 12px',fontSize:12,color:'#1d4ed8',display:'flex',alignItems:'center',gap:6}}>
+                  <span>🔄</span><span>A reversing entry (ACJE) will be auto-created on <strong>{revDate}</strong> when saved.</span>
+                </div>;
+              })()}
               <div className="field col4"><label>Description *</label><input value={modal.description} onChange={e=>setModal(m=>({...m,description:e.target.value}))} /></div>
             </div>
             <div className="sec-hdr">Journal Lines</div>
             <div style={{overflowX:'auto'}}>
               <table className="line-table">
                 <thead><tr>
-                  <th style={{width:'15%'}}>Account Code</th>
-                  <th style={{width:'22%'}}>Account Name</th>
-                  <th style={{width:'25%'}}>Description</th>
-                  <th style={{width:'14%',textAlign:'right'}}>Debit</th>
-                  <th style={{width:'14%',textAlign:'right'}}>Credit</th>
+                  <th style={{width:'22%'}}>Contact</th>
+                  <th style={{width:'25%'}}>Account</th>
+                  <th style={{width:'20%'}}>Description</th>
+                  <th style={{width:'13%',textAlign:'right'}}>Debit</th>
+                  <th style={{width:'13%',textAlign:'right'}}>Credit</th>
                   <th style={{width:'5%'}}></th>
                 </tr></thead>
                 <tbody>
                   {lines.map(l=>(
                     <tr key={l.id}>
-                      <td><input value={l.accountCode} onChange={e=>updLine(l.id,'accountCode',e.target.value)} /></td>
-                      <td><input value={l.accountName} onChange={e=>updLine(l.id,'accountName',e.target.value)} /></td>
+                      <td><ContactPicker contacts={contacts} value={l.contactId} displayName={l.contactName} onChange={({contactId,contactName})=>setLines(ls=>ls.map(x=>x.id===l.id?{...x,contactId,contactName}:x))} compact placeholder="— Contact —" /></td>
+                      <td><AccountCombobox rawAccounts={accounts} value={l.accountCode} onChange={code=>updLineAccount(l.id,code)} placeholder="— Select Account —" style={{fontSize:11}} /></td>
                       <td><input value={l.description} onChange={e=>updLine(l.id,'description',e.target.value)} /></td>
-                      <td><input type="number" step="0.01" value={l.debit} onChange={e=>{updLine(l.id,'debit',e.target.value);if(parseFloat(e.target.value)>0) updLine(l.id,'credit','');}} style={{textAlign:'right'}} /></td>
-                      <td><input type="number" step="0.01" value={l.credit} onChange={e=>{updLine(l.id,'credit',e.target.value);if(parseFloat(e.target.value)>0) updLine(l.id,'debit','');}} style={{textAlign:'right'}} /></td>
+                      <td><AmountInput value={l.debit} onChange={raw=>{updLine(l.id,'debit',raw);if(parseFloat(raw)>0) updLine(l.id,'credit','');}} /></td>
+                      <td><AmountInput value={l.credit} onChange={raw=>{updLine(l.id,'credit',raw);if(parseFloat(raw)>0) updLine(l.id,'debit','');}} /></td>
                       <td><button onClick={()=>removeLine(l.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:14,padding:'0 4px'}}>✕</button></td>
                     </tr>
                   ))}
@@ -371,6 +484,9 @@ export default function JournalPage() {
         {selected.size > 0 && (
           <div style={{display:'flex',alignItems:'center',gap:10,padding:'8px 14px',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10,marginBottom:10,flexWrap:'wrap'}}>
             <span style={{fontSize:13,fontWeight:700,color:'#1d4ed8'}}>{selected.size} selected</span>
+            {[...selected].some(id=>entries.find(e=>e.id===id&&e.status==='Draft'))&&canSubmit&&(
+              <button className="btn btn-ghost btn-sm" style={{borderColor:'#fde68a',color:'#92400e'}} onClick={bulkSubmitForApproval}>Bulk Submit for Approval</button>
+            )}
             {[...selected].some(id=>entries.find(e=>e.id===id&&e.status==='For Clearing'))&&canPost&&(
               <button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={bulkClear}>Bulk Clear</button>
             )}
@@ -404,7 +520,7 @@ export default function JournalPage() {
                       <span style={{fontWeight:700,fontSize:12,color:'#64748b'}}>{fmtCur(e.totalDebit||0)}</span>
                       <button className="btn btn-ghost btn-sm" onClick={ev=>{ev.stopPropagation();openEdit(e);}}>Edit</button>
                       {e.status==='For Clearing'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={ev=>{ev.stopPropagation();askConfirm('Mark this Journal Entry as Cleared?',()=>clearEntry(e.id));}}>Clear</button>}
-                      {e.status==='Draft'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for posting?',()=>postEntry(e.id));}}>Submit for Posting</button>}
+                      {e.status==='Draft'&&canSubmit&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fde68a',color:'#92400e'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for approval?',()=>postEntry(e.id));}}>Submit for Approval</button>}
                       {e.status==='Cleared'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bfdbfe',color:'#1d4ed8'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for posting?',()=>requestPost(e.id));}}>Submit for Posting</button>}
                       {e.status==='For Posting'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={ev=>{ev.stopPropagation();askConfirm('Approve and post this Journal Entry?',()=>approvePost(e.id));}}>Approve &amp; Post</button>}
                       {e.status==='Posted'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();reverseEntry(e);}}>Reverse</button>}
@@ -416,12 +532,13 @@ export default function JournalPage() {
                     <div className="je-lines-wrap">
                       <table>
                         <thead><tr>
-                          <th>Account Code</th><th>Account Name</th><th>Description</th>
+                          <th>Contact</th><th>Account Code</th><th>Account Name</th><th>Description</th>
                           <th style={{textAlign:'right'}}>Debit</th><th style={{textAlign:'right'}}>Credit</th>
                         </tr></thead>
                         <tbody>
                           {(e.lines||[]).map((l,i)=>(
                             <tr key={i}>
+                              <td style={{color:'#64748b'}}>{l.contactName||l.contactId||'—'}</td>
                               <td style={{fontFamily:'monospace',fontWeight:600}}>{l.accountCode||'—'}</td>
                               <td>{l.accountName||'—'}</td>
                               <td style={{color:'#64748b'}}>{l.description||'—'}</td>
@@ -459,7 +576,7 @@ export default function JournalPage() {
           </>
         )}
       </div>
-      {modal!==null&&<JEModal />}
+      {modal!==null&&JEModal()}
       {confirmModal && (
         <div className="backdrop" onClick={() => setConfirmModal(null)}>
           <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>

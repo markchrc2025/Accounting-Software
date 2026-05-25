@@ -1,15 +1,17 @@
 import * as React from 'react';
 import { useState, useRef, useEffect } from 'react';
 import {
-  Search, Clipboard, Zap, Bell, Settings, HelpCircle,
-  ChevronDown, Sparkles, LogOut, User,
+  Search, Clipboard, Bell, Settings, HelpCircle,
+  ChevronDown, Sparkles, LogOut, User, ClipboardCheck,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 // ─── Icon button ──────────────────────────────────────────────────────────────
 function IconBtn({
-  icon: Icon, label, badge, onClick,
-}: { icon: React.ElementType; label: string; badge?: boolean; onClick?: () => void }) {
+  icon: Icon, label, badge, badgeCount, onClick,
+}: { icon: React.ElementType; label: string; badge?: boolean; badgeCount?: number; onClick?: () => void }) {
+  const showNumBadge = badgeCount !== undefined && badgeCount > 0;
+  const capped = showNumBadge ? Math.min(badgeCount!, 99) : 0;
   return (
     <button
       onClick={onClick}
@@ -17,7 +19,12 @@ function IconBtn({
       className="relative flex h-9 w-9 items-center justify-center rounded-full text-[#6B7280] hover:bg-[#F3F4F6] hover:text-[#1F2937] transition-colors outline-none"
     >
       <Icon className="h-5 w-5" strokeWidth={1.75} />
-      {badge && (
+      {showNumBadge && (
+        <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 rounded-full bg-[#DC2626] ring-1 ring-white flex items-center justify-center text-white text-[9px] font-bold px-0.5 leading-none pointer-events-none">
+          {capped}
+        </span>
+      )}
+      {!showNumBadge && badge && (
         <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-[#DC2626] ring-2 ring-white" />
       )}
       <span className="sr-only">{label}</span>
@@ -28,24 +35,30 @@ function IconBtn({
 // ─── Top bar ──────────────────────────────────────────────────────────────────
 export interface TopBarProps {
   companyName:        string;
+  userName?:          string;
   userEmail?:         string;
   logoUrl?:           string;
   onSignOut:          () => void;
   notificationCount?: number;
+  approvalCount?:     number;
   onSearchClick?:     () => void;
   onSettingsClick?:   () => void;
   onProfileClick?:    () => void;
+  onApprovalsClick?:  () => void;
 }
 
 export function TopBar({
   companyName,
+  userName,
   userEmail,
   logoUrl,
   onSignOut,
   notificationCount = 0,
+  approvalCount = 0,
   onSearchClick,
   onSettingsClick,
   onProfileClick,
+  onApprovalsClick,
 }: TopBarProps) {
   const [companyOpen,  setCompanyOpen]  = useState(false);
   const [profileOpen,  setProfileOpen]  = useState(false);
@@ -62,8 +75,9 @@ export function TopBar({
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const displayName = userEmail ?? 'User';
-  const initials = displayName
+  const displayName = userName || userEmail || 'User';
+  const initialsSource = userName || userEmail || 'U';
+  const initials = initialsSource
     .split(/[\s@]/)
     .filter(Boolean)
     .slice(0, 2)
@@ -129,9 +143,9 @@ export function TopBar({
 
       {/* ── Right icon cluster ───────────────────────────────────────────── */}
       <div className="flex items-center gap-0.5 shrink-0">
-        <IconBtn icon={Clipboard}  label="Tasks" />
-        <IconBtn icon={Zap}        label="Shortcuts" />
-        <IconBtn icon={Bell}       label="Notifications" badge={notificationCount > 0} />
+        <IconBtn icon={Clipboard}      label="Tasks" />
+        <IconBtn icon={ClipboardCheck}  label="My Approvals" badgeCount={approvalCount} onClick={onApprovalsClick} />
+        <IconBtn icon={Bell}            label="Notifications" badge={notificationCount > 0} />
         <IconBtn icon={Settings}   label="Settings" onClick={onSettingsClick} />
         <IconBtn icon={HelpCircle} label="Help" />
 

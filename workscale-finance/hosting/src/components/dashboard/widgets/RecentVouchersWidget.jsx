@@ -35,11 +35,11 @@ export function RecentVouchersWidget({ vouchers = [], loading = false }) {
               className="flex items-center justify-between py-2.5 cursor-pointer hover:bg-[#FAFAFA] -mx-5 px-5 transition-colors"
             >
               <div>
-                <p className="font-mono text-[14px] font-semibold text-[#1F2937]">{v.number || v.id}</p>
-                <p className="text-[11px] text-[#9CA3AF] mt-0.5">{v.payee || v.contact || '—'}</p>
+                <p className="font-mono text-[14px] font-semibold text-[#1F2937]">{v.voucherId || v.id}</p>
+                <p className="text-[11px] text-[#9CA3AF] mt-0.5">{v.contactSummary || v.purposeCategory || '—'}</p>
               </div>
               <div className="text-right">
-                <MoneyText value={v.amount} className="text-[14px] font-semibold text-[#1F2937]" />
+                <MoneyText value={v.totalAmount} className="text-[14px] font-semibold text-[#1F2937]" />
                 <div className="mt-0.5">
                   <StatusPill status={v.status || 'Pending'} />
                 </div>
