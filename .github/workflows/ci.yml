@@ -1,0 +1,43 @@
+name: ScaleBooks CI
+
+on:
+  push:
+    paths:
+      - "scalebooks/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "scalebooks/**"
+      - ".github/workflows/ci.yml"
+
+defaults:
+  run:
+    working-directory: scalebooks
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: scalebooks/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
