@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { journalRoutes } from "./routes/journal";
 import { accountRoutes } from "./routes/accounts";
 import { reportRoutes } from "./routes/reports";
+import { contactRoutes } from "./routes/contacts";
 
 const app = new Hono();
 
@@ -11,6 +12,7 @@ app.get("/health", (c) => c.json({ ok: true, service: "scalebooks-api" }));
 app.route("/accounts", accountRoutes);
 app.route("/journal-entries", journalRoutes);
 app.route("/reports", reportRoutes);
+app.route("/contacts", contactRoutes);
 
 const port = Number(process.env.API_PORT ?? 8787);
 serve({ fetch: app.fetch, port });
