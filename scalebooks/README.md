@@ -67,8 +67,16 @@ modules with the worst integrity bugs (Vouchers, Checks, Payments), then Billing
 then Payroll last (most GAS logic to port). Run new modules against Postgres behind
 a feature flag while the rest stays on the old app.
 
-## Not yet included (intentionally)
+## Built so far
 
-Row-Level Security policies, JWT verification in `apps/api/src/auth.ts` (currently a
-stub), the COA/contacts/voucher tables, PDF/Excel services, and the ported UI. These
-are the next steps, not part of this initial scaffold.
+- Ledger core: schema + balance/append-only triggers, `postJournalEntry` (transactional).
+- Chart of Accounts: domain + standard PH chart + seed + `GET/POST /accounts`.
+- Row-Level Security on all org-scoped tables + `withOrgContext` per-request scoping.
+- Real JWT auth (JWKS verification; org/role resolved from the DB, not token claims).
+- Journal UI: list recent entries + post a balanced entry (live balance, account picker).
+
+## Next steps
+
+Contacts / vouchers / checks tables and their UIs, PDF (BIR 2316, vouchers) and Excel
+(HRIS import) services, payroll (most GAS logic to port), and reporting views
+(trial balance, P&L) — following the strangler order above.
