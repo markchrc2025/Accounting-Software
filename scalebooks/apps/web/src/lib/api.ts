@@ -77,3 +77,47 @@ export const createJournalEntry = (payload: CreateJournalEntry) =>
     method: "POST",
     body: JSON.stringify(payload),
   });
+
+export interface Period {
+  from?: string | undefined;
+  to?: string | undefined;
+}
+
+function periodQuery(p?: Period): string {
+  const params = new URLSearchParams();
+  if (p?.from) params.set("from", p.from);
+  if (p?.to) params.set("to", p.to);
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
+
+export interface TrialBalanceRowDto {
+  accountCode: string;
+  accountName: string;
+  accountType: string;
+  debitCents: number;
+  creditCents: number;
+  balanceCents: number;
+}
+
+export interface TrialBalanceDto {
+  from: string | null;
+  to: string | null;
+  rows: TrialBalanceRowDto[];
+  totals: { debitCents: number; creditCents: number };
+  balanced: boolean;
+}
+
+export interface ProfitAndLossDto {
+  from: string | null;
+  to: string | null;
+  incomeCents: number;
+  expenseCents: number;
+  netProfitCents: number;
+}
+
+export const getTrialBalance = (p?: Period) =>
+  apiFetch<TrialBalanceDto>(`/reports/trial-balance${periodQuery(p)}`);
+
+export const getProfitAndLoss = (p?: Period) =>
+  apiFetch<ProfitAndLossDto>(`/reports/profit-and-loss${periodQuery(p)}`);
