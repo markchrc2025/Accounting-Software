@@ -46,3 +46,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 *.swp
+
+# ── Claude Code worktrees (must never be committed as gitlinks) ─
+**/.claude/worktrees/

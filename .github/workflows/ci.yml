@@ -66,9 +66,8 @@ jobs:
 
       - name: Apply migrations (as owner)
         run: |
-          for f in packages/db/migrations/0000_init.sql \
-                   packages/db/migrations/0001_rls.sql \
-                   packages/db/migrations/0002_reports.sql; do
+          # Apply every migration in order — new ones are picked up automatically.
+          for f in $(ls packages/db/migrations/*.sql | sort); do
             echo "applying $f"
             psql "$DATABASE_URL_DIRECT" -v ON_ERROR_STOP=1 -f "$f"
           done
