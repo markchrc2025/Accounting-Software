@@ -1,0 +1,24 @@
+# Render blueprint for the ScaleBooks API (the Hono service).
+# The web app is a static Vite build — host it on Cloudflare Pages / Vercel / Netlify,
+# not here. Create this service via Render → "New +" → "Blueprint" pointed at the repo.
+services:
+  - type: web
+    name: scalebooks-api
+    runtime: node
+    region: singapore
+    plan: starter # avoid the free tier's cold starts for a finance API
+    rootDir: scalebooks
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @scalebooks/api build
+    startCommand: pnpm --filter @scalebooks/api start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Supabase transaction-pooler URL, connecting as the scalebooks_app role.
+      # Set in the Render dashboard (contains the role password) — never commit it.
+      - key: DATABASE_URL
+        sync: false
+      # Public Supabase auth values (safe, but kept here for a single source of truth).
+      - key: AUTH_JWKS_URL
+        value: https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1/.well-known/jwks.json
+      - key: AUTH_ISSUER
+        value: https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1

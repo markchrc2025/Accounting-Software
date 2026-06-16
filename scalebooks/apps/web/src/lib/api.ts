@@ -5,6 +5,13 @@
 const BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
 const DEV_USER_ID = import.meta.env.VITE_DEV_USER_ID ?? "";
 
+// Current Supabase access token, kept in sync by AuthProvider. When set, requests
+// use `Authorization: Bearer …`; otherwise they fall back to the dev header.
+let _accessToken: string | null = null;
+export function setAccessToken(token: string | null): void {
+  _accessToken = token;
+}
+
 export interface AccountDto {
   id: string;
   code: string;
@@ -50,7 +57,8 @@ export class ApiError extends Error {
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (DEV_USER_ID) headers["x-user-id"] = DEV_USER_ID;
+  if (_accessToken) headers["authorization"] = `Bearer ${_accessToken}`;
+  else if (DEV_USER_ID) headers["x-user-id"] = DEV_USER_ID; // local dev only
   if (init?.headers) Object.assign(headers, init.headers);
 
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
