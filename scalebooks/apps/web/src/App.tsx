@@ -1,31 +1,32 @@
-import { formatPHP, pesos, computeAnnualTax } from "@scalebooks/domain";
+import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { JournalPage } from "./pages/JournalPage";
 
-/**
- * Placeholder shell. The real UI is ported module-by-module from the existing
- * React app (workscale-finance/hosting/src) — re-typed and pointed at the API
- * instead of writing to Firestore directly. This page just proves the shared
- * @scalebooks/domain money + tax logic is wired across the workspace boundary.
- */
-export function App() {
-  const sampleTax = computeAnnualTax(pesos(500_000));
+function Nav() {
+  const link = (isActive: boolean) =>
+    `rounded-lg px-3 py-1.5 text-sm font-medium ${
+      isActive ? "bg-primary-subtle text-primary" : "text-[#6B7280] hover:text-[#1F2937]"
+    }`;
   return (
-    <main className="mx-auto max-w-2xl p-8 font-sans text-[#1F2937]">
-      <h1 className="text-3xl font-medium tracking-tight">ScaleBooks</h1>
-      <p className="mt-2 text-sm text-[#6B7280]">
-        Clean foundation — Postgres + TypeScript monorepo.
-      </p>
+    <header className="flex h-14 items-center gap-6 border-b border-[#E5E7EB] bg-white px-6">
+      <span className="text-lg font-semibold">ScaleBooks</span>
+      <nav className="flex gap-1">
+        <NavLink to="/journal" className={({ isActive }) => link(isActive)}>
+          Journal
+        </NavLink>
+      </nav>
+    </header>
+  );
+}
 
-      <div className="mt-6 rounded-xl border border-[#E5E7EB] bg-white p-5 shadow-sm">
-        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#6B7280]">
-          Shared domain check
-        </div>
-        <p className="mt-2 text-sm">
-          Money formatting: <strong>{formatPHP(pesos(1234.56))}</strong>
-        </p>
-        <p className="mt-1 text-sm">
-          TRAIN tax on ₱500,000 taxable: <strong>{formatPHP(sampleTax)}</strong>
-        </p>
-      </div>
-    </main>
+export function App() {
+  return (
+    <div className="min-h-screen bg-[#F9FAFB] font-sans text-[#1F2937]">
+      <Nav />
+      <Routes>
+        <Route path="/" element={<Navigate to="/journal" replace />} />
+        <Route path="/journal" element={<JournalPage />} />
+        <Route path="*" element={<Navigate to="/journal" replace />} />
+      </Routes>
+    </div>
   );
 }
