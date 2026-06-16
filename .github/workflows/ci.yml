@@ -17,6 +17,28 @@ defaults:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scalebooks
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Owner connection — runs migrations + seed (exempt from RLS).
+      DATABASE_URL_DIRECT: postgres://postgres:postgres@localhost:5432/scalebooks
+      # App-role connection — runs the integration tests (subject to RLS).
+      DATABASE_URL: postgres://scalebooks_app:app@localhost:5432/scalebooks
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,8 +58,28 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Test
+      - name: Unit tests
         run: pnpm test
 
       - name: Build
         run: pnpm build
+
+      - name: Apply migrations (as owner)
+        run: |
+          for f in packages/db/migrations/0000_init.sql \
+                   packages/db/migrations/0001_rls.sql \
+                   packages/db/migrations/0002_reports.sql; do
+            echo "applying $f"
+            psql "$DATABASE_URL_DIRECT" -v ON_ERROR_STOP=1 -f "$f"
+          done
+          # Give the app role a login so the integration tests can connect as it.
+          psql "$DATABASE_URL_DIRECT" -v ON_ERROR_STOP=1 \
+            -c "ALTER ROLE scalebooks_app WITH LOGIN PASSWORD 'app';"
+
+      - name: Seed (as owner)
+        run: pnpm --filter @scalebooks/db seed
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL_DIRECT }}
+
+      - name: Integration tests (as app role — RLS enforced)
+        run: pnpm --filter @scalebooks/api test:int
