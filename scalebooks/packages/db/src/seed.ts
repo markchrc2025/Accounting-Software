@@ -7,11 +7,7 @@
 import { DEFAULT_CHART_OF_ACCOUNTS } from "@scalebooks/domain";
 import { db } from "./index";
 import { organizations, appUsers, accounts } from "./schema";
-
-// Stable identifiers so re-running the seed never duplicates rows.
-export const DEMO_ORG_ID = "00000000-0000-0000-0000-0000000000a1";
-export const DEMO_ADMIN_ID = "00000000-0000-0000-0000-0000000000b1";
-const DEMO_ADMIN_EMAIL = "admin@demo.scalebooks.local";
+import { DEMO_ORG_ID, DEMO_ADMIN_ID, DEMO_ADMIN_EMAIL } from "./demo";
 
 async function seed() {
   console.log("Seeding demo organization…");
