@@ -1,11 +1,13 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { journalRoutes } from "./routes/journal";
+import { accountRoutes } from "./routes/accounts";
 
 const app = new Hono();
 
 app.get("/health", (c) => c.json({ ok: true, service: "scalebooks-api" }));
 
+app.route("/accounts", accountRoutes);
 app.route("/journal-entries", journalRoutes);
 
 const port = Number(process.env.API_PORT ?? 8787);
