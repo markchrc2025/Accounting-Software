@@ -4,6 +4,7 @@ import { journalRoutes } from "./routes/journal";
 import { accountRoutes } from "./routes/accounts";
 import { reportRoutes } from "./routes/reports";
 import { contactRoutes } from "./routes/contacts";
+import { voucherRoutes } from "./routes/vouchers";
 
 const app = new Hono();
 
@@ -13,6 +14,7 @@ app.route("/accounts", accountRoutes);
 app.route("/journal-entries", journalRoutes);
 app.route("/reports", reportRoutes);
 app.route("/contacts", contactRoutes);
+app.route("/vouchers", voucherRoutes);
 
 const port = Number(process.env.API_PORT ?? 8787);
 serve({ fetch: app.fetch, port });

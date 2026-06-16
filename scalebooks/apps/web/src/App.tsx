@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { JournalPage } from "./pages/JournalPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { ContactsPage } from "./pages/ContactsPage";
+import { VouchersPage } from "./pages/VouchersPage";
 
 function Nav() {
   const link = (isActive: boolean) =>
@@ -14,6 +15,9 @@ function Nav() {
       <nav className="flex gap-1">
         <NavLink to="/journal" className={({ isActive }) => link(isActive)}>
           Journal
+        </NavLink>
+        <NavLink to="/vouchers" className={({ isActive }) => link(isActive)}>
+          Vouchers
         </NavLink>
         <NavLink to="/reports" className={({ isActive }) => link(isActive)}>
           Reports
@@ -33,6 +37,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/journal" replace />} />
         <Route path="/journal" element={<JournalPage />} />
+        <Route path="/vouchers" element={<VouchersPage />} />
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/contacts" element={<ContactsPage />} />
         <Route path="*" element={<Navigate to="/journal" replace />} />

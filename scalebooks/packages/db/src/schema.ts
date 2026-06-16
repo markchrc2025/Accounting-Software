@@ -45,6 +45,10 @@ export const userRole = pgEnum("user_role", [
 
 export const contactType = pgEnum("contact_type", ["vendor", "customer", "employee"]);
 
+export const voucherType = pgEnum("voucher_type", ["payment", "receipt"]);
+
+export const voucherStatus = pgEnum("voucher_status", ["draft", "posted", "void"]);
+
 export const organizations = pgTable("organizations", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
@@ -167,8 +171,34 @@ export const contacts = pgTable(
   (t) => [index("contacts_org_type_idx").on(t.orgId, t.type)],
 );
 
+export const vouchers = pgTable(
+  "vouchers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    voucherNo: text("voucher_no").notNull(),
+    voucherType: voucherType("voucher_type").notNull(),
+    contactId: uuid("contact_id").references(() => contacts.id),
+    voucherDate: date("voucher_date").notNull(),
+    memo: text("memo"),
+    status: voucherStatus("status").notNull().default("draft"),
+    totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
+    journalEntryId: uuid("journal_entry_id").references(() => journalEntries.id),
+    createdBy: uuid("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("vouchers_org_no_key").on(t.orgId, t.voucherNo),
+    index("vouchers_org_date_idx").on(t.orgId, t.voucherDate),
+  ],
+);
+
 export type Organization = typeof organizations.$inferSelect;
 export type Account = typeof accounts.$inferSelect;
 export type JournalEntry = typeof journalEntries.$inferSelect;
 export type JournalLine = typeof journalLines.$inferSelect;
 export type Contact = typeof contacts.$inferSelect;
+export type Voucher = typeof vouchers.$inferSelect;

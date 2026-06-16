@@ -107,8 +107,20 @@ describe.skipIf(!RUN)("ledger integration (Postgres)", () => {
     expect(noContext).toHaveLength(0);
   });
 
-  it("trial balance is always balanced; P&L isolates by period", async () => {
-    const date = "2099-01-01"; // unique future date to isolate the P&L assertion
+  it("trial balance is always balanced; a posting moves P&L by its amount", async () => {
+    const date = "2099-01-01";
+    const incomeForDate = async () => {
+      const r = (await withOrgContext(ctx, (tx) =>
+        tx.execute(sql`
+          SELECT COALESCE(SUM(credit_cents - debit_cents), 0)::bigint AS income
+          FROM v_account_postings
+          WHERE account_type = 'income' AND entry_date = ${date}::date`),
+      )) as unknown as Array<{ income: string }>;
+      return Number(r[0]!.income);
+    };
+
+    // Delta-based so the assertion is robust to data left by prior runs.
+    const before = await incomeForDate();
     await postJournalEntry(
       {
         orgId: DEMO_ORG_ID,
@@ -121,6 +133,8 @@ describe.skipIf(!RUN)("ledger integration (Postgres)", () => {
       },
       ctx,
     );
+    const after = await incomeForDate();
+    expect(after - before).toBe(250_000);
 
     const tb = (await withOrgContext(ctx, (tx) =>
       tx.execute(sql`
@@ -129,13 +143,5 @@ describe.skipIf(!RUN)("ledger integration (Postgres)", () => {
         FROM v_account_postings`),
     )) as unknown as Array<{ d: string; c: string }>;
     expect(Number(tb[0]!.d)).toBe(Number(tb[0]!.c)); // debits == credits, always
-
-    const pnl = (await withOrgContext(ctx, (tx) =>
-      tx.execute(sql`
-        SELECT COALESCE(SUM(credit_cents - debit_cents), 0)::bigint AS income
-        FROM v_account_postings
-        WHERE account_type = 'income' AND entry_date = ${date}::date`),
-    )) as unknown as Array<{ income: string }>;
-    expect(Number(pnl[0]!.income)).toBe(250_000);
   });
 });

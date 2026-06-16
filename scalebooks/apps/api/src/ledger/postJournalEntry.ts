@@ -12,7 +12,7 @@
  *   5. COMMIT → the deferred balance trigger verifies Σdebit = Σcredit
  */
 import { sql } from "drizzle-orm";
-import { withOrgContext, journalEntries, journalLines } from "@scalebooks/db";
+import { withOrgContext, journalEntries, journalLines, type Tx } from "@scalebooks/db";
 import {
   zJournalEntryInput,
   assertBalanced,
@@ -29,6 +29,64 @@ function periodKey(prefix: string, isoDate: string): string {
   return `${prefix}${y}${m}`; // e.g. JE202606
 }
 
+/**
+ * Post a (pre-validated) entry inside an EXISTING transaction. This is the
+ * shared core so callers like createVoucher can post a JE atomically alongside
+ * their own writes. Allocates the number, inserts the entry + lines, posts it;
+ * the deferred balance trigger fires at the enclosing COMMIT.
+ */
+export async function postJournalEntryCore(
+  tx: Tx,
+  input: JournalEntryInput,
+  ctx: { userId: string; orgId: string },
+): Promise<PostJournalEntryResult> {
+  const key = periodKey("JE", input.entryDate);
+  const counter = (await tx.execute(sql`
+    INSERT INTO document_counters (org_id, period_key, seq)
+    VALUES (${ctx.orgId}, ${key}, 1)
+    ON CONFLICT (org_id, period_key)
+    DO UPDATE SET seq = document_counters.seq + 1
+    RETURNING seq
+  `)) as unknown as Array<{ seq: number }>;
+  const seq = counter[0]!.seq;
+  const entryNo = `${key}-${String(seq).padStart(4, "0")}`;
+
+  const [entry] = await tx
+    .insert(journalEntries)
+    .values({
+      orgId: ctx.orgId,
+      entryNo,
+      entryDate: input.entryDate,
+      memo: input.memo ?? null,
+      status: "draft",
+      sourceType: input.sourceType ?? null,
+      sourceId: input.sourceId ?? null,
+      createdBy: ctx.userId,
+    })
+    .returning({ id: journalEntries.id });
+
+  const entryId = entry!.id;
+
+  await tx.insert(journalLines).values(
+    input.lines.map((l, i) => ({
+      entryId,
+      lineNo: i + 1,
+      accountId: l.accountId,
+      debitCents: l.debitCents,
+      creditCents: l.creditCents,
+      contactId: l.contactId ?? null,
+      description: l.description ?? null,
+    })),
+  );
+
+  await tx
+    .update(journalEntries)
+    .set({ status: "posted", postedAt: new Date() })
+    .where(sql`${journalEntries.id} = ${entryId}`);
+
+  return { id: entryId, entryNo };
+}
+
 export async function postJournalEntry(
   rawInput: unknown,
   ctx: { userId: string; orgId: string },
@@ -40,57 +98,9 @@ export async function postJournalEntry(
   }
   assertBalanced(input.lines);
 
-  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, async (tx) => {
-    // 1 — atomic entry number
-    const key = periodKey("JE", input.entryDate);
-    const counter = (await tx.execute(sql`
-      INSERT INTO document_counters (org_id, period_key, seq)
-      VALUES (${ctx.orgId}, ${key}, 1)
-      ON CONFLICT (org_id, period_key)
-      DO UPDATE SET seq = document_counters.seq + 1
-      RETURNING seq
-    `)) as unknown as Array<{ seq: number }>;
-    const seq = counter[0]!.seq;
-    const entryNo = `${key}-${String(seq).padStart(4, "0")}`;
-
-    // 2 — entry as draft
-    const [entry] = await tx
-      .insert(journalEntries)
-      .values({
-        orgId: ctx.orgId,
-        entryNo,
-        entryDate: input.entryDate,
-        memo: input.memo ?? null,
-        status: "draft",
-        sourceType: input.sourceType ?? null,
-        sourceId: input.sourceId ?? null,
-        createdBy: ctx.userId,
-      })
-      .returning({ id: journalEntries.id });
-
-    const entryId = entry!.id;
-
-    // 3 — lines
-    await tx.insert(journalLines).values(
-      input.lines.map((l, i) => ({
-        entryId,
-        lineNo: i + 1,
-        accountId: l.accountId,
-        debitCents: l.debitCents,
-        creditCents: l.creditCents,
-        contactId: l.contactId ?? null,
-        description: l.description ?? null,
-      })),
-    );
-
-    // 4 — post (balance is verified by the deferred trigger at COMMIT)
-    await tx
-      .update(journalEntries)
-      .set({ status: "posted", postedAt: new Date() })
-      .where(sql`${journalEntries.id} = ${entryId}`);
-
-    return { id: entryId, entryNo };
-  });
+  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, (tx) =>
+    postJournalEntryCore(tx, input, ctx),
+  );
 }
 
 /**
