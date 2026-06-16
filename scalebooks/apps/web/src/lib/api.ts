@@ -154,3 +154,40 @@ export const createContact = (payload: CreateContact) =>
     method: "POST",
     body: JSON.stringify(payload),
   });
+
+export type VoucherType = "payment" | "receipt";
+
+export interface VoucherDto {
+  id: string;
+  voucherNo: string;
+  voucherType: VoucherType;
+  voucherDate: string;
+  memo: string | null;
+  status: string;
+  totalCents: number;
+  contactName: string | null;
+}
+
+export interface CreateVoucherLine {
+  accountId: string;
+  description?: string | undefined;
+  amountCents: number;
+}
+
+export interface CreateVoucher {
+  type: VoucherType;
+  contactId?: string | undefined;
+  voucherDate: string;
+  memo?: string | undefined;
+  cashAccountId: string;
+  lines: CreateVoucherLine[];
+}
+
+export const listVouchers = () =>
+  apiFetch<{ vouchers: VoucherDto[] }>("/vouchers").then((r) => r.vouchers);
+
+export const createVoucher = (payload: CreateVoucher) =>
+  apiFetch<{ id: string; voucherNo: string; journalEntryId: string; entryNo: string }>("/vouchers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
