@@ -1,14 +1,17 @@
 import type { Context, Next } from "hono";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import { getUserContext, type UserRole } from "@scalebooks/db";
 
 /**
- * Authenticated caller derived from a verified JWT.
- * `role` mirrors the DB role and is also used for coarse authorization.
+ * Authenticated caller. `orgId`/`role` are resolved from the DB (app_users) by
+ * the verified token's `sub` — never trusted from client-supplied claims, so a
+ * forged or stale role in a token cannot escalate privileges.
  */
 export interface AuthContext {
   userId: string;
   orgId: string;
   email: string;
-  role: "maker" | "verifier" | "approver" | "poster" | "admin";
+  role: UserRole;
 }
 
 declare module "hono" {
@@ -17,30 +20,63 @@ declare module "hono" {
   }
 }
 
-/**
- * Auth middleware.
- *
- * TODO(prod): verify the bearer token against the configured JWKS (AUTH_JWKS_URL)
- * and read `sub`, `org_id`, `role`, and `email` from the *verified* claims.
- * Never trust client-supplied identity. This stub exists so routes can be wired
- * and tested; it must be replaced before any real deployment.
- */
-export async function requireAuth(c: Context, next: Next) {
-  const userId = c.req.header("x-user-id");
-  const orgId = c.req.header("x-org-id");
-  const email = c.req.header("x-user-email") ?? "";
-  const role = (c.req.header("x-user-role") ?? "maker") as AuthContext["role"];
+let _jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
+function getJwks() {
+  const url = process.env.AUTH_JWKS_URL;
+  if (!url) return null;
+  if (!_jwks) _jwks = createRemoteJWKSet(new URL(url));
+  return _jwks;
+}
 
-  if (!userId || !orgId) {
-    return c.json({ error: "unauthenticated" }, 401);
+/** Verify the bearer token (prod) or read a dev header (local only). */
+async function resolveIdentity(c: Context): Promise<{ uid: string; email: string } | null> {
+  const jwks = getJwks();
+  if (jwks) {
+    const authz = c.req.header("authorization") ?? "";
+    const token = authz.startsWith("Bearer ") ? authz.slice(7) : "";
+    if (!token) return null;
+    try {
+      const issuer = process.env.AUTH_ISSUER;
+      const { payload } = await jwtVerify(token, jwks, issuer ? { issuer } : undefined);
+      if (!payload.sub) return null;
+      return { uid: payload.sub, email: typeof payload.email === "string" ? payload.email : "" };
+    } catch {
+      return null;
+    }
   }
-  c.set("auth", { userId, orgId, email, role });
+
+  // Dev-only fallback when no IdP is configured. NEVER set AUTH_DEV_BYPASS=true
+  // in production — it trusts an unauthenticated header.
+  if (process.env.AUTH_DEV_BYPASS === "true") {
+    const uid = c.req.header("x-user-id");
+    if (!uid) return null;
+    return { uid, email: c.req.header("x-user-email") ?? "" };
+  }
+
+  return null;
+}
+
+export async function requireAuth(c: Context, next: Next) {
+  const id = await resolveIdentity(c);
+  if (!id) return c.json({ error: "unauthenticated" }, 401);
+
+  const ctx = await getUserContext(id.uid);
+  if (!ctx) {
+    return c.json({ error: "forbidden", detail: "User is not provisioned in any organization" }, 403);
+  }
+
+  c.set("auth", {
+    userId: id.uid,
+    orgId: ctx.orgId,
+    email: ctx.email || id.email,
+    role: ctx.role,
+  });
   await next();
 }
 
-const POSTERS: AuthContext["role"][] = ["poster", "admin"];
+const POSTERS: readonly UserRole[] = ["poster", "admin"];
 
 /** Coarse role gate for actions that write to the ledger. */
-export function canPost(role: AuthContext["role"]): boolean {
+export function canPost(role: UserRole): boolean {
   return POSTERS.includes(role);
 }

@@ -12,7 +12,7 @@
  *   5. COMMIT → the deferred balance trigger verifies Σdebit = Σcredit
  */
 import { sql } from "drizzle-orm";
-import { db, journalEntries, journalLines } from "@scalebooks/db";
+import { withOrgContext, journalEntries, journalLines } from "@scalebooks/db";
 import {
   zJournalEntryInput,
   assertBalanced,
@@ -40,7 +40,7 @@ export async function postJournalEntry(
   }
   assertBalanced(input.lines);
 
-  return db.transaction(async (tx) => {
+  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, async (tx) => {
     // 1 — atomic entry number
     const key = periodKey("JE", input.entryDate);
     const counter = (await tx.execute(sql`
@@ -101,7 +101,7 @@ export async function reverseJournalEntry(
   entryId: string,
   ctx: { userId: string; orgId: string },
 ): Promise<PostJournalEntryResult> {
-  return db.transaction(async (tx) => {
+  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, async (tx) => {
     const [original] = await tx
       .select()
       .from(journalEntries)
