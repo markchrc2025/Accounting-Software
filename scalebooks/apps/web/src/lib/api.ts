@@ -121,3 +121,36 @@ export const getTrialBalance = (p?: Period) =>
 
 export const getProfitAndLoss = (p?: Period) =>
   apiFetch<ProfitAndLossDto>(`/reports/profit-and-loss${periodQuery(p)}`);
+
+export type ContactType = "vendor" | "customer" | "employee";
+
+export interface ContactDto {
+  id: string;
+  type: ContactType;
+  name: string;
+  tin: string | null;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  isActive: boolean;
+}
+
+export interface CreateContact {
+  type: ContactType;
+  name: string;
+  tin?: string | undefined;
+  email?: string | undefined;
+  phone?: string | undefined;
+  address?: string | undefined;
+}
+
+export const listContacts = (type?: ContactType) =>
+  apiFetch<{ contacts: ContactDto[] }>(`/contacts${type ? `?type=${type}` : ""}`).then(
+    (r) => r.contacts,
+  );
+
+export const createContact = (payload: CreateContact) =>
+  apiFetch<{ contact: ContactDto }>("/contacts", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });

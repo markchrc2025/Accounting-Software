@@ -43,6 +43,8 @@ export const userRole = pgEnum("user_role", [
   "admin",
 ]);
 
+export const contactType = pgEnum("contact_type", ["vendor", "customer", "employee"]);
+
 export const organizations = pgTable("organizations", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
@@ -146,7 +148,27 @@ export const journalLines = pgTable(
   ],
 );
 
+export const contacts = pgTable(
+  "contacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    type: contactType("type").notNull(),
+    name: text("name").notNull(),
+    tin: text("tin"),
+    email: text("email"),
+    phone: text("phone"),
+    address: text("address"),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("contacts_org_type_idx").on(t.orgId, t.type)],
+);
+
 export type Organization = typeof organizations.$inferSelect;
 export type Account = typeof accounts.$inferSelect;
 export type JournalEntry = typeof journalEntries.$inferSelect;
 export type JournalLine = typeof journalLines.$inferSelect;
+export type Contact = typeof contacts.$inferSelect;
