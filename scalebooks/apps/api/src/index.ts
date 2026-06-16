@@ -16,8 +16,9 @@ app.route("/reports", reportRoutes);
 app.route("/contacts", contactRoutes);
 app.route("/vouchers", voucherRoutes);
 
-const port = Number(process.env.API_PORT ?? 8787);
-serve({ fetch: app.fetch, port });
-console.log(`scalebooks-api listening on http://localhost:${port}`);
+// Render (and most PaaS) inject PORT; fall back to API_PORT for local dev.
+const port = Number(process.env.PORT ?? process.env.API_PORT ?? 8787);
+serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });
+console.log(`scalebooks-api listening on :${port}`);
 
 export type AppType = typeof app;

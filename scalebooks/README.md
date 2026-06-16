@@ -60,6 +60,42 @@ pnpm --filter @scalebooks/api dev
 pnpm --filter @scalebooks/web dev
 ```
 
+## Deployment (Supabase + Render)
+
+**Supabase** = Postgres + Auth + Storage. **Render** = the API (Hono). The web app is
+a static Vite build (host on Cloudflare Pages / Vercel / Netlify).
+
+1. **Apply migrations + create the app role** (as the `postgres` owner, via the
+   Supabase SQL editor or the direct connection):
+   ```bash
+   for f in packages/db/migrations/*.sql; do psql "$DATABASE_URL_DIRECT" -f "$f"; done
+   # give the RLS-bound app role a login (choose a strong password):
+   psql "$DATABASE_URL_DIRECT" -c "ALTER ROLE scalebooks_app WITH LOGIN PASSWORD '...';"
+   ```
+   The API's `DATABASE_URL` then connects through the **transaction pooler** as
+   `scalebooks_app` (subject to RLS); migrations/seed use the **direct** owner URL.
+
+2. **Auth:** enable **Authentication → Providers → Google**, and add your web app's
+   origin to **URL Configuration → Redirect URLs**. The API verifies tokens via
+   `AUTH_JWKS_URL` (asymmetric ES256 signing key) — no secret needed.
+
+3. **Bootstrap the first admin.** Sign in once (creates a Supabase auth user), copy
+   your UID from **Authentication → Users**, then map it to an org:
+   ```sql
+   insert into organizations (id, name) values (gen_random_uuid(), 'Your Company')
+     returning id;  -- note the org id
+   insert into app_users (id, org_id, email, full_name, role)
+   values ('<your-supabase-uid>', '<org-id>', 'you@co.com', 'You', 'admin');
+   ```
+   After that, Admins invite/provision other users from the app.
+
+4. **API on Render:** deploy via `render.yaml` (Singapore, Starter plan). Set
+   `DATABASE_URL` (pooler, contains the password) in the dashboard; `AUTH_JWKS_URL`
+   and `AUTH_ISSUER` are in the blueprint.
+
+Local dev needs none of this: leave `AUTH_JWKS_URL`/`VITE_SUPABASE_*` unset and the
+app uses the `AUTH_DEV_BYPASS` header flow (no login screen).
+
 ## Migration approach (strangler)
 
 Move one module at a time, starting with the ledger core (COA → Journal), then the

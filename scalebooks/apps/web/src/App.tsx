@@ -3,8 +3,11 @@ import { JournalPage } from "./pages/JournalPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { VouchersPage } from "./pages/VouchersPage";
+import { LoginPage } from "./auth/LoginPage";
+import { authEnabled, useAuth } from "./auth/AuthProvider";
 
 function Nav() {
+  const { session, signOut } = useAuth();
   const link = (isActive: boolean) =>
     `rounded-lg px-3 py-1.5 text-sm font-medium ${
       isActive ? "bg-primary-subtle text-primary" : "text-[#6B7280] hover:text-[#1F2937]"
@@ -26,11 +29,36 @@ function Nav() {
           Contacts
         </NavLink>
       </nav>
+      {authEnabled && (
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs text-[#6B7280]">{session?.user?.email}</span>
+          <button
+            onClick={() => void signOut()}
+            className="rounded-lg border border-[#E5E7EB] px-3 py-1.5 text-sm font-medium text-[#6B7280] hover:text-[#1F2937]"
+          >
+            Sign out
+          </button>
+        </div>
+      )}
     </header>
   );
 }
 
 export function App() {
+  const { session, loading } = useAuth();
+
+  // When auth is configured, require a session; otherwise (local dev) render directly.
+  if (authEnabled) {
+    if (loading) {
+      return (
+        <div className="flex min-h-screen items-center justify-center font-sans text-sm text-[#6B7280]">
+          Loading…
+        </div>
+      );
+    }
+    if (!session) return <LoginPage />;
+  }
+
   return (
     <div className="min-h-screen bg-[#F9FAFB] font-sans text-[#1F2937]">
       <Nav />
