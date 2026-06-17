@@ -1,7 +1,7 @@
-# Render blueprint for the ScaleBooks API (the Hono service).
-# The web app is a static Vite build — host it on Cloudflare Pages / Vercel / Netlify,
-# not here. Create this service via Render → "New +" → "Blueprint" pointed at the repo.
+# Render blueprint for ScaleBooks — both the API and the web app.
+# Create via Render → "New +" → "Blueprint" pointed at this repo.
 services:
+  # ── API (Hono) ─────────────────────────────────────────────────────────────
   - type: web
     name: scalebooks-api
     runtime: node
@@ -13,12 +13,33 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      # Supabase transaction-pooler URL, connecting as the scalebooks_app role.
-      # Set in the Render dashboard (contains the role password) — never commit it.
+      # Supabase transaction-pooler URL as the scalebooks_app role (has the
+      # password) — set in the dashboard, never commit it.
       - key: DATABASE_URL
         sync: false
-      # Public Supabase auth values (safe, but kept here for a single source of truth).
       - key: AUTH_JWKS_URL
         value: https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1/.well-known/jwks.json
       - key: AUTH_ISSUER
         value: https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1
+
+  # ── Web (Vite SPA, static site) ────────────────────────────────────────────
+  - type: web
+    name: scalebooks-web
+    runtime: static
+    rootDir: scalebooks
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @scalebooks/web build
+    staticPublishPath: apps/web/dist
+    autoDeploy: true
+    # SPA fallback so client-side routes (/journal, …) don't 404 on refresh.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_SUPABASE_URL
+        value: https://mqsdymealtdrzmbnvvoc.supabase.co
+      - key: VITE_SUPABASE_PUBLISHABLE_KEY
+        value: sb_publishable_roR2UnE41AKs4Qwb8fQuKQ_nHp8EgKD
+      # The API's Render URL — set after the API service is created.
+      - key: VITE_API_BASE_URL
+        sync: false
