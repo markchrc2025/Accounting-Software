@@ -4,7 +4,7 @@
  *
  *   pnpm --filter @scalebooks/db seed
  */
-import { DEFAULT_CHART_OF_ACCOUNTS } from "@scalebooks/domain";
+import { DEFAULT_CHART_OF_ACCOUNTS, normalBalanceFor } from "@scalebooks/domain";
 import { db } from "./index";
 import { organizations, appUsers, accounts } from "./schema";
 import { DEMO_ORG_ID, DEMO_ADMIN_ID, DEMO_ADMIN_EMAIL } from "./demo";
@@ -33,12 +33,13 @@ async function seed() {
     code: a.code,
     name: a.name,
     type: a.type,
+    normalBalance: normalBalanceFor(a.type),
   }));
 
   await db
     .insert(accounts)
     .values(rows)
-    .onConflictDoNothing({ target: [accounts.orgId, accounts.code] });
+    .onConflictDoNothing({ target: [accounts.orgId, accounts.name] });
 
   console.log(
     `Seeded org ${DEMO_ORG_ID} with ${rows.length} accounts and admin ${DEMO_ADMIN_EMAIL}.`,

@@ -82,10 +82,22 @@ export const accounts = pgTable(
     code: text("code").notNull(),
     name: text("name").notNull(),
     type: accountType("type").notNull(),
+    // Real charts reuse codes across types, so the unique key is (org_id, name);
+    // `code` is a non-unique display label. These extra columns carry a Zoho-style
+    // export losslessly: a self-referencing hierarchy, a detailed subtype, a
+    // description, and the account's normal balance side.
+    parentId: uuid("parent_id"),
+    subtype: text("subtype"),
+    description: text("description"),
+    normalBalance: text("normal_balance"),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [unique("accounts_org_code_key").on(t.orgId, t.code)],
+  (t) => [
+    unique("accounts_org_name_key").on(t.orgId, t.name),
+    index("accounts_org_code_idx").on(t.orgId, t.code),
+    index("accounts_org_parent_idx").on(t.orgId, t.parentId),
+  ],
 );
 
 /** Atomic document-number sequences (PV202606-0001, etc.). One row per period. */

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { ZodError } from "zod";
 import { and, asc, eq } from "drizzle-orm";
-import { zAccountInput } from "@scalebooks/domain";
+import { zAccountInput, normalBalanceFor } from "@scalebooks/domain";
 import { withOrgContext, accounts } from "@scalebooks/db";
 import { requireAuth } from "../auth";
 
@@ -41,7 +41,7 @@ accountRoutes.post("/", async (c) => {
         const existing = await tx
           .select({ id: accounts.id })
           .from(accounts)
-          .where(and(eq(accounts.orgId, auth.orgId), eq(accounts.code, input.code)));
+          .where(and(eq(accounts.orgId, auth.orgId), eq(accounts.name, input.name)));
         if (existing.length > 0) return null;
 
         const [row] = await tx
@@ -51,6 +51,7 @@ accountRoutes.post("/", async (c) => {
             code: input.code,
             name: input.name,
             type: input.type,
+            normalBalance: normalBalanceFor(input.type),
             isActive: input.isActive,
           })
           .returning();
@@ -59,7 +60,7 @@ accountRoutes.post("/", async (c) => {
     );
 
     if (!created) {
-      return c.json({ error: "duplicate_code", detail: `Account ${input.code} already exists` }, 409);
+      return c.json({ error: "duplicate_name", detail: `Account "${input.name}" already exists` }, 409);
     }
     return c.json({ account: created }, 201);
   } catch (err) {
