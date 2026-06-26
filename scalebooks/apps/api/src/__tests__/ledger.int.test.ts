@@ -25,10 +25,10 @@ describe.skipIf(!RUN)("ledger integration (Postgres)", () => {
 
   beforeAll(async () => {
     const rows = await withOrgContext(ctx, (tx) =>
-      tx.select().from(accounts).where(inArray(accounts.code, ["1010", "4000"])),
+      tx.select().from(accounts).where(inArray(accounts.code, ["1001640", "3001001"])),
     );
-    cashId = rows.find((r) => r.code === "1010")!.id;
-    revenueId = rows.find((r) => r.code === "4000")!.id;
+    cashId = rows.find((r) => r.code === "1001640")!.id; // Cash in Bank - UB Savings
+    revenueId = rows.find((r) => r.code === "3001001")!.id; // Manpower Service Revenue
   });
 
   it("posts a balanced entry, recorded as posted", async () => {

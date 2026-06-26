@@ -4,7 +4,8 @@
  *
  *   pnpm --filter @scalebooks/db seed
  */
-import { DEFAULT_CHART_OF_ACCOUNTS, normalBalanceFor } from "@scalebooks/domain";
+import { and, eq } from "drizzle-orm";
+import { DEFAULT_CHART_OF_ACCOUNTS } from "@scalebooks/domain";
 import { db } from "./index";
 import { organizations, appUsers, accounts } from "./schema";
 import { DEMO_ORG_ID, DEMO_ADMIN_ID, DEMO_ADMIN_EMAIL } from "./demo";
@@ -33,7 +34,9 @@ async function seed() {
     code: a.code,
     name: a.name,
     type: a.type,
-    normalBalance: normalBalanceFor(a.type),
+    subtype: a.subtype ?? null,
+    description: a.description ?? null,
+    normalBalance: a.normalBalance,
   }));
 
   await db
@@ -41,8 +44,27 @@ async function seed() {
     .values(rows)
     .onConflictDoNothing({ target: [accounts.orgId, accounts.name] });
 
+  // Resolve the parent hierarchy by name (parents are referenced by name).
+  const existing = await db
+    .select({ id: accounts.id, name: accounts.name })
+    .from(accounts)
+    .where(eq(accounts.orgId, DEMO_ORG_ID));
+  const idByName = new Map(existing.map((r) => [r.name, r.id]));
+
+  let linked = 0;
+  for (const a of DEFAULT_CHART_OF_ACCOUNTS) {
+    if (!a.parentName) continue;
+    const parentId = idByName.get(a.parentName);
+    if (!parentId) continue;
+    await db
+      .update(accounts)
+      .set({ parentId })
+      .where(and(eq(accounts.orgId, DEMO_ORG_ID), eq(accounts.name, a.name)));
+    linked++;
+  }
+
   console.log(
-    `Seeded org ${DEMO_ORG_ID} with ${rows.length} accounts and admin ${DEMO_ADMIN_EMAIL}.`,
+    `Seeded org ${DEMO_ORG_ID} with ${rows.length} accounts (${linked} parent links) and admin ${DEMO_ADMIN_EMAIL}.`,
   );
 }
 

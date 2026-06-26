@@ -23,10 +23,10 @@ describe.skipIf(!RUN)("voucher integration (Postgres)", () => {
 
   beforeAll(async () => {
     const rows = await withOrgContext(ctx, (tx) =>
-      tx.select().from(accounts).where(inArray(accounts.code, ["1010", "5100"])),
+      tx.select().from(accounts).where(inArray(accounts.code, ["1001640", "5001001"])),
     );
-    cashId = rows.find((r) => r.code === "1010")!.id;
-    expenseId = rows.find((r) => r.code === "5100")!.id;
+    cashId = rows.find((r) => r.code === "1001640")!.id; // Cash in Bank - UB Savings
+    expenseId = rows.find((r) => r.code === "5001001")!.id; // Salaries and Wages
   });
 
   it("creates a payment voucher and atomically posts a balanced JE", async () => {

@@ -29,42 +29,23 @@ export const zAccountInput = z.object({
 export type AccountInput = z.infer<typeof zAccountInput>;
 
 export interface ChartAccount {
+  /** Display label. Real charts reuse codes across types, so it is NOT unique. */
   code: string;
+  /** The unique key within an org. */
   name: string;
   type: AccountType;
+  /** Normal balance side ("debit"/"credit"). */
+  normalBalance: NormalBalance;
+  /** Zoho-style detailed classification (Bank, Accounts Receivable, …). */
+  subtype?: string;
+  description?: string;
+  /** Parent account, referenced by name (resolved to parent_id at seed time). */
+  parentName?: string;
 }
 
 /**
- * A sensible default chart for a Philippine SME. Seeded into each new org; the
- * org can rename/add/deactivate afterward.
+ * The software's default Chart of Accounts, provisioned for every organization.
+ * Generated from the source export — see setup/generate_coa_sql.py and
+ * ./defaultChart.generated.ts. Orgs can rename/add/deactivate afterward.
  */
-export const DEFAULT_CHART_OF_ACCOUNTS: readonly ChartAccount[] = [
-  // Assets (1000)
-  { code: "1000", name: "Cash on Hand", type: "asset" },
-  { code: "1010", name: "Cash in Bank", type: "asset" },
-  { code: "1100", name: "Accounts Receivable", type: "asset" },
-  { code: "1200", name: "Input VAT", type: "asset" },
-  { code: "1300", name: "Prepaid Expenses", type: "asset" },
-  { code: "1500", name: "Property, Plant & Equipment", type: "asset" },
-  { code: "1510", name: "Accumulated Depreciation", type: "asset" }, // contra-asset
-  // Liabilities (2000)
-  { code: "2000", name: "Accounts Payable", type: "liability" },
-  { code: "2100", name: "Output VAT", type: "liability" },
-  { code: "2110", name: "Withholding Tax Payable", type: "liability" },
-  { code: "2200", name: "SSS / PhilHealth / HDMF Payable", type: "liability" },
-  { code: "2300", name: "Loans Payable", type: "liability" },
-  // Equity (3000)
-  { code: "3000", name: "Owner's Capital", type: "equity" },
-  { code: "3100", name: "Retained Earnings", type: "equity" },
-  // Income (4000)
-  { code: "4000", name: "Service Revenue", type: "income" },
-  { code: "4100", name: "Interest Income", type: "income" },
-  // Expenses (5000)
-  { code: "5000", name: "Salaries and Wages", type: "expense" },
-  { code: "5100", name: "Rent Expense", type: "expense" },
-  { code: "5200", name: "Utilities Expense", type: "expense" },
-  { code: "5300", name: "Office Supplies", type: "expense" },
-  { code: "5400", name: "Depreciation Expense", type: "expense" },
-  { code: "5500", name: "Professional Fees", type: "expense" },
-  { code: "5900", name: "Miscellaneous Expense", type: "expense" },
-];
+export { DEFAULT_CHART_OF_ACCOUNTS } from "./defaultChart.generated";

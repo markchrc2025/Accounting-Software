@@ -28,11 +28,20 @@ describe("chart of accounts", () => {
     );
   });
 
-  it("default chart has unique codes and only valid types", () => {
-    const codes = DEFAULT_CHART_OF_ACCOUNTS.map((a) => a.code);
-    expect(new Set(codes).size).toBe(codes.length);
+  it("default chart has unique names and only valid types", () => {
+    // Codes intentionally repeat across types (real charts do); the key is name.
+    const names = DEFAULT_CHART_OF_ACCOUNTS.map((a) => a.name);
+    expect(new Set(names).size).toBe(names.length);
     for (const a of DEFAULT_CHART_OF_ACCOUNTS) {
       expect(ACCOUNT_TYPES).toContain(a.type);
+      expect(["debit", "credit"]).toContain(a.normalBalance);
+    }
+  });
+
+  it("every parentName resolves to another account in the chart", () => {
+    const names = new Set(DEFAULT_CHART_OF_ACCOUNTS.map((a) => a.name));
+    for (const a of DEFAULT_CHART_OF_ACCOUNTS) {
+      if (a.parentName) expect(names.has(a.parentName)).toBe(true);
     }
   });
 });
