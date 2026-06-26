@@ -1,5 +1,6 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { journalRoutes } from "./routes/journal";
 import { accountRoutes } from "./routes/accounts";
 import { reportRoutes } from "./routes/reports";
@@ -7,6 +8,25 @@ import { contactRoutes } from "./routes/contacts";
 import { voucherRoutes } from "./routes/vouchers";
 
 const app = new Hono();
+
+// The browser-facing web app is a different origin (scalebooks-web vs
+// scalebooks-api), so cross-origin requests need CORS. Allowed origins come from
+// CORS_ORIGIN (comma-separated); defaults cover the Render web app + local Vite.
+const allowedOrigins = (
+  process.env.CORS_ORIGIN ?? "https://scalebooks-web.onrender.com,http://localhost:5173"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use(
+  "*",
+  cors({
+    origin: (origin) => (allowedOrigins.includes(origin) ? origin : (allowedOrigins[0] ?? "*")),
+    allowHeaders: ["content-type", "authorization", "x-user-id"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  }),
+);
 
 app.get("/health", (c) => c.json({ ok: true, service: "scalebooks-api" }));
 
