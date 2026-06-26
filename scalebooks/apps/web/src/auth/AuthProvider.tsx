@@ -7,6 +7,7 @@ interface AuthState {
   session: Session | null;
   loading: boolean;
   signInGoogle: () => void;
+  signInPassword: (email: string, password: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
 }
 
@@ -40,13 +41,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const signInPassword = async (email: string, password: string) => {
+    if (!supabase) return { error: "Auth is not configured." };
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    return { error: error?.message ?? null };
+  };
+
   const signOut = async () => {
     await supabase?.auth.signOut();
     setSession(null);
     setAccessToken(null);
   };
 
-  return <Ctx.Provider value={{ session, loading, signInGoogle, signOut }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ session, loading, signInGoogle, signInPassword, signOut }}>
+      {children}
+    </Ctx.Provider>
+  );
 }
 
 export function useAuth(): AuthState {
