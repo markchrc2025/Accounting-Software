@@ -13,7 +13,16 @@ const DEMO_PASSWORD = import.meta.env.VITE_DEMO_PASSWORD as string | undefined;
 const DEMO_COMPANY = (import.meta.env.VITE_DEMO_COMPANY as string | undefined) ?? "";
 const DEMO = DEMO_EMAIL && DEMO_PASSWORD ? { email: DEMO_EMAIL, password: DEMO_PASSWORD } : null;
 
+// Convenience prefill of the last-entered / last-confirmed workspace code.
+const COMPANY_INPUT_KEY = "sb.company_input";
 const WORKSPACE_KEY = "sb.workspace";
+const readLS = (k: string): string | null => {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+};
 
 // ── inline SVG icons (no icon library — matches the handoff) ─────────────────
 const GoogleIcon = () => (
@@ -161,10 +170,11 @@ function BrandPanel() {
 }
 
 // ── form ─────────────────────────────────────────────────────────────────────
-type Status = "idle" | "loading" | "error" | "success";
+type Status = "idle" | "loading" | "error";
 
 function LoginForm() {
-  const { signInPassword, signInGoogle, signInMicrosoft, resetPassword } = useAuth();
+  const { signInPassword, signInGoogle, signInMicrosoft, resetPassword, authError, clearAuthError } =
+    useAuth();
 
   const [company, setCompany] = useState("");
   const [email, setEmail] = useState("");
@@ -177,14 +187,10 @@ function LoginForm() {
   const [notice, setNotice] = useState("");
   const shakeRef = useRef<HTMLFormElement>(null);
 
-  // Remember the workspace code across visits (the "keep me signed in" choice).
+  // Prefill the workspace code the user last entered / was confirmed into.
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(WORKSPACE_KEY);
-      if (saved) setCompany(saved);
-    } catch {
-      /* storage unavailable — ignore */
-    }
+    const saved = readLS(COMPANY_INPUT_KEY) ?? readLS(WORKSPACE_KEY);
+    if (saved) setCompany(saved);
   }, []);
 
   const emailErr =
@@ -192,6 +198,7 @@ function LoginForm() {
   const companyErr = touched.company && company.trim() === "" ? "Company code is required." : "";
   const pwErr = touched.pw && pw.length < 8 ? (pw ? "Password must be at least 8 characters." : "Password is required.") : "";
   const busy = status === "loading";
+  const shownErr = formErr || authError || "";
 
   function shake() {
     const el = shakeRef.current;
@@ -201,37 +208,51 @@ function LoginForm() {
     el.classList.add("sn-shake");
   }
 
+  function onCompany(v: string) {
+    setCompany(v);
+    if (authError) clearAuthError();
+    try {
+      localStorage.setItem(COMPANY_INPUT_KEY, v);
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setTouched({ company: true, email: true, pw: true });
     setFormErr("");
     setNotice("");
+    clearAuthError();
     if (company.trim() === "" || !SN_EMAIL_RE.test(email) || pw.length < 8) {
       setStatus("error");
       shake();
       return;
     }
     setStatus("loading");
-    const { error, status: httpStatus } = await signInPassword(email, pw);
-    if (!error) {
-      try {
-        if (remember) localStorage.setItem(WORKSPACE_KEY, company.trim().toUpperCase());
-        else localStorage.removeItem(WORKSPACE_KEY);
-      } catch {
-        /* ignore storage errors */
-      }
-      setStatus("success");
+    const { error, status: httpStatus } = await signInPassword(company, email, pw);
+    if (error) {
+      setStatus("error");
+      setFormErr(mapAuthError(error, httpStatus));
+      shake();
       return;
     }
-    setStatus("error");
-    setFormErr(mapAuthError(error, httpStatus));
-    shake();
+    // Success: the session lands and AuthProvider verifies the workspace; the app
+    // shell (App.tsx) takes over from here (this component unmounts).
   }
 
   async function sso(which: "google" | "microsoft") {
-    setFormErr("");
     setNotice("");
-    const { error } = which === "google" ? await signInGoogle() : await signInMicrosoft();
+    clearAuthError();
+    setTouched((t) => ({ ...t, company: true }));
+    if (company.trim() === "") {
+      setStatus("error");
+      setFormErr("Enter your company code first, then continue with Google or Microsoft.");
+      shake();
+      return;
+    }
+    setFormErr("");
+    const { error } = which === "google" ? await signInGoogle(company) : await signInMicrosoft(company);
     if (error) {
       setStatus("error");
       setFormErr(
@@ -247,6 +268,7 @@ function LoginForm() {
   async function forgot(e: FormEvent) {
     e.preventDefault();
     setFormErr("");
+    clearAuthError();
     if (!SN_EMAIL_RE.test(email)) {
       setTouched((t) => ({ ...t, email: true }));
       setNotice("");
@@ -264,31 +286,13 @@ function LoginForm() {
 
   function fillDemo() {
     if (!DEMO) return;
-    setCompany(DEMO_COMPANY.toUpperCase());
+    onCompany(DEMO_COMPANY.toUpperCase());
     setEmail(DEMO.email);
     setPw(DEMO.password);
     setTouched({});
     setStatus("idle");
     setFormErr("");
     setNotice("");
-  }
-
-  if (status === "success") {
-    return (
-      <div className="sn-form-wrap">
-        <div className="sn-success">
-          <svg viewBox="0 0 52 52" width="56" height="56" aria-hidden="true">
-            <circle className="sn-suc-c" cx="26" cy="26" r="24" fill="none" strokeWidth="3" />
-            <path className="sn-suc-k" d="M15 27l7.5 7.5L38 19" fill="none" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          <h2>Welcome back</h2>
-          <p>Opening your workspace…</p>
-          <div className="sn-redir-bar">
-            <i />
-          </div>
-        </div>
-      </div>
-    );
   }
 
   return (
@@ -311,13 +315,13 @@ function LoginForm() {
         <span>or sign in with email</span>
       </div>
 
-      {formErr && (
+      {shownErr && (
         <div className="sn-alert" role="alert">
           <WarningIcon />
-          <span>{formErr}</span>
+          <span>{shownErr}</span>
         </div>
       )}
-      {notice && !formErr && (
+      {notice && !shownErr && (
         <div className="sn-note" role="status">
           <InfoIcon />
           <span>{notice}</span>
@@ -338,7 +342,7 @@ function LoginForm() {
               value={company}
               disabled={busy}
               style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}
-              onChange={(e) => setCompany(e.target.value)}
+              onChange={(e) => onCompany(e.target.value)}
               onBlur={() => setTouched((t) => ({ ...t, company: true }))}
             />
           </div>

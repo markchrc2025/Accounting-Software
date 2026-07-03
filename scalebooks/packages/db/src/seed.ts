@@ -15,7 +15,7 @@ async function seed() {
 
   await db
     .insert(organizations)
-    .values({ id: DEMO_ORG_ID, name: "Demo Company Inc." })
+    .values({ id: DEMO_ORG_ID, name: "Demo Company Inc.", code: "DEMO" })
     .onConflictDoNothing({ target: organizations.id });
 
   await db

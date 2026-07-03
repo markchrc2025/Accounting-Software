@@ -74,6 +74,15 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface MeDto {
+  user: { id: string; email: string };
+  org: { id: string; name: string; code: string };
+  role: string;
+}
+
+/** The signed-in user's resolved workspace (org id, name, tenant code) + role. */
+export const getMe = () => apiFetch<MeDto>("/auth/me");
+
 export const listAccounts = () =>
   apiFetch<{ accounts: AccountDto[] }>("/accounts").then((r) => r.accounts);
 
