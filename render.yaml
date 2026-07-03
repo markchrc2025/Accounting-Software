@@ -1,4 +1,4 @@
-# Render blueprint for ScaleBooks — both the API and the web app.
+# Render blueprint for Sentire Books — both the API and the web app.
 # Create via Render → "New +" → "Blueprint" pointed at this repo.
 services:
   # ── API (Hono) ─────────────────────────────────────────────────────────────

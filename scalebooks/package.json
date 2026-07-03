@@ -2,7 +2,7 @@
   "name": "scalebooks",
   "private": true,
   "version": "0.1.0",
-  "description": "ScaleBooks — Philippine cloud accounting. Clean monorepo foundation (Postgres + TypeScript).",
+  "description": "Sentire Books — Philippine cloud accounting. Clean monorepo foundation (Postgres + TypeScript).",
   "type": "module",
   "packageManager": "pnpm@9.12.0",
   "engines": {
