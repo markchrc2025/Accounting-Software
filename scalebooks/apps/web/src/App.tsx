@@ -14,7 +14,7 @@ function Nav() {
     }`;
   return (
     <header className="flex h-14 items-center gap-6 border-b border-[#E5E7EB] bg-white px-6">
-      <span className="text-lg font-semibold">ScaleBooks</span>
+      <span className="text-lg font-semibold">Sentire Books</span>
       <nav className="flex gap-1">
         <NavLink to="/journal" className={({ isActive }) => link(isActive)}>
           Journal

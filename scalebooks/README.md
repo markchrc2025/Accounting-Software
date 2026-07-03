@@ -1,6 +1,6 @@
-# ScaleBooks — clean monorepo foundation
+# Sentire Books — clean monorepo foundation
 
-A rebuild scaffold for the ScaleBooks accounting platform on a **relational, ACID,
+A rebuild scaffold for the Sentire Books accounting platform on a **relational, ACID,
 type-safe** stack. It exists to fix the structural problems found in the audit of
 the existing app (open Firestore rules, client-side-only validation, non-atomic
 multi-document writes, floating-point money, no tests).

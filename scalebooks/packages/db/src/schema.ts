@@ -1,5 +1,5 @@
 /**
- * ScaleBooks relational schema (Drizzle ORM / Postgres).
+ * Sentire Books relational schema (Drizzle ORM / Postgres).
  *
  * Money columns are `bigint` CENTAVOS (integers), never floats.
  * Org-scoped: every business table carries `org_id` for multi-tenant isolation
