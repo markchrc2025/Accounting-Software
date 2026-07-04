@@ -12,6 +12,8 @@ export interface AuthContext {
   orgId: string;
   email: string;
   role: UserRole;
+  orgCode: string;
+  orgName: string;
 }
 
 declare module "hono" {
@@ -70,6 +72,8 @@ export async function requireAuth(c: Context, next: Next) {
     orgId: ctx.orgId,
     email: ctx.email || id.email,
     role: ctx.role,
+    orgCode: ctx.orgCode,
+    orgName: ctx.orgName,
   });
   await next();
 }

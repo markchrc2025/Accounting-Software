@@ -7,14 +7,21 @@ import { LoginPage } from "./auth/LoginPage";
 import { authEnabled, useAuth } from "./auth/AuthProvider";
 
 function Nav() {
-  const { session, signOut } = useAuth();
+  const { session, org, signOut } = useAuth();
   const link = (isActive: boolean) =>
     `rounded-lg px-3 py-1.5 text-sm font-medium ${
       isActive ? "bg-primary-subtle text-primary" : "text-[#6B7280] hover:text-[#1F2937]"
     }`;
   return (
     <header className="flex h-14 items-center gap-6 border-b border-[#E5E7EB] bg-white px-6">
-      <span className="text-lg font-semibold">Sentire Books</span>
+      <span className="flex items-baseline gap-2">
+        <span className="text-lg font-semibold">Sentire Books</span>
+        {org && (
+          <span className="text-xs font-medium text-[#9CA3AF]" title={`Workspace: ${org.code}`}>
+            {org.name}
+          </span>
+        )}
+      </span>
       <nav className="flex gap-1">
         <NavLink to="/journal" className={({ isActive }) => link(isActive)}>
           Journal
@@ -45,18 +52,19 @@ function Nav() {
 }
 
 export function App() {
-  const { session, loading } = useAuth();
+  const { session, phase } = useAuth();
 
-  // When auth is configured, require a session; otherwise (local dev) render directly.
+  // When auth is configured, require a verified session; otherwise (local dev)
+  // render directly.
   if (authEnabled) {
-    if (loading) {
+    if (phase === "loading" || phase === "verifying") {
       return (
         <div className="flex min-h-screen items-center justify-center font-sans text-sm text-[#6B7280]">
-          Loading…
+          {phase === "verifying" ? "Opening your workspace…" : "Loading…"}
         </div>
       );
     }
-    if (!session) return <LoginPage />;
+    if (phase !== "ready" || !session) return <LoginPage />;
   }
 
   return (

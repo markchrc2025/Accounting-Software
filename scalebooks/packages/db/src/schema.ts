@@ -52,6 +52,9 @@ export const voucherStatus = pgEnum("voucher_status", ["draft", "posted", "void"
 export const organizations = pgTable("organizations", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
+  // Tenant ID entered at login. Globally unique, case-insensitive (enforced by a
+  // DB expression index on upper(code) — see migrations/0006_org_code.sql).
+  code: text("code").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

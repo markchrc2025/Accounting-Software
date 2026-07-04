@@ -38,22 +38,34 @@ export interface ResolvedUser {
   role: UserRole;
   email: string;
   fullName: string | null;
+  orgCode: string;
+  orgName: string;
 }
 
 /**
- * Resolve a user's org + role from their auth uid, bypassing RLS via the
- * SECURITY DEFINER function. Returns null if the user is not provisioned.
+ * Resolve a user's org + role (and the org's code + name) from their auth uid,
+ * bypassing RLS via the SECURITY DEFINER function. Returns null if the user is
+ * not provisioned in any org.
  */
 export async function getUserContext(uid: string): Promise<ResolvedUser | null> {
   const rows = (await db.execute(
-    sql`SELECT org_id, role, email, full_name FROM get_user_context(${uid}::uuid)`,
+    sql`SELECT org_id, role, email, full_name, org_code, org_name FROM get_user_context(${uid}::uuid)`,
   )) as unknown as Array<{
     org_id: string;
     role: UserRole;
     email: string;
     full_name: string | null;
+    org_code: string;
+    org_name: string;
   }>;
   const r = rows[0];
   if (!r) return null;
-  return { orgId: r.org_id, role: r.role, email: r.email, fullName: r.full_name };
+  return {
+    orgId: r.org_id,
+    role: r.role,
+    email: r.email,
+    fullName: r.full_name,
+    orgCode: r.org_code,
+    orgName: r.org_name,
+  };
 }

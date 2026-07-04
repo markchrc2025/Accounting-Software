@@ -6,7 +6,7 @@
 --
 -- BEFORE RUNNING, edit the two lines marked  -- EDIT  in the BOOTSTRAP section:
 --   1) the scalebooks_app role password
---   2) your company name
+--   2) your company name AND your company code (the tenant ID users type at login)
 -- Run this file ONCE (re-running errors on already-existing types/tables).
 --
 -- AFTER you enable Google sign-in and log in once, run the LAST block (it maps
@@ -416,6 +416,28 @@ ALTER TABLE accounts ADD  CONSTRAINT accounts_org_name_key UNIQUE (org_id, name)
 CREATE INDEX IF NOT EXISTS accounts_org_code_idx   ON accounts (org_id, code);
 CREATE INDEX IF NOT EXISTS accounts_org_parent_idx ON accounts (org_id, parent_id);
 
+-- ───────────────────────────── 0006_org_code.sql ─────────────────────────────
+-- Company code (tenant ID) for multi-tenant login. Entered at login and verified
+-- against the signed-in user's org. Data isolation stays enforced by RLS.
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS code text;
+UPDATE organizations
+   SET code = 'ORG' || upper(substr(replace(id::text, '-', ''), 1, 8))
+ WHERE code IS NULL;
+ALTER TABLE organizations ALTER COLUMN code SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS organizations_code_key ON organizations (upper(code));
+
+DROP FUNCTION IF EXISTS get_user_context(uuid);
+CREATE FUNCTION get_user_context(p_uid uuid)
+RETURNS TABLE (org_id uuid, role user_role, email text, full_name text, org_code text, org_name text)
+LANGUAGE sql SECURITY DEFINER SET search_path = public STABLE AS $$
+  SELECT u.org_id, u.role, u.email, u.full_name, o.code, o.name
+  FROM app_users u
+  JOIN organizations o ON o.id = u.org_id
+  WHERE u.id = p_uid
+$$;
+REVOKE ALL ON FUNCTION get_user_context(uuid) FROM public;
+GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO scalebooks_app;
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════
@@ -423,9 +445,10 @@ CREATE INDEX IF NOT EXISTS accounts_org_parent_idx ON accounts (org_id, parent_i
 -- 1) Give the RLS-bound app role a login. The API connects to the DB as this role.
 ALTER ROLE scalebooks_app WITH LOGIN PASSWORD 'CHANGE_ME_app_password';        -- EDIT
 
--- 2) Your organization (keep this id — it is referenced below and by your admin row).
-INSERT INTO organizations (id, name)
-VALUES ('a0000000-0000-0000-0000-000000000001', 'Your Company Inc.')           -- EDIT name
+-- 2) Your organization. Pick a short COMPANY CODE (tenant ID) your users type at
+--    login — letters/digits, e.g. ACMEFOODS. Keep the id as-is (referenced below).
+INSERT INTO organizations (id, name, code)
+VALUES ('a0000000-0000-0000-0000-000000000001', 'Your Company Inc.', 'YOURCODE') -- EDIT name + code
 ON CONFLICT (id) DO NOTHING;
 
 -- 3) Your real chart of accounts (generated from the Zoho export by
