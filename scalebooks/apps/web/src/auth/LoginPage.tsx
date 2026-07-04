@@ -13,8 +13,9 @@ const DEMO_PASSWORD = import.meta.env.VITE_DEMO_PASSWORD as string | undefined;
 const DEMO_COMPANY = (import.meta.env.VITE_DEMO_COMPANY as string | undefined) ?? "";
 const DEMO = DEMO_EMAIL && DEMO_PASSWORD ? { email: DEMO_EMAIL, password: DEMO_PASSWORD } : null;
 
-// Convenience prefill of the last-entered / last-confirmed workspace code.
-const COMPANY_INPUT_KEY = "sb.company_input";
+// Convenience prefill of the last-confirmed workspace code — only ever written
+// by AuthProvider on a successful sign-in with "keep me signed in" checked, so
+// unchecking it (or never signing in) leaves nothing behind here.
 const WORKSPACE_KEY = "sb.workspace";
 const readLS = (k: string): string | null => {
   try {
@@ -187,9 +188,9 @@ function LoginForm() {
   const [notice, setNotice] = useState("");
   const shakeRef = useRef<HTMLFormElement>(null);
 
-  // Prefill the workspace code the user last entered / was confirmed into.
+  // Prefill the workspace code from the last "keep me signed in" sign-in.
   useEffect(() => {
-    const saved = readLS(COMPANY_INPUT_KEY) ?? readLS(WORKSPACE_KEY);
+    const saved = readLS(WORKSPACE_KEY);
     if (saved) setCompany(saved);
   }, []);
 
@@ -211,11 +212,6 @@ function LoginForm() {
   function onCompany(v: string) {
     setCompany(v);
     if (authError) clearAuthError();
-    try {
-      localStorage.setItem(COMPANY_INPUT_KEY, v);
-    } catch {
-      /* ignore */
-    }
   }
 
   async function submit(e: FormEvent) {
@@ -230,7 +226,7 @@ function LoginForm() {
       return;
     }
     setStatus("loading");
-    const { error, status: httpStatus } = await signInPassword(company, email, pw);
+    const { error, status: httpStatus } = await signInPassword(company, email, pw, remember);
     if (error) {
       setStatus("error");
       setFormErr(mapAuthError(error, httpStatus));
@@ -252,7 +248,8 @@ function LoginForm() {
       return;
     }
     setFormErr("");
-    const { error } = which === "google" ? await signInGoogle(company) : await signInMicrosoft(company);
+    const { error } =
+      which === "google" ? await signInGoogle(company, remember) : await signInMicrosoft(company, remember);
     if (error) {
       setStatus("error");
       setFormErr(
