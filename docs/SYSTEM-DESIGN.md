@@ -143,7 +143,7 @@ The current system replaces a legacy Firebase/Firestore app (`workscale-finance/
 | **NFR-INT-2** Money precision | Integer centavos everywhere; no floats in any money path. ✅ |
 | **NFR-SEC-1** Tenant isolation | Postgres RLS on every org table, deny-by-default (`app.current_org_id` GUC per transaction); API connects as non-owner `scalebooks_app` so RLS always applies. A forgotten `WHERE org_id` cannot leak data. ✅ |
 | **NFR-SEC-2** Authentication | Asymmetric JWT verification (JWKS, ES256) — no shared secrets in the API; org/role resolved from DB, never from claims. ✅ |
-| **NFR-SEC-3** Secrets hygiene | DB credentials only in Render env vars; publishable Supabase key is the only key shipped to browsers; `AUTH_DEV_BYPASS` is local-only and off in production. ✅ |
+| **NFR-SEC-3** Secrets hygiene | DB credentials only in Render env vars; publishable Supabase key is the only key shipped to browsers; `AUTH_DEV_BYPASS` is local-only — and structurally inert in production: the bypass path is only reachable when **no** `AUTH_JWKS_URL` is configured, so with JWKS set the header is ignored entirely. ✅ |
 | **NFR-SEC-4** Least privilege | Coarse role gates on writes today; full approval-chain RBAC 🔜. |
 | **NFR-AUD-1** Auditability | Immutable posted entries, `reversal_of` chains, `created_by`/`posted_at` stamps, sequential doc numbers. ✅ Field-level audit log 🔜. |
 | **NFR-REL-1** Availability | Render Starter (no cold starts) + `/health` checks + auto-deploy; Supabase managed Postgres. Auth favors availability on transient API failures (session kept; RLS still protects). ✅ |
@@ -227,7 +227,7 @@ Key properties:
 - **The company code is a workspace gate, not a security boundary.** Even if the client check were bypassed, `get_user_context` resolves the caller's *own* org and RLS confines every query to it. Isolation never depends on client input.
 - **Two DB roles:** migrations/seed run as the table **owner** (RLS-exempt, direct :5432); the API runs as **`scalebooks_app`** (RLS-bound, pooler :6543, `prepare:false`). Production `DATABASE_URL` must always point at `scalebooks_app`.
 - **Availability bias:** a transient `/auth/me` failure never destroys a valid session; only a definitive 401/403 or code mismatch signs out. Background token refreshes never re-block the UI.
-- **Local dev:** with no IdP configured, the API accepts `x-user-id` only when `AUTH_DEV_BYPASS=true` — never in production.
+- **Local dev:** the API accepts an `x-user-id` header only when `AUTH_JWKS_URL` is unset **and** `AUTH_DEV_BYPASS=true`; once JWKS is configured (production), the bypass path is unreachable regardless of the flag.
 
 ### 4.3 Data model
 
@@ -277,12 +277,12 @@ erDiagram
 | `GET /accounts` · `POST /accounts` | auth · **admin** | list chart / add account (409 on duplicate name) |
 | `GET /journal-entries` · `GET /journal-entries/:id` | auth | last 100 / entry with lines |
 | `POST /journal-entries` | **poster\|admin** | transactional post; 422 if unbalanced |
-| `POST /journal-entries/:id/reverse` | **poster\|admin** | reversing entry + mark original reversed |
+| `POST /journal-entries/:id/reverse` | **poster\|admin** | reversing entry + mark original reversed (404 unknown id · 409 not posted) |
 | `GET /reports/trial-balance?from&to` · `GET /reports/profit-and-loss?from&to` | auth | SQL-aggregated, RLS-scoped |
 | `GET /contacts?type` · `POST /contacts` | auth | master data |
 | `GET /vouchers` · `POST /vouchers` | auth · **poster\|admin** | list / atomic voucher+JE |
 
-Error contract: `400 validation_error` (Zod issues) · `401 unauthenticated` · `403 forbidden` (role / not provisioned) · `404 not_found` · `409 duplicate_*` · `422 unbalanced {debit, credit}` · `500 internal_error`.
+Error contract: `400 validation_error` (Zod issues) · `401 unauthenticated` · `403 forbidden` (role / not provisioned) · `404 not_found` · `409 duplicate_*` / `invalid_status` (state conflicts, e.g. reversing a non-posted entry) · `422 unbalanced {debit, credit}` · `500 internal_error`.
 
 ### 4.5 Deployment & environments
 
