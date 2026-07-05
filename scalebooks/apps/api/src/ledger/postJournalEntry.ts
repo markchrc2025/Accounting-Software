@@ -24,6 +24,20 @@ export interface PostJournalEntryResult {
   entryNo: string;
 }
 
+/** Reversal target doesn't exist in the caller's org → HTTP 404. */
+export class EntryNotFoundError extends Error {
+  constructor() {
+    super("Entry not found");
+  }
+}
+
+/** Reversal target isn't in 'posted' status → HTTP 409. */
+export class EntryNotPostedError extends Error {
+  constructor() {
+    super("Only posted entries can be reversed");
+  }
+}
+
 function periodKey(prefix: string, isoDate: string): string {
   const [y, m] = isoDate.split("-");
   return `${prefix}${y}${m}`; // e.g. JE202606
@@ -116,8 +130,8 @@ export async function reverseJournalEntry(
       .select()
       .from(journalEntries)
       .where(sql`${journalEntries.id} = ${entryId} AND ${journalEntries.orgId} = ${ctx.orgId}`);
-    if (!original) throw new Error("Entry not found");
-    if (original.status !== "posted") throw new Error("Only posted entries can be reversed");
+    if (!original) throw new EntryNotFoundError();
+    if (original.status !== "posted") throw new EntryNotPostedError();
 
     const lines = await tx
       .select()

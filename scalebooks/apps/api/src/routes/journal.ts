@@ -4,7 +4,12 @@ import { and, asc, desc, eq } from "drizzle-orm";
 import { UnbalancedEntryError } from "@scalebooks/domain";
 import { withOrgContext, journalEntries, journalLines } from "@scalebooks/db";
 import { requireAuth, canPost } from "../auth";
-import { postJournalEntry, reverseJournalEntry } from "../ledger/postJournalEntry";
+import {
+  postJournalEntry,
+  reverseJournalEntry,
+  EntryNotFoundError,
+  EntryNotPostedError,
+} from "../ledger/postJournalEntry";
 
 export const journalRoutes = new Hono();
 
@@ -92,7 +97,13 @@ journalRoutes.post("/:id/reverse", async (c) => {
     });
     return c.json(result, 201);
   } catch (err) {
+    if (err instanceof EntryNotFoundError) {
+      return c.json({ error: "not_found" }, 404);
+    }
+    if (err instanceof EntryNotPostedError) {
+      return c.json({ error: "invalid_status", detail: err.message }, 409);
+    }
     console.error("[reverseJournalEntry]", err);
-    return c.json({ error: "internal_error", detail: (err as Error).message }, 400);
+    return c.json({ error: "internal_error" }, 500);
   }
 });
