@@ -1,0 +1,11 @@
+# Build context is the scalebooks/ workspace root. Keep images lean and
+# reproducible: never copy installed deps, build output, local env, or logs.
+**/node_modules
+**/dist
+**/.turbo
+**/*.log
+**/.DS_Store
+.env
+.env.*
+!.env.example
+.git
