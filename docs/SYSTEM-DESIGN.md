@@ -51,10 +51,10 @@ The current system replaces a legacy Firebase/Firestore app (`workscale-finance/
 |---|---|
 | **Web SPA** (`@scalebooks/web`) | React/Vite app; renders UI, performs client-side validation (UX only), holds the Supabase session. |
 | **API** (`@scalebooks/api`) | Hono/Node service; the only ledger writer. Verifies JWTs, resolves org context, executes transactional postings. |
-| **Supabase Auth** | Identity provider. Issues JWTs (email/password, Google, Microsoft/Azure). The API validates them via JWKS — no shared secret. |
-| **PostgreSQL** (Supabase-hosted) | System of record. Enforces balance, immutability, uniqueness, and Row-Level-Security tenant isolation. |
-| **Google / Microsoft IdPs** | Upstream OAuth providers federated through Supabase Auth. |
-| **Render** | Hosting: API web service + static web site, auto-deploy from `main`. |
+| **Authenticize** | Identity provider (self-hosted OIDC / OAuth 2.1 on Better Auth). Issues RS256 JWTs (email/password + Google). The API validates them via Authenticize's JWKS — no shared secret. |
+| **PostgreSQL** | System of record. Enforces balance, immutability, uniqueness, and Row-Level-Security tenant isolation. |
+| **Google IdP** | Upstream OAuth provider federated through Authenticize. |
+| **Sliplane / Render** | Container hosting for web + API (+ Authenticize + Postgres). |
 | **GitHub Actions CI** | Gatekeeper: typecheck, unit tests, migrations + RLS-enforced integration tests against ephemeral Postgres 16. |
 
 ### 2.3 Actor ↔ capability matrix (enforced today)

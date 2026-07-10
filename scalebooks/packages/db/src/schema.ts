@@ -61,9 +61,10 @@ export const organizations = pgTable("organizations", {
 export const appUsers = pgTable(
   "app_users",
   {
-    // Primary key equals the auth provider's uid (Supabase/Firebase). Roles live
-    // here AND in a JWT claim — never writable by the client directly (RLS).
-    id: uuid("id").primaryKey(),
+    // Primary key equals the auth provider's uid (Authenticize / Better Auth —
+    // an opaque string, not a UUID). Roles live here, resolved server-side per
+    // request — never trusted from a JWT claim.
+    id: text("id").primaryKey(),
     orgId: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -130,7 +131,7 @@ export const journalEntries = pgTable(
     sourceType: text("source_type"),
     sourceId: uuid("source_id"),
     reversalOf: uuid("reversal_of"),
-    createdBy: uuid("created_by").references(() => appUsers.id),
+    createdBy: text("created_by").references(() => appUsers.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     postedAt: timestamp("posted_at", { withTimezone: true }),
   },
@@ -201,7 +202,7 @@ export const vouchers = pgTable(
     status: voucherStatus("status").notNull().default("draft"),
     totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
     journalEntryId: uuid("journal_entry_id").references(() => journalEntries.id),
-    createdBy: uuid("created_by").references(() => appUsers.id),
+    createdBy: text("created_by").references(() => appUsers.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     postedAt: timestamp("posted_at", { withTimezone: true }),
   },
