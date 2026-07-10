@@ -1,0 +1,14 @@
+# Docker build context is the REPO ROOT on Sliplane. Trim everything the images
+# don't need so the build is fast and reproducible.
+**/node_modules
+**/dist
+**/.turbo
+**/*.log
+**/.DS_Store
+.git
+.github
+workscale-finance
+docs
+design_handoff_books_login
+**/.env
+**/.env.*
