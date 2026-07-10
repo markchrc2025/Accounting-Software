@@ -49,7 +49,7 @@ export interface ResolvedUser {
  */
 export async function getUserContext(uid: string): Promise<ResolvedUser | null> {
   const rows = (await db.execute(
-    sql`SELECT org_id, role, email, full_name, org_code, org_name FROM get_user_context(${uid}::uuid)`,
+    sql`SELECT org_id, role, email, full_name, org_code, org_name FROM get_user_context(${uid}::text)`,
   )) as unknown as Array<{
     org_id: string;
     role: UserRole;

@@ -1,33 +1,25 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import type { Session, Provider } from "@supabase/supabase-js";
-import { supabase, authEnabled } from "../lib/supabase";
-import { setAccessToken, getMe, ApiError } from "../lib/api";
+import { authClient, authEnabled, AUTH_URL } from "../lib/authClient";
+import { setAccessToken, setTokenRefresher, getMe, ApiError } from "../lib/api";
 
 /**
- * Auth + workspace state machine.
+ * Auth + workspace state machine, backed by Authenticize (Better Auth / OIDC).
  *
- *   loading   → resolving the initial Supabase session
+ *   loading   → resolving the initial session
  *   anon      → no session; show the login screen
- *   verifying → have a session that needs (re-)resolving against the org — a
- *               fresh sign-in verifying the entered company code, or the very
- *               first resolution on page load. Blocks rendering the app.
- *   ready     → the org is resolved (or resolution failed transiently, see
- *               below) and the app can render.
+ *   verifying → have a session; fetching a JWT for our API and confirming the
+ *               entered company code matches the user's org (GET /auth/me)
+ *   ready     → verified; the app can render
+ *
+ * Login talks to Authenticize with the Better Auth client (email/password +
+ * Google). Better Auth uses a session cookie; for our Bearer-token API we then
+ * fetch a signed JWT from Authenticize's `/api/auth/token` endpoint and send it
+ * as `Authorization: Bearer`. The API verifies it via Authenticize's JWKS.
  *
  * The company code (tenant ID) is required at login: sign-in stores the entered
- * code as `pending`, and once the session lands we compare it to the user's org.
- * A mismatch — or the server rejecting the token/user outright — signs the user
- * out. Anything else (a network blip, a cold-starting API) is treated as
- * transient: we do NOT tear down a valid session over it, we just leave `org`
- * unresolved for this render and let the next session event retry.
- *
- * Once an org is resolved for the current user, background session events
- * (token auto-refresh, tab refocus) update the token silently — they do NOT
- * re-run verification or drop back to the blocking "verifying" screen, so an
- * hourly token refresh can't unmount the app mid-work.
- *
- * Data isolation is enforced by Postgres RLS server-side regardless of any of
- * this — the company code is a workspace gate for UX, not a security boundary.
+ * code as `pending`, and once the session lands we compare it to the resolved
+ * org. A mismatch — or the API rejecting the token — signs the user out. Data
+ * isolation is enforced by Postgres RLS regardless; the code is a UX gate.
  */
 export type AuthPhase = "loading" | "anon" | "verifying" | "ready";
 
@@ -36,6 +28,10 @@ export interface OrgContext {
   name: string;
   code: string;
   role: string;
+}
+
+export interface AuthSession {
+  user: { id: string; email: string };
 }
 
 const PENDING_KEY = "sb.pending_company";
@@ -59,8 +55,21 @@ const writeLS = (k: string, v: string | null) => {
   }
 };
 
+/** Exchange the Authenticize session cookie for a JWT our API can verify. */
+async function fetchApiToken(): Promise<string | null> {
+  if (!AUTH_URL) return null;
+  try {
+    const res = await fetch(`${AUTH_URL}/api/auth/token`, { credentials: "include" });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { token?: string };
+    return body.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
 interface AuthState {
-  session: Session | null;
+  session: AuthSession | null;
   phase: AuthPhase;
   org: OrgContext | null;
   authError: string | null;
@@ -80,94 +89,98 @@ interface AuthState {
 const Ctx = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  // No IdP configured (local dev) → skip the gate entirely.
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [phase, setPhase] = useState<AuthPhase>(authEnabled ? "loading" : "ready");
   const [org, setOrg] = useState<OrgContext | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
-
-  // Refs mirror `org` / "which user we last resolved" so the onAuthStateChange
-  // subscription (set up once, in a mount-time closure) always sees the latest
-  // values instead of the stale ones captured at subscribe time.
-  const orgRef = useRef<OrgContext | null>(null);
-  const verifiedUserIdRef = useRef<string | null>(null);
-  // Guards against a stale getMe() response landing after a newer session.
-  const verifyingToken = useRef<string | null>(null);
-
-  function updateOrg(next: OrgContext | null, userId: string | null) {
-    orgRef.current = next;
-    verifiedUserIdRef.current = userId;
-    setOrg(next);
-  }
+  const verifySeq = useRef(0);
 
   useEffect(() => {
-    if (!supabase) return;
-    void supabase.auth.getSession().then(({ data }) => void handleSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => void handleSession(s));
-    return () => sub.subscription.unsubscribe();
+    if (!authClient) return;
+    void establishSession();
+    // Re-fetch a fresh JWT whenever an API call 401s (the Better Auth session
+    // cookie outlives the short-lived JWT, so this is a silent refresh).
+    setTokenRefresher(fetchApiToken);
+    return () => setTokenRefresher(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleSession(s: Session | null) {
-    setSession(s);
-    setAccessToken(s?.access_token ?? null);
+  async function establishSession() {
+    if (!authClient) return;
+    try {
+      const { data } = await authClient.getSession();
+      const user = data?.user;
+      await handleSession(user ? { user: { id: user.id, email: user.email ?? "" } } : null);
+    } catch {
+      // Identity provider unreachable on load — fall back to the login screen
+      // rather than hanging on the splash.
+      await handleSession(null);
+    }
+  }
 
-    if (!s) {
-      updateOrg(null, null);
+  async function forceSignedOut(message: string | null) {
+    try {
+      await authClient?.signOut();
+    } catch {
+      /* best-effort — force local state regardless */
+    }
+    writeLS(PENDING_KEY, null);
+    writeLS(REMEMBER_KEY, null);
+    setSession(null);
+    setOrg(null);
+    setAccessToken(null);
+    if (message) setAuthError(message);
+    setPhase("anon");
+  }
+
+  async function handleSession(next: AuthSession | null) {
+    if (!next) {
+      setSession(null);
+      setOrg(null);
+      setAccessToken(null);
       setPhase("anon");
       return;
     }
-
-    const pending = readLS(PENDING_KEY);
-
-    // Background refresh (token auto-refresh, tab refocus) of a session we've
-    // already resolved for this same user, with nothing new to verify — update
-    // the token (done above) and move on without touching the UI.
-    if (!pending && orgRef.current && verifiedUserIdRef.current === s.user.id) {
-      setPhase("ready");
-      return;
-    }
-
-    const token = s.access_token;
-    verifyingToken.current = token;
+    setSession(next);
+    const seq = ++verifySeq.current;
     setPhase("verifying");
 
+    const token = await fetchApiToken();
+    if (verifySeq.current !== seq) return;
+    if (!token) {
+      // Signed in with Authenticize but couldn't obtain an API token — without
+      // it the app can't call the API at all, so sign out and let them retry.
+      await forceSignedOut("We couldn't establish your session. Please try again.");
+      return;
+    }
+    setAccessToken(token);
+
     let me: Awaited<ReturnType<typeof getMe>> | null = null;
-    let rejected = false; // server said "no" (bad/expired token, not provisioned) — not just unreachable
+    let rejected = false; // API said no (bad token / not provisioned) — not just unreachable
     try {
       me = await getMe();
     } catch (err) {
       if (err instanceof ApiError && (err.status === 401 || err.status === 403)) rejected = true;
       me = null;
     }
-    if (verifyingToken.current !== token) return; // superseded by a newer session
+    if (verifySeq.current !== seq) return;
 
     if (!me) {
       if (rejected) {
-        writeLS(PENDING_KEY, null);
-        writeLS(REMEMBER_KEY, null);
-        setAuthError("We couldn't verify your account for this workspace. Please sign in again.");
-        await supabase!.auth.signOut();
+        await forceSignedOut("We couldn't verify your account for this workspace. Please sign in again.");
       } else {
-        // Transient failure (network blip, API cold start) — keep the session
-        // alive and let the app render; org info just isn't available yet. This
-        // deliberately favors availability over re-attempting the company-code
-        // check right now: RLS still scopes every query to the user's real org
-        // regardless, so nothing is exposed by letting them in before a retry
-        // confirms the code. `pending` is left set so the next session event
-        // (retry, refresh) still runs the check once the API recovers.
+        // Transient failure (API blip) — keep the session, render the app; RLS
+        // still scopes data. The next request retries the workspace check.
         setPhase("ready");
       }
       return;
     }
 
+    const pending = readLS(PENDING_KEY);
     if (pending && normCode(pending) !== normCode(me.org.code)) {
-      writeLS(PENDING_KEY, null);
-      writeLS(REMEMBER_KEY, null);
-      setAuthError(
+      await forceSignedOut(
         `This account isn't part of workspace "${normCode(pending)}". Check the company code or contact your admin.`,
       );
-      await supabase!.auth.signOut(); // → handleSession(null) → anon, error stays
       return;
     }
 
@@ -176,7 +189,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     writeLS(REMEMBER_KEY, null);
     writeLS(WORKSPACE_KEY, remember ? me.org.code : null);
 
-    updateOrg({ id: me.org.id, name: me.org.name, code: me.org.code, role: me.role }, s.user.id);
+    setOrg({ id: me.org.id, name: me.org.name, code: me.org.code, role: me.role });
     setAuthError(null);
     setPhase("ready");
   }
@@ -186,7 +199,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     writeLS(PENDING_KEY, normCode(companyCode));
     writeLS(REMEMBER_KEY, remember ? "1" : "0");
   };
-
   const clearPendingSignIn = () => {
     writeLS(PENDING_KEY, null);
     writeLS(REMEMBER_KEY, null);
@@ -198,44 +210,68 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     password: string,
     remember: boolean,
   ) => {
-    if (!supabase) return { error: "Auth is not configured.", status: null };
+    if (!authClient) return { error: "Auth is not configured.", status: null };
     startSignIn(companyCode, remember);
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-    if (error) clearPendingSignIn(); // auth failed → nothing to verify
-    return { error: error?.message ?? null, status: error?.status ?? null };
+    const { error } = await authClient.signIn.email({
+      email: email.trim(),
+      password,
+      rememberMe: remember,
+    });
+    if (error) {
+      clearPendingSignIn();
+      return { error: error.message ?? "Sign in failed.", status: error.status ?? null };
+    }
+    await establishSession(); // sets phase → verifying → ready (or signs out on mismatch)
+    return { error: null, status: null };
   };
 
-  const signInOAuth = async (provider: Provider, companyCode: string, remember: boolean) => {
-    if (!supabase) return { error: "Auth is not configured." };
+  const signInSocial = async (
+    provider: "google" | "microsoft",
+    companyCode: string,
+    remember: boolean,
+  ) => {
+    if (!authClient) return { error: "Auth is not configured." };
     startSignIn(companyCode, remember);
-    const { error } = await supabase.auth.signInWithOAuth({
+    const { error } = await authClient.signIn.social({
       provider,
-      options: { redirectTo: window.location.origin },
+      callbackURL: window.location.origin,
     });
-    if (error) clearPendingSignIn();
-    return { error: error?.message ?? null };
+    if (error) {
+      clearPendingSignIn();
+      return { error: error.message ?? null };
+    }
+    return { error: null }; // success → browser is redirected to the provider
   };
 
   const signInGoogle = (companyCode: string, remember: boolean) =>
-    signInOAuth("google", companyCode, remember);
+    signInSocial("google", companyCode, remember);
   const signInMicrosoft = (companyCode: string, remember: boolean) =>
-    signInOAuth("azure", companyCode, remember);
+    signInSocial("microsoft", companyCode, remember);
 
   const resetPassword = async (email: string) => {
-    if (!supabase) return { error: "Auth is not configured." };
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: `${window.location.origin}/reset-password`,
-    });
-    return { error: error?.message ?? null };
+    if (!AUTH_URL) return { error: "Auth is not configured." };
+    try {
+      const res = await fetch(`${AUTH_URL}/api/auth/request-password-reset`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim(),
+          redirectTo: `${window.location.origin}/reset-password`,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { message?: string } | null;
+        return { error: body?.message ?? "Couldn't send the reset email." };
+      }
+      return { error: null };
+    } catch {
+      return { error: "Couldn't reach the server. Check your connection and try again." };
+    }
   };
 
   const signOut = async () => {
-    clearPendingSignIn();
-    await supabase?.auth.signOut();
-    setSession(null);
-    updateOrg(null, null);
-    setAccessToken(null);
-    setPhase(authEnabled ? "anon" : "ready");
+    await forceSignedOut(null);
   };
 
   return (

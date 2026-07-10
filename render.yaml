@@ -13,14 +13,15 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      # Supabase transaction-pooler URL as the sentire_books_app role (has the
-      # password) — set in the dashboard, never commit it.
+      # DB URL as the RLS-bound sentire_books_app role — set in the dashboard,
+      # never commit it.
       - key: DATABASE_URL
         sync: false
+      # Authenticize (OIDC) — the API verifies RS256 JWTs against its JWKS.
       - key: AUTH_JWKS_URL
-        value: https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1/.well-known/jwks.json
+        sync: false # e.g. https://auth.example.com/api/auth/jwks
       - key: AUTH_ISSUER
-        value: https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1
+        sync: false # e.g. https://auth.example.com
       # Browser origins allowed to call the API (comma-separated). Update if the
       # web app URL changes.
       - key: CORS_ORIGIN
@@ -40,10 +41,10 @@ services:
         source: /*
         destination: /index.html
     envVars:
-      - key: VITE_SUPABASE_URL
-        value: https://mqsdymealtdrzmbnvvoc.supabase.co
-      - key: VITE_SUPABASE_PUBLISHABLE_KEY
-        value: sb_publishable_roR2UnE41AKs4Qwb8fQuKQ_nHp8EgKD
-      # The API's Render URL — set after the API service is created.
+      # Authenticize base URL (baked at build time). The web app and Authenticize
+      # should share a root domain so the session cookie flows.
+      - key: VITE_AUTH_URL
+        sync: false # e.g. https://auth.example.com
+      # The API's URL — set after the API service is created.
       - key: VITE_API_BASE_URL
         sync: false

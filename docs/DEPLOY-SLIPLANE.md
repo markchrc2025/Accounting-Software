@@ -3,25 +3,24 @@
 How to run the whole stack — **web + API + PostgreSQL** — as Docker containers on
 [Sliplane](https://sliplane.io), replacing Render.
 
-> **Read this first — the one thing that can't move.** Your login, Google/Microsoft
-> SSO, and JWT verification are all provided by **Supabase Auth**. Sliplane is a
-> Docker host, not an identity provider — it has no equivalent. So the practical
-> migration is:
+> **The whole stack runs on Sliplane — no Supabase anywhere.**
 >
-> | Layer | Today | After |
-> |---|---|---|
-> | Web (Vite SPA) | Render static | **Sliplane** (nginx container) |
-> | API (Hono) | Render web service | **Sliplane** (Node container) |
-> | App database (Postgres) | Supabase Postgres | **Sliplane** (Postgres container + volume) |
-> | **Auth / SSO / JWKS** | **Supabase Auth** | **Supabase Auth (kept)** |
+> | Layer | Runs on |
+> |---|---|
+> | Web (Vite SPA) | **Sliplane** (nginx container) |
+> | API (Hono) | **Sliplane** (Node container) |
+> | App database (Postgres) | **Sliplane** (Postgres container/managed) |
+> | **Auth / SSO / JWKS** | **Authenticize** (your own OIDC provider, also on Sliplane) |
 >
-> You keep the free Supabase project **purely as the identity provider** (it issues
-> the JWTs the API verifies via JWKS). Everything else runs on Sliplane. Fully
-> deleting Supabase means replacing the entire auth system — see
-> [§8](#8-if-you-really-want-zero-supabase).
+> Login, Google SSO, and JWT signing are handled by **Authenticize** (a Better
+> Auth / OIDC server you run). The API verifies its RS256 JWTs via Authenticize's
+> JWKS — no shared secret. Because there is **no data yet**, moving the database is
+> low-risk: a fresh Postgres just needs the schema.
 >
-> Because there is **no data yet**, moving the database is low-risk: a fresh
-> Postgres just needs the schema, which is the SQL script you already have.
+> **Cookie/domain requirement:** because the Sentire login form calls Authenticize
+> cross-origin, the web app and Authenticize must share a **registrable root
+> domain** (e.g. `books.example.com` + `auth.example.com`) so the session cookie
+> flows. `*.sliplane.app` subdomains won't work for this — use a custom domain.
 
 ---
 
@@ -31,7 +30,8 @@ How to run the whole stack — **web + API + PostgreSQL** — as Docker containe
   on a Hetzner server you control).
 - Your GitHub repo connected to Sliplane (so it can build from the Dockerfiles).
 - `psql` on your laptop (to run the schema once).
-- Your Supabase project kept alive (Auth only). Note its ref: `mqsdymealtdrzmbnvvoc`.
+- **Authenticize** deployed (its own Sliplane service + Postgres) and reachable at a
+  URL on the same root domain as the web app. See the Authenticize repo's `.env.example`.
 - Decide two passwords up front:
   - **DB superuser** password (`postgres` role) — for migrations/admin.
   - **App role** password (`sentire_books_app`) — what the API connects with.
@@ -106,9 +106,9 @@ how the API's non-superuser `sentire_books_app` role is *not*.
   | Key | Value |
   |---|---|
   | `DATABASE_URL` | `postgres://sentire_books_app:<APP_PW>@<db-host>:<port>/sentire_books?sslmode=no-verify` |
-  | `AUTH_JWKS_URL` | `https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1/.well-known/jwks.json` |
-  | `AUTH_ISSUER` | `https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1` |
-  | `CORS_ORIGIN` | `https://<your-web-service>.sliplane.app,http://localhost:5173` |
+  | `AUTH_JWKS_URL` | `<AUTHENTICIZE_URL>/api/auth/jwks` |
+  | `AUTH_ISSUER` | `<AUTHENTICIZE_URL>` |
+  | `CORS_ORIGIN` | `https://<your-web-origin>,http://localhost:5173` |
   | `PORT` | `8787` (optional; matches the service port) |
 
   Keep `?sslmode=no-verify` if your host requires TLS (Sliplane's managed Postgres
@@ -131,45 +131,52 @@ how the API's non-superuser `sentire_books_app` role is *not*.
 
   | Build arg | Value |
   |---|---|
-  | `VITE_API_BASE_URL` | your API URL from step 3, e.g. `https://sentire-books-api.sliplane.app` |
-  | `VITE_SUPABASE_URL` | `https://mqsdymealtdrzmbnvvoc.supabase.co` |
-  | `VITE_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_roR2UnE41AKs4Qwb8fQuKQ_nHp8EgKD` |
+  | `VITE_API_BASE_URL` | your API URL from step 3 |
+  | `VITE_AUTH_URL` | your Authenticize URL, e.g. `https://auth.example.com` |
 
-  If Sliplane doesn't expose build args for your plan, hard-code these three as the
-  `ARG` defaults in `apps/web/Dockerfile` (they're public). `VITE_API_BASE_URL` **must**
-  be set to the real API URL before the build, or the SPA will call the wrong host.
+  If Sliplane doesn't expose build args for your plan, hard-code these as the `ARG`
+  defaults in `apps/web/Dockerfile` (they're public). Both **must** be set to the
+  real URLs before the build, or the SPA calls the wrong hosts.
 
 - After deploy, note the web URL (e.g. `https://sentire-books-web.sliplane.app`).
 
 ---
 
-## 5. Point Supabase Auth at the new web origin
+## 5. Wire up Authenticize
 
-Supabase still handles login; it just needs to trust the new URL.
+Authenticize (your Better Auth / OIDC server) is deployed as its own Sliplane
+service with its own Postgres. In its **admin dashboard → Apps**, register Sentire
+Books, then trust the web origin so the cross-origin login works:
 
-- **Supabase → Authentication → URL Configuration:**
-  - **Site URL:** `https://<your-web-service>.sliplane.app`
-  - **Redirect URLs:** add `https://<your-web-service>.sliplane.app/**` (keep
-    `http://localhost:5173/**` for local dev).
-- Google/Microsoft provider settings don't change — SSO redirects to Supabase, which
-  redirects back to an allow-listed app URL.
-- Confirm `CORS_ORIGIN` on the API (step 3) includes the exact web origin.
+- **Register an app** for Sentire Books (a public/SPA client is fine). Its redirect
+  URI isn't used by the keep-our-form flow, but registering the app also trusts its
+  origin.
+- **`TRUSTED_ORIGINS`** on the Authenticize service must include the Sentire web
+  origin (comma-separated), e.g. `https://books.example.com`.
+- **`COOKIE_DOMAIN`** on Authenticize = your shared root, e.g. `.example.com`, so the
+  session cookie is readable by the app subdomain.
+- **Google SSO** is configured on **Authenticize** (`GOOGLE_CLIENT_ID` /
+  `GOOGLE_CLIENT_SECRET`) — not in the app. (Microsoft isn't wired in Authenticize
+  yet; the Microsoft button will show a friendly "not enabled" message until it is.)
+- Confirm the API's `CORS_ORIGIN` (step 3) includes the exact web origin, and that
+  `AUTH_JWKS_URL` / `AUTH_ISSUER` point at Authenticize.
 
 ---
 
 ## 6. Bootstrap your admin (after first sign-in)
 
-Because the app DB is no longer inside Supabase, map your admin by **UID** rather than
-joining `auth.users`:
+Users are **invited from the Authenticize dashboard** (it's invite-only). Then map
+that user to your org by their Authenticize **user ID** (a string, not a UUID):
 
-1. Sign in once at your web URL (creates the Supabase auth user).
-2. **Supabase → Authentication → Users** → copy your user's **UID**.
+1. In the Authenticize dashboard, create your user (or accept the invite) and sign in
+   once at the Sentire web URL.
+2. Copy your **user ID** from the Authenticize dashboard → Users.
 3. Run against the DB as the owner/superuser:
    ```sql
    INSERT INTO app_users (id, org_id, email, full_name, role)
    VALUES (
-     '<your-supabase-uid>',
-     'a0000000-0000-0000-0000-000000000001',  -- the org id from setup
+     '<your-authenticize-user-id>',                 -- e.g. 'aBcd1234...'
+     'a0000000-0000-0000-0000-000000000001',        -- the org id from setup
      'you@example.com',
      'Your Name',
      'admin'
@@ -185,8 +192,9 @@ joining `auth.users`:
 - `GET /health` on the API returns ok.
 - Sign in with **company code + email** (and Google/Microsoft once enabled).
 - Post a journal entry; open Reports (trial balance balances); create a contact.
-- Optional: point a **custom domain** in Sliplane at the web (and API) services, then
-  update `VITE_API_BASE_URL`, `CORS_ORIGIN`, and the Supabase redirect URLs to match.
+- Optional: point **custom domains** at web + API + Authenticize (on one shared root),
+  then update `VITE_API_BASE_URL`, `VITE_AUTH_URL`, `CORS_ORIGIN`, Authenticize's
+  `TRUSTED_ORIGINS`/`COOKIE_DOMAIN`, and the registered app to match.
 - Once green, **delete the Render services**. `render.yaml` can stay in the repo
   (harmless) or be removed.
 
@@ -196,45 +204,30 @@ want the same "merge → deploy" flow you had on Render.
 
 ---
 
-## 8. If you *really* want zero Supabase
-
-Dropping Supabase entirely means replacing **Auth**, which is a separate project, not a
-config change. Two routes:
-
-1. **Self-host Supabase Auth (GoTrue)** as another Sliplane container + configure the
-   Google/Microsoft OAuth apps against it, and repoint `AUTH_JWKS_URL`/`AUTH_ISSUER` +
-   `VITE_SUPABASE_URL` at it. Most faithful (the app code barely changes) but you now
-   operate an auth server.
-2. **Swap providers** (e.g. Auth0, Clerk, Keycloak, Ory). The API already verifies any
-   standard JWKS/OIDC issuer, so this is mostly reconfiguration plus wiring the web
-   login UI to the new SDK.
-
-Recommendation: **don't** — keep Supabase Auth. It's free at this scale, the JWKS/JWT
-chain is already built and hardened, and it keeps the migration to "lift the compute
-and data onto Sliplane" instead of "rebuild login."
-
----
-
 ## Reference — environment variables at a glance
 
-**`sentire-books-db`** (Postgres container): `POSTGRES_USER=postgres`,
-`POSTGRES_PASSWORD=…`, `POSTGRES_DB=sentire_books` + a volume at
-`/var/lib/postgresql/data`.
+**Postgres** (Sliplane managed or `postgres:16`): DB `sentire_books`; owner/superuser
+for setup, and the non-superuser `sentire_books_app` role for the API.
 
 **`sentire-books-api`** (runtime env):
 ```
 DATABASE_URL=postgres://sentire_books_app:<APP_PW>@<db-host>:<port>/sentire_books?sslmode=no-verify
-AUTH_JWKS_URL=https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1/.well-known/jwks.json
-AUTH_ISSUER=https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1
-CORS_ORIGIN=https://<web>.sliplane.app,http://localhost:5173
+AUTH_JWKS_URL=<AUTHENTICIZE_URL>/api/auth/jwks
+AUTH_ISSUER=<AUTHENTICIZE_URL>
+CORS_ORIGIN=https://<web-origin>,http://localhost:5173
 PORT=8787
 ```
 
 **`sentire-books-web`** (build args, baked into the bundle):
 ```
-VITE_API_BASE_URL=https://<api>.sliplane.app
-VITE_SUPABASE_URL=https://mqsdymealtdrzmbnvvoc.supabase.co
-VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_roR2UnE41AKs4Qwb8fQuKQ_nHp8EgKD
+VITE_API_BASE_URL=https://<api-origin>
+VITE_AUTH_URL=<AUTHENTICIZE_URL>
 ```
 
-Secrets (DB passwords) live **only** in the Sliplane dashboard — never in the repo.
+**Authenticize** (its own service — see its `.env.example`): `BETTER_AUTH_SECRET`,
+`BETTER_AUTH_URL=<AUTHENTICIZE_URL>`, its own `DATABASE_URL`, `ADMIN_EMAILS`,
+`TRUSTED_ORIGINS=<web-origin>`, `COOKIE_DOMAIN=.<root-domain>`, and `GOOGLE_CLIENT_ID`
+/`GOOGLE_CLIENT_SECRET` for Google SSO.
+
+Secrets (DB passwords, `BETTER_AUTH_SECRET`, OAuth secrets) live **only** in the
+Sliplane dashboard — never in the repo.
