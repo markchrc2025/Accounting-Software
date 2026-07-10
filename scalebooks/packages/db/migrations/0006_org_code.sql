@@ -32,4 +32,4 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public STABLE AS $$
   WHERE u.id = p_uid
 $$;
 REVOKE ALL ON FUNCTION get_user_context(uuid) FROM public;
-GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO scalebooks_app;
+GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO sentire_books_app;

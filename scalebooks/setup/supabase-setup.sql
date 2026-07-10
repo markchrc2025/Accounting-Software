@@ -5,7 +5,7 @@
 -- functions, and seed data.
 --
 -- BEFORE RUNNING, edit the two lines marked  -- EDIT  in the BOOTSTRAP section:
---   1) the scalebooks_app role password
+--   1) the sentire_books_app role password
 --   2) your company name AND your company code (the tenant ID users type at login)
 -- Run this file ONCE (re-running errors on already-existing types/tables).
 --
@@ -220,8 +220,8 @@ CREATE TRIGGER trg_line_immutable
 -- Connection model:
 --   • migrations + seed run as the table OWNER → exempt from RLS (we do NOT FORCE),
 --     so bootstrapping organizations/users/accounts works.
---   • the API connects as the non-owner role `scalebooks_app` → subject to RLS.
--- Point the app's DATABASE_URL at scalebooks_app in production.
+--   • the API connects as the non-owner role `sentire_books_app` → subject to RLS.
+-- Point the app's DATABASE_URL at sentire_books_app in production.
 
 -- Reads `app.current_org_id`; NULL when unset → policies deny by default.
 CREATE OR REPLACE FUNCTION current_org_id() RETURNS uuid
@@ -239,20 +239,20 @@ $$;
 REVOKE ALL ON FUNCTION get_user_context(uuid) FROM public;
 
 -- Application role (subject to RLS). Grant it to your login role in deployment:
---   GRANT scalebooks_app TO <login_role>;
+--   GRANT sentire_books_app TO <login_role>;
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'scalebooks_app') THEN
-    CREATE ROLE scalebooks_app NOLOGIN;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sentire_books_app') THEN
+    CREATE ROLE sentire_books_app NOLOGIN;
   END IF;
 END $$;
 
-GRANT USAGE ON SCHEMA public TO scalebooks_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO scalebooks_app;
+GRANT USAGE ON SCHEMA public TO sentire_books_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sentire_books_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO scalebooks_app;
-GRANT EXECUTE ON FUNCTION current_org_id() TO scalebooks_app;
-GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO scalebooks_app;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sentire_books_app;
+GRANT EXECUTE ON FUNCTION current_org_id() TO sentire_books_app;
+GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO sentire_books_app;
 
 -- ── Enable RLS + org-isolation policies ─────────────────────────────────────
 ALTER TABLE organizations     ENABLE ROW LEVEL SECURITY;
@@ -295,7 +295,7 @@ CREATE POLICY org_isolation ON journal_lines
 -- Reporting views — trial balance & profit-and-loss source data.
 -- ════════════════════════════════════════════════════════════════════════════
 -- security_invoker = true so Row-Level Security on the base tables applies to the
--- querying role (the API's scalebooks_app + its org context). Requires PostgreSQL 15+.
+-- querying role (the API's sentire_books_app + its org context). Requires PostgreSQL 15+.
 
 -- One row per POSTED journal line, flattened with its entry + account metadata.
 CREATE OR REPLACE VIEW v_account_postings
@@ -331,7 +331,7 @@ SELECT
 FROM v_account_postings
 GROUP BY org_id, account_id, account_code, account_name, account_type;
 
-GRANT SELECT ON v_account_postings, v_trial_balance TO scalebooks_app;
+GRANT SELECT ON v_account_postings, v_trial_balance TO sentire_books_app;
 
 -- ───────────────────────────── 0003_contacts.sql ─────────────────────────────
 -- ════════════════════════════════════════════════════════════════════════════
@@ -360,7 +360,7 @@ CREATE POLICY org_isolation ON contacts
   USING (org_id = current_org_id())
   WITH CHECK (org_id = current_org_id());
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON contacts TO scalebooks_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON contacts TO sentire_books_app;
 
 -- ───────────────────────────── 0004_vouchers.sql ─────────────────────────────
 -- ════════════════════════════════════════════════════════════════════════════
@@ -397,7 +397,7 @@ CREATE POLICY org_isolation ON vouchers
   USING (org_id = current_org_id())
   WITH CHECK (org_id = current_org_id());
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON vouchers TO scalebooks_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON vouchers TO sentire_books_app;
 
 -- ───────────────────────────── 0005_accounts_extend.sql ─────────────────────────────
 -- Extend accounts for a real-world chart: hierarchy, subtype, description, normal
@@ -436,14 +436,14 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public STABLE AS $$
   WHERE u.id = p_uid
 $$;
 REVOKE ALL ON FUNCTION get_user_context(uuid) FROM public;
-GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO scalebooks_app;
+GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO sentire_books_app;
 
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════
 
 -- 1) Give the RLS-bound app role a login. The API connects to the DB as this role.
-ALTER ROLE scalebooks_app WITH LOGIN PASSWORD 'CHANGE_ME_app_password';        -- EDIT
+ALTER ROLE sentire_books_app WITH LOGIN PASSWORD 'CHANGE_ME_app_password';        -- EDIT
 
 -- 2) Your organization. Pick a short COMPANY CODE (tenant ID) your users type at
 --    login — letters/digits, e.g. ACMEFOODS. Keep the id as-is (referenced below).

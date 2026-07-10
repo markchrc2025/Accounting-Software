@@ -1,7 +1,7 @@
 /**
  * Integration tests — exercise the real Postgres triggers, RLS, and report views.
  * Skipped unless DATABASE_URL is set (CI provides a Postgres service + seed).
- * Run as the `scalebooks_app` role so RLS is actually enforced.
+ * Run as the `sentire_books_app` role so RLS is actually enforced.
  */
 import { describe, it, expect, beforeAll } from "vitest";
 import { sql, eq, inArray } from "drizzle-orm";

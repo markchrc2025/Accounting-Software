@@ -24,4 +24,4 @@ CREATE POLICY org_isolation ON contacts
   USING (org_id = current_org_id())
   WITH CHECK (org_id = current_org_id());
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON contacts TO scalebooks_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON contacts TO sentire_books_app;
