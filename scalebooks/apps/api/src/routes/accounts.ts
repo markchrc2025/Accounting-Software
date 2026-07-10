@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { ZodError } from "zod";
 import { and, asc, eq } from "drizzle-orm";
-import { zAccountInput, normalBalanceFor } from "@scalebooks/domain";
+import { zAccountInput, zImportAccounts, normalBalanceFor } from "@scalebooks/domain";
 import { withOrgContext, accounts } from "@scalebooks/db";
 import { requireAuth } from "../auth";
 
@@ -68,6 +68,79 @@ accountRoutes.post("/", async (c) => {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
     console.error("[createAccount]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Bulk-import a chart of accounts (admin only) — e.g. from an uploaded Excel that
+// the web app parsed into rows. Idempotent: existing accounts (by name) are
+// skipped, and the parent hierarchy is resolved by name in the same transaction.
+accountRoutes.post("/import", async (c) => {
+  const auth = c.get("auth");
+  if (auth.role !== "admin") {
+    return c.json({ error: "forbidden", detail: "Admin role required" }, 403);
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+
+  try {
+    const { accounts: rows } = zImportAccounts.parse(body);
+    // De-dupe within the upload by name (name is the org-unique key).
+    const byName = new Map(rows.map((r) => [r.name, r]));
+    const unique = [...byName.values()];
+
+    const result = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const inserted = await tx
+          .insert(accounts)
+          .values(
+            unique.map((a) => ({
+              orgId: auth.orgId,
+              code: a.code,
+              name: a.name,
+              type: a.type,
+              subtype: a.subtype ?? null,
+              description: a.description ?? null,
+              normalBalance: a.normalBalance ?? normalBalanceFor(a.type),
+            })),
+          )
+          .onConflictDoNothing({ target: [accounts.orgId, accounts.name] })
+          .returning({ id: accounts.id });
+
+        // Resolve parents by name (accounts just inserted + any pre-existing).
+        const all = await tx
+          .select({ id: accounts.id, name: accounts.name })
+          .from(accounts)
+          .where(eq(accounts.orgId, auth.orgId));
+        const idByName = new Map(all.map((r) => [r.name, r.id]));
+
+        let linked = 0;
+        for (const a of unique) {
+          if (!a.parentName) continue;
+          const parentId = idByName.get(a.parentName);
+          if (!parentId || !idByName.has(a.name)) continue;
+          await tx
+            .update(accounts)
+            .set({ parentId })
+            .where(and(eq(accounts.orgId, auth.orgId), eq(accounts.name, a.name)));
+          linked++;
+        }
+        return { inserted: inserted.length, total: unique.length, linked };
+      },
+    );
+
+    return c.json({ ...result, skipped: result.total - result.inserted }, 200);
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_error", issues: err.issues }, 400);
+    }
+    console.error("[importAccounts]", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

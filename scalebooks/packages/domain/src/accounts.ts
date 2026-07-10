@@ -28,6 +28,29 @@ export const zAccountInput = z.object({
 
 export type AccountInput = z.infer<typeof zAccountInput>;
 
+/**
+ * A single account row from a Chart-of-Accounts import (e.g. an uploaded Excel).
+ * More lenient than zAccountInput: codes are freeform display labels (real charts
+ * use things like "DO101"), parents are referenced by name, and the normal
+ * balance is optional (derived from the type when absent).
+ */
+export const zImportAccount = z.object({
+  code: z.string().trim().max(40).default(""),
+  name: z.string().trim().min(1, "Account name is required").max(160),
+  type: z.enum(ACCOUNT_TYPES),
+  subtype: z.string().trim().max(120).optional(),
+  description: z.string().trim().max(2000).optional(),
+  normalBalance: z.enum(["debit", "credit"]).optional(),
+  parentName: z.string().trim().max(160).optional(),
+});
+export type ImportAccount = z.infer<typeof zImportAccount>;
+
+/** Payload for POST /accounts/import — up to 5000 rows at a time. */
+export const zImportAccounts = z.object({
+  accounts: z.array(zImportAccount).min(1, "No accounts to import").max(5000),
+});
+export type ImportAccounts = z.infer<typeof zImportAccounts>;
+
 export interface ChartAccount {
   /** Display label. Real charts reuse codes across types, so it is NOT unique. */
   code: string;
