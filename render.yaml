@@ -13,7 +13,7 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      # Supabase transaction-pooler URL as the scalebooks_app role (has the
+      # Supabase transaction-pooler URL as the sentire_books_app role (has the
       # password) — set in the dashboard, never commit it.
       - key: DATABASE_URL
         sync: false

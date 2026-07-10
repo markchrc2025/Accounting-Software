@@ -2,7 +2,7 @@
 -- Reporting views — trial balance & profit-and-loss source data.
 -- ════════════════════════════════════════════════════════════════════════════
 -- security_invoker = true so Row-Level Security on the base tables applies to the
--- querying role (the API's scalebooks_app + its org context). Requires PostgreSQL 15+.
+-- querying role (the API's sentire_books_app + its org context). Requires PostgreSQL 15+.
 
 -- One row per POSTED journal line, flattened with its entry + account metadata.
 CREATE OR REPLACE VIEW v_account_postings
@@ -38,4 +38,4 @@ SELECT
 FROM v_account_postings
 GROUP BY org_id, account_id, account_code, account_name, account_type;
 
-GRANT SELECT ON v_account_postings, v_trial_balance TO scalebooks_app;
+GRANT SELECT ON v_account_postings, v_trial_balance TO sentire_books_app;

@@ -70,10 +70,10 @@ a static Vite build (host on Cloudflare Pages / Vercel / Netlify).
    ```bash
    for f in packages/db/migrations/*.sql; do psql "$DATABASE_URL_DIRECT" -f "$f"; done
    # give the RLS-bound app role a login (choose a strong password):
-   psql "$DATABASE_URL_DIRECT" -c "ALTER ROLE scalebooks_app WITH LOGIN PASSWORD '...';"
+   psql "$DATABASE_URL_DIRECT" -c "ALTER ROLE sentire_books_app WITH LOGIN PASSWORD '...';"
    ```
    The API's `DATABASE_URL` then connects through the **transaction pooler** as
-   `scalebooks_app` (subject to RLS); migrations/seed use the **direct** owner URL.
+   `sentire_books_app` (subject to RLS); migrations/seed use the **direct** owner URL.
 
 2. **Auth:** enable **Authentication → Providers → Google**, and add your web app's
    origin to **URL Configuration → Redirect URLs**. The API verifies tokens via

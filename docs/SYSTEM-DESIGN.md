@@ -141,7 +141,7 @@ The current system replaces a legacy Firebase/Firestore app (`workscale-finance/
 |---|---|---|
 | **NFR-INT-1** Ledger integrity | Balance + append-only enforced **in Postgres** (deferred constraint triggers, immutability triggers, CHECK constraints) — survives any app bug. ✅ |
 | **NFR-INT-2** Money precision | Integer centavos everywhere; no floats in any money path. ✅ |
-| **NFR-SEC-1** Tenant isolation | Postgres RLS on every org table, deny-by-default (`app.current_org_id` GUC per transaction); API connects as non-owner `scalebooks_app` so RLS always applies. A forgotten `WHERE org_id` cannot leak data. ✅ |
+| **NFR-SEC-1** Tenant isolation | Postgres RLS on every org table, deny-by-default (`app.current_org_id` GUC per transaction); API connects as non-owner `sentire_books_app` so RLS always applies. A forgotten `WHERE org_id` cannot leak data. ✅ |
 | **NFR-SEC-2** Authentication | Asymmetric JWT verification (JWKS, ES256) — no shared secrets in the API; org/role resolved from DB, never from claims. ✅ |
 | **NFR-SEC-3** Secrets hygiene | DB credentials only in Render env vars; publishable Supabase key is the only key shipped to browsers; `AUTH_DEV_BYPASS` is local-only — and structurally inert in production: the bypass path is only reachable when **no** `AUTH_JWKS_URL` is configured, so with JWKS set the header is ignored entirely. ✅ |
 | **NFR-SEC-4** Least privilege | Coarse role gates on writes today; full approval-chain RBAC 🔜. |
@@ -180,7 +180,7 @@ flowchart LR
     AUTH -- "federated OAuth" --> IDP
     SPA -- "2 · REST + Bearer JWT<br/>(CORS allow-listed)" --> API
     API -- "3 · JWKS fetch (verify sig)" --> AUTH
-    API -- "4 · SQL as scalebooks_app<br/>via transaction pooler :6543<br/>withOrgContext → RLS" --> PG
+    API -- "4 · SQL as sentire_books_app<br/>via transaction pooler :6543<br/>withOrgContext → RLS" --> PG
 
     CI["GitHub Actions CI<br/>typecheck · tests · migrations<br/>RLS-enforced integration tests"] -. "gates every merge" .-> Render
 ```
@@ -225,7 +225,7 @@ sequenceDiagram
 Key properties:
 
 - **The company code is a workspace gate, not a security boundary.** Even if the client check were bypassed, `get_user_context` resolves the caller's *own* org and RLS confines every query to it. Isolation never depends on client input.
-- **Two DB roles:** migrations/seed run as the table **owner** (RLS-exempt, direct :5432); the API runs as **`scalebooks_app`** (RLS-bound, pooler :6543, `prepare:false`). Production `DATABASE_URL` must always point at `scalebooks_app`.
+- **Two DB roles:** migrations/seed run as the table **owner** (RLS-exempt, direct :5432); the API runs as **`sentire_books_app`** (RLS-bound, pooler :6543, `prepare:false`). Production `DATABASE_URL` must always point at `sentire_books_app`.
 - **Availability bias:** a transient `/auth/me` failure never destroys a valid session; only a definitive 401/403 or code mismatch signs out. Background token refreshes never re-block the UI.
 - **Local dev:** the API accepts an `x-user-id` header only when `AUTH_JWKS_URL` is unset **and** `AUTH_DEV_BYPASS=true`; once JWKS is configured (production), the bypass path is unreachable regardless of the flag.
 
@@ -288,8 +288,8 @@ Error contract: `400 validation_error` (Zod issues) · `401 unauthenticated` · 
 
 | Environment | Web | API | Database / Auth |
 |---|---|---|---|
-| **Production** | Render static `scalebooks-web` (SPA rewrite `/* → /index.html`) | Render Node `scalebooks-api`, Singapore, Starter plan, `/health` checks, auto-deploy from `main` | Supabase project (Sydney): Postgres via transaction pooler as `scalebooks_app`; Auth with Google (+ Microsoft when enabled) |
-| **CI** | build only | integration tests **as `scalebooks_app`** (RLS on) | ephemeral `postgres:16` service; migrations applied by glob |
+| **Production** | Render static `scalebooks-web` (SPA rewrite `/* → /index.html`) | Render Node `scalebooks-api`, Singapore, Starter plan, `/health` checks, auto-deploy from `main` | Supabase project (Sydney): Postgres via transaction pooler as `sentire_books_app`; Auth with Google (+ Microsoft when enabled) |
+| **CI** | build only | integration tests **as `sentire_books_app`** (RLS on) | ephemeral `postgres:16` service; migrations applied by glob |
 | **Local dev** | Vite :5173 | :8787, `AUTH_DEV_BYPASS` header flow | any Postgres; no IdP needed |
 
 Config is env-driven (`DATABASE_URL`, `AUTH_JWKS_URL`, `AUTH_ISSUER`, `CORS_ORIGIN`, `VITE_API_BASE_URL`, `VITE_SUPABASE_*`); secrets live only in the Render dashboard. First-time tenant provisioning is a one-paste `setup/supabase-setup.sql` (schema + triggers + RLS + views + org & company code + 158-account chart + admin mapping).

@@ -34,7 +34,7 @@ How to run the whole stack — **web + API + PostgreSQL** — as Docker containe
 - Your Supabase project kept alive (Auth only). Note its ref: `mqsdymealtdrzmbnvvoc`.
 - Decide two passwords up front:
   - **DB superuser** password (`postgres` role) — for migrations/admin.
-  - **App role** password (`scalebooks_app`) — what the API connects with.
+  - **App role** password (`sentire_books_app`) — what the API connects with.
 
 The repo already contains everything Sliplane needs to build:
 - `scalebooks/apps/api/Dockerfile` — the API image.
@@ -47,27 +47,25 @@ workspace root), and the Dockerfile path as noted below.
 
 ---
 
-## 1. Create the database service (`scalebooks-db`)
+## 1. The database
 
-Create a service from the **Postgres** image (Sliplane marketplace, or a plain
-`postgres:16` Docker image).
+**If you use Sliplane's managed Postgres** (recommended — one click), you already
+have a connection URL like:
+```
+postgres://owner:<PW>@<host>:<port>/sentire_books?sslmode=no-verify
+```
+That `owner` role is the DB **superuser** — use it only to load the schema and for
+admin. The API must **never** connect as `owner`: a superuser bypasses Row-Level
+Security, which would defeat tenant isolation. In step 2 you create a separate,
+non-superuser `sentire_books_app` role for the API. The `?sslmode=no-verify` is
+handled by the API's DB client (it maps to an encrypted, non-verifying TLS
+connection).
 
-- **Image:** `postgres:16`
-- **Volume (required — or you lose data on redeploy):** mount a persistent volume
-  at `/var/lib/postgresql/data`.
-- **Port:** `5432` — keep it **internal** (do not expose publicly, except the
-  temporary window in step 2).
-- **Environment:**
-
-  | Key | Value |
-  |---|---|
-  | `POSTGRES_USER` | `postgres` |
-  | `POSTGRES_PASSWORD` | *your DB superuser password* |
-  | `POSTGRES_DB` | `scalebooks` |
-
-Note the service's **internal hostname** (Sliplane shows it — typically the service
-name, e.g. `scalebooks-db`). The API reaches the DB at that host on the private
-network.
+**If you run your own `postgres:16` container instead:** mount a persistent volume
+at `/var/lib/postgresql/data` (or you lose data on redeploy), set `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `POSTGRES_DB=sentire_books`, and keep port `5432` internal.
+Note the service's internal hostname (typically the service name, e.g.
+`sentire-books-db`) — the API reaches the DB there on the private network.
 
 ---
 
@@ -77,60 +75,63 @@ The schema is plain SQL and runs on any Postgres 15+. There is no data to migrat
 
 1. **Edit the bootstrap values** in `scalebooks/setup/supabase-setup.sql` (three
    `-- EDIT` spots):
-   - `ALTER ROLE scalebooks_app WITH LOGIN PASSWORD '…'` → your **app role** password.
+   - `ALTER ROLE sentire_books_app WITH LOGIN PASSWORD '…'` → your **app role** password.
    - the `organizations` insert → your **company name** and **company code**
      (the tenant ID users type at login, e.g. `SENTIRE`).
-2. **Run it against the Sliplane DB.** Easiest: temporarily give `scalebooks-db` a
-   public port in Sliplane, then from your laptop:
+2. **Run it against your DB as the owner/superuser** (the `owner` URL from Sliplane's
+   managed Postgres, or `postgres` for your own container):
    ```bash
-   psql "postgresql://postgres:<DB_SUPERUSER_PW>@<public-host>:<public-port>/scalebooks" \
+   psql "postgres://owner:<PW>@<host>:<port>/sentire_books?sslmode=no-verify" \
      -f scalebooks/setup/supabase-setup.sql
-   # then REMOVE the public port again in Sliplane.
    ```
-   (Alternative: open a shell/console on the `scalebooks-db` service and pipe the
-   file into `psql -U postgres -d scalebooks`.)
+   (Sliplane's managed Postgres URL is already publicly reachable, so you can run this
+   straight from your laptop. For a self-hosted container, temporarily expose port
+   5432 or use the service console, then close it again.)
 
 This creates the schema, ledger-integrity triggers, RLS, reporting views, the
-`scalebooks_app` login role, your organization + company code, and the 158-account
-default chart. It runs as the `postgres` **owner**, which is exempt from RLS — exactly
-how the API's non-owner `scalebooks_app` role is *not*.
+`sentire_books_app` login role, your organization + company code, and the 158-account
+default chart. It runs as the **owner/superuser**, which is exempt from RLS — exactly
+how the API's non-superuser `sentire_books_app` role is *not*.
 
 > The setup file's final admin block is Supabase-specific (`FROM auth.users`) and is
 > **commented out** — leave it. You'll map your admin in step 6 by UID instead.
 
 ---
 
-## 3. Create the API service (`scalebooks-api`)
+## 3. Create the API service (`sentire-books-api`)
 
 - **Dockerfile:** `apps/api/Dockerfile` · **Build context:** `scalebooks` · **Port:** `8787`
 - **Environment:**
 
   | Key | Value |
   |---|---|
-  | `DATABASE_URL` | `postgresql://scalebooks_app:<APP_PW>@<db-internal-host>:5432/scalebooks` |
+  | `DATABASE_URL` | `postgres://sentire_books_app:<APP_PW>@<db-host>:<port>/sentire_books?sslmode=no-verify` |
   | `AUTH_JWKS_URL` | `https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1/.well-known/jwks.json` |
   | `AUTH_ISSUER` | `https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1` |
   | `CORS_ORIGIN` | `https://<your-web-service>.sliplane.app,http://localhost:5173` |
   | `PORT` | `8787` (optional; matches the service port) |
 
-  Do **not** set `AUTH_DEV_BYPASS` — it's local-only and, once `AUTH_JWKS_URL` is set,
-  is structurally unreachable anyway.
+  Keep `?sslmode=no-verify` if your host requires TLS (Sliplane's managed Postgres
+  does); drop it for a plain internal container connection. Do **not** set
+  `AUTH_DEV_BYPASS` — it's local-only and, once `AUTH_JWKS_URL` is set, is
+  structurally unreachable anyway.
 
-- Connect it as the **RLS-bound `scalebooks_app` role** — never as `postgres`. That is
-  what makes Row-Level Security actually enforce tenant isolation.
-- After deploy, note the API URL (e.g. `https://scalebooks-api.sliplane.app`) and
-  smoke-test: `curl https://scalebooks-api.sliplane.app/health` → `{"ok":true,…}`.
+- Connect it as the **RLS-bound `sentire_books_app` role** — never as the `owner`/
+  `postgres` superuser. Only a non-superuser role is subject to RLS; that is what
+  actually enforces tenant isolation.
+- After deploy, note the API URL (e.g. `https://sentire-books-api.sliplane.app`) and
+  smoke-test: `curl https://sentire-books-api.sliplane.app/health` → `{"ok":true,…}`.
 
 ---
 
-## 4. Create the web service (`scalebooks-web`)
+## 4. Create the web service (`sentire-books-web`)
 
 - **Dockerfile:** `apps/web/Dockerfile` · **Build context:** `scalebooks` · **Port:** `80`
 - **Build arguments** (Vite inlines these at build time — all are public/safe):
 
   | Build arg | Value |
   |---|---|
-  | `VITE_API_BASE_URL` | your API URL from step 3, e.g. `https://scalebooks-api.sliplane.app` |
+  | `VITE_API_BASE_URL` | your API URL from step 3, e.g. `https://sentire-books-api.sliplane.app` |
   | `VITE_SUPABASE_URL` | `https://mqsdymealtdrzmbnvvoc.supabase.co` |
   | `VITE_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_roR2UnE41AKs4Qwb8fQuKQ_nHp8EgKD` |
 
@@ -138,7 +139,7 @@ how the API's non-owner `scalebooks_app` role is *not*.
   `ARG` defaults in `apps/web/Dockerfile` (they're public). `VITE_API_BASE_URL` **must**
   be set to the real API URL before the build, or the SPA will call the wrong host.
 
-- After deploy, note the web URL (e.g. `https://scalebooks-web.sliplane.app`).
+- After deploy, note the web URL (e.g. `https://sentire-books-web.sliplane.app`).
 
 ---
 
@@ -163,7 +164,7 @@ joining `auth.users`:
 
 1. Sign in once at your web URL (creates the Supabase auth user).
 2. **Supabase → Authentication → Users** → copy your user's **UID**.
-3. Run against the Sliplane DB (as `postgres`):
+3. Run against the DB as the owner/superuser:
    ```sql
    INSERT INTO app_users (id, org_id, email, full_name, role)
    VALUES (
@@ -216,20 +217,20 @@ and data onto Sliplane" instead of "rebuild login."
 
 ## Reference — environment variables at a glance
 
-**`scalebooks-db`** (Postgres container): `POSTGRES_USER=postgres`,
-`POSTGRES_PASSWORD=…`, `POSTGRES_DB=scalebooks` + a volume at
+**`sentire-books-db`** (Postgres container): `POSTGRES_USER=postgres`,
+`POSTGRES_PASSWORD=…`, `POSTGRES_DB=sentire_books` + a volume at
 `/var/lib/postgresql/data`.
 
-**`scalebooks-api`** (runtime env):
+**`sentire-books-api`** (runtime env):
 ```
-DATABASE_URL=postgresql://scalebooks_app:<APP_PW>@<db-internal-host>:5432/scalebooks
+DATABASE_URL=postgres://sentire_books_app:<APP_PW>@<db-host>:<port>/sentire_books?sslmode=no-verify
 AUTH_JWKS_URL=https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1/.well-known/jwks.json
 AUTH_ISSUER=https://mqsdymealtdrzmbnvvoc.supabase.co/auth/v1
 CORS_ORIGIN=https://<web>.sliplane.app,http://localhost:5173
 PORT=8787
 ```
 
-**`scalebooks-web`** (build args, baked into the bundle):
+**`sentire-books-web`** (build args, baked into the bundle):
 ```
 VITE_API_BASE_URL=https://<api>.sliplane.app
 VITE_SUPABASE_URL=https://mqsdymealtdrzmbnvvoc.supabase.co

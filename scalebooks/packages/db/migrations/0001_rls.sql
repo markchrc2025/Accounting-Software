@@ -9,8 +9,8 @@
 -- Connection model:
 --   • migrations + seed run as the table OWNER → exempt from RLS (we do NOT FORCE),
 --     so bootstrapping organizations/users/accounts works.
---   • the API connects as the non-owner role `scalebooks_app` → subject to RLS.
--- Point the app's DATABASE_URL at scalebooks_app in production.
+--   • the API connects as the non-owner role `sentire_books_app` → subject to RLS.
+-- Point the app's DATABASE_URL at sentire_books_app in production.
 
 -- Reads `app.current_org_id`; NULL when unset → policies deny by default.
 CREATE OR REPLACE FUNCTION current_org_id() RETURNS uuid
@@ -28,20 +28,20 @@ $$;
 REVOKE ALL ON FUNCTION get_user_context(uuid) FROM public;
 
 -- Application role (subject to RLS). Grant it to your login role in deployment:
---   GRANT scalebooks_app TO <login_role>;
+--   GRANT sentire_books_app TO <login_role>;
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'scalebooks_app') THEN
-    CREATE ROLE scalebooks_app NOLOGIN;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sentire_books_app') THEN
+    CREATE ROLE sentire_books_app NOLOGIN;
   END IF;
 END $$;
 
-GRANT USAGE ON SCHEMA public TO scalebooks_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO scalebooks_app;
+GRANT USAGE ON SCHEMA public TO sentire_books_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sentire_books_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO scalebooks_app;
-GRANT EXECUTE ON FUNCTION current_org_id() TO scalebooks_app;
-GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO scalebooks_app;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sentire_books_app;
+GRANT EXECUTE ON FUNCTION current_org_id() TO sentire_books_app;
+GRANT EXECUTE ON FUNCTION get_user_context(uuid) TO sentire_books_app;
 
 -- ── Enable RLS + org-isolation policies ─────────────────────────────────────
 ALTER TABLE organizations     ENABLE ROW LEVEL SECURITY;
