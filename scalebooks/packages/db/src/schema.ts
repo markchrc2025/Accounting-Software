@@ -61,10 +61,11 @@ export const organizations = pgTable("organizations", {
 export const appUsers = pgTable(
   "app_users",
   {
-    // Primary key equals the auth provider's uid (Authenticize / Better Auth —
-    // an opaque string, not a UUID). Roles live here, resolved server-side per
-    // request — never trusted from a JWT claim.
-    id: text("id").primaryKey(),
+    // App-owned id (generated). Users are admitted by their verified EMAIL, not
+    // this id — Authenticize authenticates, Sentire owns the user allowlist.
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
     orgId: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),

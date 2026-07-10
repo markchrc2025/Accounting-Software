@@ -34,6 +34,7 @@ export async function withOrgContext<T>(
 }
 
 export interface ResolvedUser {
+  userId: string;
   orgId: string;
   role: UserRole;
   email: string;
@@ -43,14 +44,15 @@ export interface ResolvedUser {
 }
 
 /**
- * Resolve a user's org + role (and the org's code + name) from their auth uid,
- * bypassing RLS via the SECURITY DEFINER function. Returns null if the user is
- * not provisioned in any org.
+ * Resolve a user from their verified EMAIL against the app_users allowlist,
+ * bypassing RLS via the SECURITY DEFINER function. Returns null if the email is
+ * not on the allowlist (i.e. not provisioned in any org).
  */
-export async function getUserContext(uid: string): Promise<ResolvedUser | null> {
+export async function getUserContext(email: string): Promise<ResolvedUser | null> {
   const rows = (await db.execute(
-    sql`SELECT org_id, role, email, full_name, org_code, org_name FROM get_user_context(${uid}::text)`,
+    sql`SELECT user_id, org_id, role, email, full_name, org_code, org_name FROM get_user_context(${email}::text)`,
   )) as unknown as Array<{
+    user_id: string;
     org_id: string;
     role: UserRole;
     email: string;
@@ -61,6 +63,7 @@ export async function getUserContext(uid: string): Promise<ResolvedUser | null> 
   const r = rows[0];
   if (!r) return null;
   return {
+    userId: r.user_id,
     orgId: r.org_id,
     role: r.role,
     email: r.email,

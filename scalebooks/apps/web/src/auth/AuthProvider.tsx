@@ -80,6 +80,13 @@ interface AuthState {
     password: string,
     remember: boolean,
   ) => Promise<{ error: string | null; status: number | null }>;
+  signUp: (
+    companyCode: string,
+    email: string,
+    password: string,
+    fullName: string,
+    remember: boolean,
+  ) => Promise<{ error: string | null; status: number | null }>;
   signInGoogle: (companyCode: string, remember: boolean) => Promise<{ error: string | null }>;
   signInMicrosoft: (companyCode: string, remember: boolean) => Promise<{ error: string | null }>;
   resetPassword: (email: string) => Promise<{ error: string | null }>;
@@ -225,6 +232,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null, status: null };
   };
 
+  // Self-signup: the user creates their own credentials on Authenticize. Sentire
+  // still admits them only if an admin put their email on the workspace allowlist
+  // (get_user_context by email) — Authenticize authenticates, Sentire authorizes.
+  const signUp = async (
+    companyCode: string,
+    email: string,
+    password: string,
+    fullName: string,
+    remember: boolean,
+  ) => {
+    if (!authClient) return { error: "Auth is not configured.", status: null };
+    startSignIn(companyCode, remember);
+    const { error } = await authClient.signUp.email({
+      email: email.trim(),
+      password,
+      name: fullName.trim() || email.trim(),
+    });
+    if (error) {
+      clearPendingSignIn();
+      return { error: error.message ?? "Sign up failed.", status: error.status ?? null };
+    }
+    await establishSession(); // creates a session; workspace check gates admission
+    return { error: null, status: null };
+  };
+
   const signInSocial = async (
     provider: "google" | "microsoft",
     companyCode: string,
@@ -283,6 +315,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         authError,
         clearAuthError: () => setAuthError(null),
         signInPassword,
+        signUp,
         signInGoogle,
         signInMicrosoft,
         resetPassword,

@@ -4,6 +4,7 @@ import { ReportsPage } from "./pages/ReportsPage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { VouchersPage } from "./pages/VouchersPage";
 import { AccountsPage } from "./pages/AccountsPage";
+import { UsersPage } from "./pages/UsersPage";
 import { LoginPage } from "./auth/LoginPage";
 import { authEnabled, useAuth } from "./auth/AuthProvider";
 
@@ -39,6 +40,11 @@ function Nav() {
         <NavLink to="/accounts" className={({ isActive }) => link(isActive)}>
           Accounts
         </NavLink>
+        {org?.role === "admin" && (
+          <NavLink to="/users" className={({ isActive }) => link(isActive)}>
+            Users
+          </NavLink>
+        )}
       </nav>
       {authEnabled && (
         <div className="ml-auto flex items-center gap-3">
@@ -81,6 +87,7 @@ export function App() {
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/contacts" element={<ContactsPage />} />
         <Route path="/accounts" element={<AccountsPage />} />
+        <Route path="/users" element={<UsersPage />} />
         <Route path="*" element={<Navigate to="/journal" replace />} />
       </Routes>
     </div>

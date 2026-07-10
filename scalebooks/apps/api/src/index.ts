@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { authRoutes } from "./routes/auth";
+import { userRoutes } from "./routes/users";
 import { journalRoutes } from "./routes/journal";
 import { accountRoutes } from "./routes/accounts";
 import { reportRoutes } from "./routes/reports";
@@ -32,6 +33,7 @@ app.use(
 app.get("/health", (c) => c.json({ ok: true, service: "scalebooks-api" }));
 
 app.route("/auth", authRoutes);
+app.route("/users", userRoutes);
 app.route("/accounts", accountRoutes);
 app.route("/journal-entries", journalRoutes);
 app.route("/reports", reportRoutes);
