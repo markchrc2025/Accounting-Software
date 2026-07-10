@@ -1,25 +1,24 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { authClient, authEnabled, AUTH_URL } from "../lib/authClient";
 import { setAccessToken, setTokenRefresher, getMe, ApiError } from "../lib/api";
 
 /**
- * Auth + workspace state machine, backed by Authenticize (Better Auth / OIDC).
+ * Auth + workspace state, backed by Authenticize via the OIDC Authorization Code
+ * flow. Login is a full redirect handled by our API:
  *
- *   loading   → resolving the initial session
- *   anon      → no session; show the login screen
- *   verifying → have a session; fetching a JWT for our API and confirming the
- *               entered company code matches the user's org (GET /auth/me)
+ *   login()                → browser goes to <API>/auth/login
+ *   API redirects to Authenticize, user signs in there, comes back to the API
+ *   API hands us a JWT in the URL fragment (#token=…)
+ *
+ * We keep that token in memory (sessionStorage survives a refresh within the
+ * tab) and send it as `Authorization: Bearer`. The API verifies it via
+ * Authenticize's JWKS and admits the caller by email against the app_users
+ * allowlist. No cross-domain cookies are involved, so this works across
+ * separate *.sliplane.app hosts.
+ *
+ *   loading   → checking for a token (fragment or stored)
+ *   anon      → no token; show the "Sign in with Sentire" screen
+ *   verifying → have a token; confirming the workspace (GET /auth/me)
  *   ready     → verified; the app can render
- *
- * Login talks to Authenticize with the Better Auth client (email/password +
- * Google). Better Auth uses a session cookie; for our Bearer-token API we then
- * fetch a signed JWT from Authenticize's `/api/auth/token` endpoint and send it
- * as `Authorization: Bearer`. The API verifies it via Authenticize's JWKS.
- *
- * The company code (tenant ID) is required at login: sign-in stores the entered
- * code as `pending`, and once the session lands we compare it to the resolved
- * org. A mismatch — or the API rejecting the token — signs the user out. Data
- * isolation is enforced by Postgres RLS regardless; the code is a UX gate.
  */
 export type AuthPhase = "loading" | "anon" | "verifying" | "ready";
 
@@ -34,38 +33,48 @@ export interface AuthSession {
   user: { id: string; email: string };
 }
 
-const PENDING_KEY = "sb.pending_company";
-const REMEMBER_KEY = "sb.pending_remember";
-const WORKSPACE_KEY = "sb.workspace";
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
+const TOKEN_KEY = "sb.token";
 
-const normCode = (c: string) => c.trim().toUpperCase();
-const readLS = (k: string): string | null => {
+// Auth is on unless a dev user id is configured (local no-login bypass, paired
+// with the API's AUTH_DEV_BYPASS).
+export const authEnabled = !import.meta.env.VITE_DEV_USER_ID;
+
+const readSS = (k: string): string | null => {
   try {
-    return localStorage.getItem(k);
+    return sessionStorage.getItem(k);
   } catch {
     return null;
   }
 };
-const writeLS = (k: string, v: string | null) => {
+const writeSS = (k: string, v: string | null) => {
   try {
-    if (v === null) localStorage.removeItem(k);
-    else localStorage.setItem(k, v);
+    if (v === null) sessionStorage.removeItem(k);
+    else sessionStorage.setItem(k, v);
   } catch {
     /* storage unavailable — ignore */
   }
 };
 
-/** Exchange the Authenticize session cookie for a JWT our API can verify. */
-async function fetchApiToken(): Promise<string | null> {
-  if (!AUTH_URL) return null;
-  try {
-    const res = await fetch(`${AUTH_URL}/api/auth/token`, { credentials: "include" });
-    if (!res.ok) return null;
-    const body = (await res.json()) as { token?: string };
-    return body.token ?? null;
-  } catch {
-    return null;
+/** Human-readable copy for the error codes the API callback can hand back. */
+function mapCallbackError(code: string): string {
+  switch (code) {
+    case "management_account":
+      return "That account manages Authenticize itself and can't sign in to an app. Use your Sentire Books account instead.";
+    case "token_exchange_failed":
+    case "token_unreachable":
+      return "We couldn't complete sign-in with the identity provider. Please try again.";
+    case "access_denied":
+      return "Sign-in was cancelled.";
+    default:
+      return "Sign-in didn't complete. Please try again.";
   }
+}
+
+/** Send the browser through the API's OIDC login, returning here afterwards. */
+function redirectToLogin(): void {
+  const returnTo = window.location.pathname + window.location.search;
+  window.location.href = `${API_BASE}/auth/login?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
 interface AuthState {
@@ -74,23 +83,8 @@ interface AuthState {
   org: OrgContext | null;
   authError: string | null;
   clearAuthError: () => void;
-  signInPassword: (
-    companyCode: string,
-    email: string,
-    password: string,
-    remember: boolean,
-  ) => Promise<{ error: string | null; status: number | null }>;
-  signUp: (
-    companyCode: string,
-    email: string,
-    password: string,
-    fullName: string,
-    remember: boolean,
-  ) => Promise<{ error: string | null; status: number | null }>;
-  signInGoogle: (companyCode: string, remember: boolean) => Promise<{ error: string | null }>;
-  signInMicrosoft: (companyCode: string, remember: boolean) => Promise<{ error: string | null }>;
-  resetPassword: (email: string) => Promise<{ error: string | null }>;
-  signOut: () => Promise<void>;
+  login: () => void;
+  signOut: () => void;
 }
 
 const Ctx = createContext<AuthState | null>(null);
@@ -100,210 +94,84 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [phase, setPhase] = useState<AuthPhase>(authEnabled ? "loading" : "ready");
   const [org, setOrg] = useState<OrgContext | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
-  const verifySeq = useRef(0);
+  const started = useRef(false);
 
   useEffect(() => {
-    if (!authClient) return;
-    void establishSession();
-    // Re-fetch a fresh JWT whenever an API call 401s (the Better Auth session
-    // cookie outlives the short-lived JWT, so this is a silent refresh).
-    setTokenRefresher(fetchApiToken);
-    return () => setTokenRefresher(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!authEnabled || started.current) return;
+    started.current = true;
 
-  async function establishSession() {
-    if (!authClient) return;
-    try {
-      const { data } = await authClient.getSession();
-      const user = data?.user;
-      await handleSession(user ? { user: { id: user.id, email: user.email ?? "" } } : null);
-    } catch {
-      // Identity provider unreachable on load — fall back to the login screen
-      // rather than hanging on the splash.
-      await handleSession(null);
+    // On a 401, the token expired — bounce through the IdP (silent if the
+    // Authenticize SSO session is still valid) and come back with a fresh one.
+    setTokenRefresher(async () => {
+      redirectToLogin();
+      return null;
+    });
+
+    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+    const frag = new URLSearchParams(hash);
+    const hashToken = frag.get("token");
+    const hashError = frag.get("error");
+
+    if (hashToken || hashError) {
+      // Strip the fragment so the token/error doesn't linger in the URL bar.
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
-  }
 
-  async function forceSignedOut(message: string | null) {
-    try {
-      await authClient?.signOut();
-    } catch {
-      /* best-effort — force local state regardless */
-    }
-    writeLS(PENDING_KEY, null);
-    writeLS(REMEMBER_KEY, null);
-    setSession(null);
-    setOrg(null);
-    setAccessToken(null);
-    if (message) setAuthError(message);
-    setPhase("anon");
-  }
-
-  async function handleSession(next: AuthSession | null) {
-    if (!next) {
-      setSession(null);
-      setOrg(null);
-      setAccessToken(null);
+    if (hashError) {
+      setAuthError(mapCallbackError(hashError));
       setPhase("anon");
       return;
     }
-    setSession(next);
-    const seq = ++verifySeq.current;
-    setPhase("verifying");
 
-    const token = await fetchApiToken();
-    if (verifySeq.current !== seq) return;
+    const token = hashToken ?? readSS(TOKEN_KEY);
     if (!token) {
-      // Signed in with Authenticize but couldn't obtain an API token — without
-      // it the app can't call the API at all, so sign out and let them retry.
-      await forceSignedOut("We couldn't establish your session. Please try again.");
+      setPhase("anon");
       return;
     }
+    writeSS(TOKEN_KEY, token);
+    void verify(token);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function verify(token: string) {
     setAccessToken(token);
-
-    let me: Awaited<ReturnType<typeof getMe>> | null = null;
-    let rejected = false; // API said no (bad token / not provisioned) — not just unreachable
+    setPhase("verifying");
     try {
-      me = await getMe();
+      const me = await getMe();
+      setSession({ user: me.user });
+      setOrg({ id: me.org.id, name: me.org.name, code: me.org.code, role: me.role });
+      setAuthError(null);
+      setPhase("ready");
     } catch (err) {
-      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) rejected = true;
-      me = null;
-    }
-    if (verifySeq.current !== seq) return;
-
-    if (!me) {
-      if (rejected) {
-        await forceSignedOut("We couldn't verify your account for this workspace. Please sign in again.");
+      if (err instanceof ApiError && err.status === 403) {
+        // Authenticated by Authenticize, but not on this workspace's allowlist.
+        writeSS(TOKEN_KEY, null);
+        setAccessToken(null);
+        setAuthError(
+          "Your account isn't on this workspace's user list yet. Ask your admin to add you.",
+        );
+        setPhase("anon");
+      } else if (err instanceof ApiError && err.status === 401) {
+        // Token rejected/expired and no silent path — start over.
+        writeSS(TOKEN_KEY, null);
+        setAccessToken(null);
+        setPhase("anon");
       } else {
-        // Transient failure (API blip) — keep the session, render the app; RLS
-        // still scopes data. The next request retries the workspace check.
-        setPhase("ready");
+        // Transient (API unreachable) — keep the token, let the user retry.
+        setAuthError("We couldn't reach the server. Check your connection and try again.");
+        setPhase("anon");
       }
-      return;
     }
-
-    const pending = readLS(PENDING_KEY);
-    if (pending && normCode(pending) !== normCode(me.org.code)) {
-      await forceSignedOut(
-        `This account isn't part of workspace "${normCode(pending)}". Check the company code or contact your admin.`,
-      );
-      return;
-    }
-
-    const remember = readLS(REMEMBER_KEY) !== "0";
-    writeLS(PENDING_KEY, null);
-    writeLS(REMEMBER_KEY, null);
-    writeLS(WORKSPACE_KEY, remember ? me.org.code : null);
-
-    setOrg({ id: me.org.id, name: me.org.name, code: me.org.code, role: me.role });
-    setAuthError(null);
-    setPhase("ready");
   }
 
-  const startSignIn = (companyCode: string, remember: boolean) => {
-    setAuthError(null);
-    writeLS(PENDING_KEY, normCode(companyCode));
-    writeLS(REMEMBER_KEY, remember ? "1" : "0");
-  };
-  const clearPendingSignIn = () => {
-    writeLS(PENDING_KEY, null);
-    writeLS(REMEMBER_KEY, null);
-  };
+  const login = () => redirectToLogin();
 
-  const signInPassword = async (
-    companyCode: string,
-    email: string,
-    password: string,
-    remember: boolean,
-  ) => {
-    if (!authClient) return { error: "Auth is not configured.", status: null };
-    startSignIn(companyCode, remember);
-    const { error } = await authClient.signIn.email({
-      email: email.trim(),
-      password,
-      rememberMe: remember,
-    });
-    if (error) {
-      clearPendingSignIn();
-      return { error: error.message ?? "Sign in failed.", status: error.status ?? null };
-    }
-    await establishSession(); // sets phase → verifying → ready (or signs out on mismatch)
-    return { error: null, status: null };
-  };
-
-  // Self-signup: the user creates their own credentials on Authenticize. Sentire
-  // still admits them only if an admin put their email on the workspace allowlist
-  // (get_user_context by email) — Authenticize authenticates, Sentire authorizes.
-  const signUp = async (
-    companyCode: string,
-    email: string,
-    password: string,
-    fullName: string,
-    remember: boolean,
-  ) => {
-    if (!authClient) return { error: "Auth is not configured.", status: null };
-    startSignIn(companyCode, remember);
-    const { error } = await authClient.signUp.email({
-      email: email.trim(),
-      password,
-      name: fullName.trim() || email.trim(),
-    });
-    if (error) {
-      clearPendingSignIn();
-      return { error: error.message ?? "Sign up failed.", status: error.status ?? null };
-    }
-    await establishSession(); // creates a session; workspace check gates admission
-    return { error: null, status: null };
-  };
-
-  const signInSocial = async (
-    provider: "google" | "microsoft",
-    companyCode: string,
-    remember: boolean,
-  ) => {
-    if (!authClient) return { error: "Auth is not configured." };
-    startSignIn(companyCode, remember);
-    const { error } = await authClient.signIn.social({
-      provider,
-      callbackURL: window.location.origin,
-    });
-    if (error) {
-      clearPendingSignIn();
-      return { error: error.message ?? null };
-    }
-    return { error: null }; // success → browser is redirected to the provider
-  };
-
-  const signInGoogle = (companyCode: string, remember: boolean) =>
-    signInSocial("google", companyCode, remember);
-  const signInMicrosoft = (companyCode: string, remember: boolean) =>
-    signInSocial("microsoft", companyCode, remember);
-
-  const resetPassword = async (email: string) => {
-    if (!AUTH_URL) return { error: "Auth is not configured." };
-    try {
-      const res = await fetch(`${AUTH_URL}/api/auth/request-password-reset`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          email: email.trim(),
-          redirectTo: `${window.location.origin}/reset-password`,
-        }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { message?: string } | null;
-        return { error: body?.message ?? "Couldn't send the reset email." };
-      }
-      return { error: null };
-    } catch {
-      return { error: "Couldn't reach the server. Check your connection and try again." };
-    }
-  };
-
-  const signOut = async () => {
-    await forceSignedOut(null);
+  const signOut = () => {
+    writeSS(TOKEN_KEY, null);
+    setAccessToken(null);
+    setSession(null);
+    setOrg(null);
+    window.location.href = `${API_BASE}/auth/logout`;
   };
 
   return (
@@ -314,11 +182,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         org,
         authError,
         clearAuthError: () => setAuthError(null),
-        signInPassword,
-        signUp,
-        signInGoogle,
-        signInMicrosoft,
-        resetPassword,
+        login,
         signOut,
       }}
     >
@@ -332,5 +196,3 @@ export function useAuth(): AuthState {
   if (!ctx) throw new Error("useAuth must be used within <AuthProvider>");
   return ctx;
 }
-
-export { authEnabled };

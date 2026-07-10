@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { oidcLogin, oidcCallback, oidcLogout } from "./oidc";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { journalRoutes } from "./routes/journal";
@@ -15,7 +16,7 @@ const app = new Hono();
 // scalebooks-api), so cross-origin requests need CORS. Allowed origins come from
 // CORS_ORIGIN (comma-separated); defaults cover the Render web app + local Vite.
 const allowedOrigins = (
-  process.env.CORS_ORIGIN ?? "https://scalebooks-web.onrender.com,http://localhost:5173"
+  process.env.CORS_ORIGIN ?? "https://sentire-books.sliplane.app,http://localhost:5173"
 )
   .split(",")
   .map((s) => s.trim())
@@ -31,6 +32,13 @@ app.use(
 );
 
 app.get("/health", (c) => c.json({ ok: true, service: "scalebooks-api" }));
+
+// OIDC login flow with Authenticize. Public (no auth) and registered BEFORE the
+// protected "/auth" mount so /auth/login isn't caught by requireAuth. The
+// callback path matches the redirect URI registered in Authenticize.
+app.get("/auth/login", oidcLogin);
+app.get("/auth/logout", oidcLogout);
+app.get("/api/auth/callback/authenticize", oidcCallback);
 
 app.route("/auth", authRoutes);
 app.route("/users", userRoutes);
