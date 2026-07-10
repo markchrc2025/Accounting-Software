@@ -1,21 +1,23 @@
 -- ════════════════════════════════════════════════════════════════════════════
--- ScaleBooks — one-time Supabase setup.
--- Paste this WHOLE file into the Supabase SQL Editor (SQL Editor → New query) and
--- Run. It runs as the postgres owner, so it can create roles, tables, RLS,
--- functions, and seed data.
+-- Sentire Books — one-time database setup.
+-- Plain PostgreSQL (15+). Runs on ANY Postgres — Sliplane, a self-hosted
+-- container, Supabase, etc. Run it as the database OWNER / superuser, e.g.
+--   psql "postgres://owner:<PW>@<host>:<port>/sentire_books?sslmode=no-verify" -f db-setup.sql
+-- (or paste it into your provider's SQL console). It creates roles, tables, RLS,
+-- functions, and seed data, so it needs owner privileges.
 --
 -- BEFORE RUNNING, edit the two lines marked  -- EDIT  in the BOOTSTRAP section:
 --   1) the sentire_books_app role password
 --   2) your company name AND your company code (the tenant ID users type at login)
 -- Run this file ONCE (re-running errors on already-existing types/tables).
 --
--- AFTER you enable Google sign-in and log in once, run the LAST block (it maps
--- your login to an Admin of your org).
+-- AFTER you sign in once (which creates your auth user in your identity provider),
+-- run the LAST block to make yourself an Admin of your org.
 -- ════════════════════════════════════════════════════════════════════════════
 
 -- ───────────────────────────── 0000_init.sql ─────────────────────────────
 -- ════════════════════════════════════════════════════════════════════════════
--- ScaleBooks — initial schema + ledger-integrity triggers
+-- Sentire Books — initial schema + ledger-integrity triggers
 -- ════════════════════════════════════════════════════════════════════════════
 -- This file is intentionally hand-written and self-contained so it can be applied
 -- with `psql -f`. In the normal workflow, table DDL is produced by
@@ -728,12 +730,23 @@ JOIN accounts p ON p.org_id = 'a0000000-0000-0000-0000-000000000001' AND p.name 
 WHERE c.org_id = 'a0000000-0000-0000-0000-000000000001' AND c.name = m.child_name;
 
 -- ════════════════════════════════════════════════════════════════════════════
--- RUN THIS LAST BLOCK ONLY AFTER enabling Google sign-in AND logging in once at
--- https://scalebooks-web.onrender.com (that creates your auth user). It finds you
--- by email and makes you an Admin. Uncomment, set your email, and run.
+-- MAKE YOURSELF ADMIN — run this AFTER you sign in once (that creates your user
+-- in Supabase Auth). Copy your UID from Supabase → Authentication → Users, then
+-- uncomment, fill it in, and run. Works on any database, incl. Sliplane.
 -- ════════════════════════════════════════════════════════════════════════════
 -- INSERT INTO app_users (id, org_id, email, full_name, role)
--- SELECT u.id, 'a0000000-0000-0000-0000-000000000001', u.email, 'Your Name', 'admin'
--- FROM auth.users u
--- WHERE lower(u.email) = lower('you@example.com')                              -- EDIT
+-- VALUES (
+--   '00000000-0000-0000-0000-000000000000',           -- EDIT: your Supabase auth UID
+--   'a0000000-0000-0000-0000-000000000001',           -- the org id from the bootstrap above
+--   'you@example.com',                                -- EDIT: your email
+--   'Your Name',                                      -- EDIT: your name
+--   'admin'
+-- )
 -- ON CONFLICT (id) DO NOTHING;
+--
+-- Only if your app database IS the same Supabase project (not the case on
+-- Sliplane), you could instead map by email via a join on auth.users:
+--   INSERT INTO app_users (id, org_id, email, full_name, role)
+--   SELECT u.id, 'a0000000-0000-0000-0000-000000000001', u.email, 'Your Name', 'admin'
+--   FROM auth.users u WHERE lower(u.email) = lower('you@example.com')
+--   ON CONFLICT (id) DO NOTHING;

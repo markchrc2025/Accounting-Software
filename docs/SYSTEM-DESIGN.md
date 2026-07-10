@@ -292,7 +292,7 @@ Error contract: `400 validation_error` (Zod issues) · `401 unauthenticated` · 
 | **CI** | build only | integration tests **as `sentire_books_app`** (RLS on) | ephemeral `postgres:16` service; migrations applied by glob |
 | **Local dev** | Vite :5173 | :8787, `AUTH_DEV_BYPASS` header flow | any Postgres; no IdP needed |
 
-Config is env-driven (`DATABASE_URL`, `AUTH_JWKS_URL`, `AUTH_ISSUER`, `CORS_ORIGIN`, `VITE_API_BASE_URL`, `VITE_SUPABASE_*`); secrets live only in the Render dashboard. First-time tenant provisioning is a one-paste `setup/supabase-setup.sql` (schema + triggers + RLS + views + org & company code + 158-account chart + admin mapping).
+Config is env-driven (`DATABASE_URL`, `AUTH_JWKS_URL`, `AUTH_ISSUER`, `CORS_ORIGIN`, `VITE_API_BASE_URL`, `VITE_SUPABASE_*`); secrets live only in the Render dashboard. First-time tenant provisioning is a one-paste `setup/db-setup.sql` (schema + triggers + RLS + views + org & company code + 158-account chart + admin mapping).
 
 Known trade-off: API compute (Singapore) and Postgres (Sydney) are in different regions; fine at current scale, revisit co-location if query latency becomes material.
 
