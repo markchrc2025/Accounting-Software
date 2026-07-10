@@ -3,6 +3,7 @@ import { JournalPage } from "./pages/JournalPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { VouchersPage } from "./pages/VouchersPage";
+import { AccountsPage } from "./pages/AccountsPage";
 import { LoginPage } from "./auth/LoginPage";
 import { authEnabled, useAuth } from "./auth/AuthProvider";
 
@@ -34,6 +35,9 @@ function Nav() {
         </NavLink>
         <NavLink to="/contacts" className={({ isActive }) => link(isActive)}>
           Contacts
+        </NavLink>
+        <NavLink to="/accounts" className={({ isActive }) => link(isActive)}>
+          Accounts
         </NavLink>
       </nav>
       {authEnabled && (
@@ -76,6 +80,7 @@ export function App() {
         <Route path="/vouchers" element={<VouchersPage />} />
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/contacts" element={<ContactsPage />} />
+        <Route path="/accounts" element={<AccountsPage />} />
         <Route path="*" element={<Navigate to="/journal" replace />} />
       </Routes>
     </div>

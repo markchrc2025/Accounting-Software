@@ -1,7 +1,9 @@
 /**
  * Thin typed API client. In dev it sends `x-user-id` (paired with the API's
- * AUTH_DEV_BYPASS); in production swap this for an `Authorization: Bearer <jwt>`.
+ * AUTH_DEV_BYPASS); in production it sends `Authorization: Bearer <jwt>`.
  */
+import type { ImportAccount } from "@scalebooks/domain";
+
 const BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
 const DEV_USER_ID = import.meta.env.VITE_DEV_USER_ID ?? "";
 
@@ -26,6 +28,7 @@ export interface AccountDto {
   code: string;
   name: string;
   type: string;
+  subtype?: string | null;
   isActive: boolean;
 }
 
@@ -104,6 +107,20 @@ export const getMe = () => apiFetch<MeDto>("/auth/me");
 
 export const listAccounts = () =>
   apiFetch<{ accounts: AccountDto[] }>("/accounts").then((r) => r.accounts);
+
+export interface ImportAccountsResult {
+  inserted: number;
+  skipped: number;
+  linked: number;
+  total: number;
+}
+
+/** Bulk-import a parsed chart of accounts (admin only). */
+export const importAccounts = (accounts: ImportAccount[]) =>
+  apiFetch<ImportAccountsResult>("/accounts/import", {
+    method: "POST",
+    body: JSON.stringify({ accounts }),
+  });
 
 export const listJournalEntries = () =>
   apiFetch<{ entries: JournalEntryDto[] }>("/journal-entries").then((r) => r.entries);
