@@ -1,14 +1,11 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  // Base URL of the Sentire Books API (also the OIDC login entry point).
   readonly VITE_API_BASE_URL?: string;
+  // Local dev only: bypass auth by sending this as x-user-id (pairs with the
+  // API's AUTH_DEV_BYPASS). When set, the login screen is skipped.
   readonly VITE_DEV_USER_ID?: string;
-  // Authenticize (Better Auth / OIDC) base URL, e.g. https://auth.example.com
-  readonly VITE_AUTH_URL?: string;
-  // Optional demo-credentials affordance on the login screen.
-  readonly VITE_DEMO_EMAIL?: string;
-  readonly VITE_DEMO_PASSWORD?: string;
-  readonly VITE_DEMO_COMPANY?: string;
 }
 
 interface ImportMeta {
