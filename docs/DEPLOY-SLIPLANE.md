@@ -40,7 +40,7 @@ The repo already contains everything Sliplane needs to build:
 - `scalebooks/apps/api/Dockerfile` — the API image.
 - `scalebooks/apps/web/Dockerfile` + `scalebooks/apps/web/nginx.conf` — the web image.
 - `scalebooks/.dockerignore`.
-- `scalebooks/setup/supabase-setup.sql` — the full schema (works on any Postgres 15+).
+- `scalebooks/setup/db-setup.sql` — the full schema (works on any Postgres 15+).
 
 For **all three** Sliplane services set **Build context = `scalebooks`** (the pnpm
 workspace root), and the Dockerfile path as noted below.
@@ -73,7 +73,7 @@ Note the service's internal hostname (typically the service name, e.g.
 
 The schema is plain SQL and runs on any Postgres 15+. There is no data to migrate.
 
-1. **Edit the bootstrap values** in `scalebooks/setup/supabase-setup.sql` (three
+1. **Edit the bootstrap values** in `scalebooks/setup/db-setup.sql` (three
    `-- EDIT` spots):
    - `ALTER ROLE sentire_books_app WITH LOGIN PASSWORD '…'` → your **app role** password.
    - the `organizations` insert → your **company name** and **company code**
@@ -82,7 +82,7 @@ The schema is plain SQL and runs on any Postgres 15+. There is no data to migrat
    managed Postgres, or `postgres` for your own container):
    ```bash
    psql "postgres://owner:<PW>@<host>:<port>/sentire_books?sslmode=no-verify" \
-     -f scalebooks/setup/supabase-setup.sql
+     -f scalebooks/setup/db-setup.sql
    ```
    (Sliplane's managed Postgres URL is already publicly reachable, so you can run this
    straight from your laptop. For a self-hosted container, temporarily expose port
