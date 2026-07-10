@@ -467,6 +467,26 @@ $$;
 REVOKE ALL ON FUNCTION get_user_context(text) FROM public;
 GRANT EXECUTE ON FUNCTION get_user_context(text) TO sentire_books_app;
 
+-- ───────────────────────────── 0008_auth_by_email.sql ─────────────────────────────
+-- Resolve users by verified EMAIL (Authenticize authenticates; Sentire owns its
+-- users as an email allowlist). app_users.id becomes app-owned (defaulted), and
+-- get_user_context looks up by email.
+ALTER TABLE app_users ALTER COLUMN id SET DEFAULT gen_random_uuid()::text;
+CREATE UNIQUE INDEX IF NOT EXISTS app_users_email_lower_key ON app_users (lower(email));
+
+DROP FUNCTION IF EXISTS get_user_context(uuid);
+DROP FUNCTION IF EXISTS get_user_context(text);
+CREATE FUNCTION get_user_context(p_email text)
+RETURNS TABLE (user_id text, org_id uuid, role user_role, email text, full_name text, org_code text, org_name text)
+LANGUAGE sql SECURITY DEFINER SET search_path = public STABLE AS $$
+  SELECT u.id, u.org_id, u.role, u.email, u.full_name, o.code, o.name
+  FROM app_users u
+  JOIN organizations o ON o.id = u.org_id
+  WHERE lower(u.email) = lower(p_email)
+$$;
+REVOKE ALL ON FUNCTION get_user_context(text) FROM public;
+GRANT EXECUTE ON FUNCTION get_user_context(text) TO sentire_books_app;
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════
@@ -488,23 +508,16 @@ ON CONFLICT (id) DO NOTHING;
 --    generated seed you can run instead.)
 
 -- ════════════════════════════════════════════════════════════════════════════
--- MAKE YOURSELF ADMIN — run this AFTER you sign in once (that creates your user
--- in Supabase Auth). Copy your UID from Supabase → Authentication → Users, then
--- uncomment, fill it in, and run. Works on any database, incl. Sliplane.
+-- MAKE YOURSELF ADMIN — add your email to the workspace allowlist. Sentire admits
+-- users by their VERIFIED email, so you only need the email here (the id is
+-- generated). Do this once for the first admin; after that, invite users from the
+-- app's Users page. Then sign up / sign in with this same email via Authenticize.
 -- ════════════════════════════════════════════════════════════════════════════
--- INSERT INTO app_users (id, org_id, email, full_name, role)
+-- INSERT INTO app_users (org_id, email, full_name, role)
 -- VALUES (
---   '00000000-0000-0000-0000-000000000000',           -- EDIT: your Supabase auth UID
---   'a0000000-0000-0000-0000-000000000001',           -- the org id from the bootstrap above
---   'you@example.com',                                -- EDIT: your email
---   'Your Name',                                      -- EDIT: your name
+--   'a0000000-0000-0000-0000-000000000001',   -- the org id from the bootstrap above
+--   'you@example.com',                        -- EDIT: your email (must match your Authenticize login)
+--   'Your Name',                              -- EDIT: your name
 --   'admin'
 -- )
--- ON CONFLICT (id) DO NOTHING;
---
--- Only if your app database IS the same Supabase project (not the case on
--- Sliplane), you could instead map by email via a join on auth.users:
---   INSERT INTO app_users (id, org_id, email, full_name, role)
---   SELECT u.id, 'a0000000-0000-0000-0000-000000000001', u.email, 'Your Name', 'admin'
---   FROM auth.users u WHERE lower(u.email) = lower('you@example.com')
---   ON CONFLICT (id) DO NOTHING;
+-- ON CONFLICT (email) DO NOTHING;

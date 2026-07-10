@@ -1,6 +1,7 @@
 export * from "./money";
 export * from "./journal";
 export * from "./accounts";
+export * from "./users";
 export * from "./contacts";
 export * from "./vouchers";
 export * from "./reports";

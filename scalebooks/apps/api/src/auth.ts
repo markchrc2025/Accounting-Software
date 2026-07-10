@@ -61,16 +61,24 @@ async function resolveIdentity(c: Context): Promise<{ uid: string; email: string
 export async function requireAuth(c: Context, next: Next) {
   const id = await resolveIdentity(c);
   if (!id) return c.json({ error: "unauthenticated" }, 401);
+  if (!id.email) {
+    return c.json({ error: "unauthenticated", detail: "Token has no email claim" }, 401);
+  }
 
-  const ctx = await getUserContext(id.uid);
+  // Authenticize authenticates; Sentire owns its users. Admit by verified email
+  // against the app_users allowlist — never by the provider's internal id.
+  const ctx = await getUserContext(id.email);
   if (!ctx) {
-    return c.json({ error: "forbidden", detail: "User is not provisioned in any organization" }, 403);
+    return c.json(
+      { error: "forbidden", detail: "This account isn't on the workspace's user list" },
+      403,
+    );
   }
 
   c.set("auth", {
-    userId: id.uid,
+    userId: ctx.userId,
     orgId: ctx.orgId,
-    email: ctx.email || id.email,
+    email: ctx.email,
     role: ctx.role,
     orgCode: ctx.orgCode,
     orgName: ctx.orgName,

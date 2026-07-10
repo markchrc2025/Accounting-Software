@@ -173,12 +173,23 @@ function BrandPanel() {
 // ── form ─────────────────────────────────────────────────────────────────────
 type Status = "idle" | "loading" | "error";
 
-function LoginForm() {
-  const { signInPassword, signInGoogle, signInMicrosoft, resetPassword, authError, clearAuthError } =
-    useAuth();
+type Mode = "signin" | "signup";
 
+function LoginForm() {
+  const {
+    signInPassword,
+    signUp,
+    signInGoogle,
+    signInMicrosoft,
+    resetPassword,
+    authError,
+    clearAuthError,
+  } = useAuth();
+
+  const [mode, setMode] = useState<Mode>("signin");
   const [company, setCompany] = useState("");
   const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [pw, setPw] = useState("");
   const [show, setShow] = useState(false);
   const [remember, setRemember] = useState(true); // Books defaults to checked
@@ -187,6 +198,7 @@ function LoginForm() {
   const [formErr, setFormErr] = useState("");
   const [notice, setNotice] = useState("");
   const shakeRef = useRef<HTMLFormElement>(null);
+  const signup = mode === "signup";
 
   // Prefill the workspace code from the last "keep me signed in" sign-in.
   useEffect(() => {
@@ -226,15 +238,26 @@ function LoginForm() {
       return;
     }
     setStatus("loading");
-    const { error, status: httpStatus } = await signInPassword(company, email, pw, remember);
+    const { error, status: httpStatus } = signup
+      ? await signUp(company, email, pw, name, remember)
+      : await signInPassword(company, email, pw, remember);
     if (error) {
       setStatus("error");
       setFormErr(mapAuthError(error, httpStatus));
       shake();
       return;
     }
-    // Success: the session lands and AuthProvider verifies the workspace; the app
-    // shell (App.tsx) takes over from here (this component unmounts).
+    // Success: the session lands and AuthProvider verifies the workspace against
+    // the allowlist; the app shell (App.tsx) takes over (this component unmounts).
+  }
+
+  function switchMode(next: Mode) {
+    setMode(next);
+    setStatus("idle");
+    setFormErr("");
+    setNotice("");
+    clearAuthError();
+    setTouched({});
   }
 
   async function sso(which: "google" | "microsoft") {
@@ -295,8 +318,12 @@ function LoginForm() {
   return (
     <div className="sn-form-wrap">
       <div className="sn-form-head">
-        <h2 className="sn-title">Sign in</h2>
-        <p className="sn-sub">Welcome back — your ledgers are up to date.</p>
+        <h2 className="sn-title">{signup ? "Create your account" : "Sign in"}</h2>
+        <p className="sn-sub">
+          {signup
+            ? "Set your password once — your admin has already added your email."
+            : "Welcome back — your ledgers are up to date."}
+        </p>
       </div>
 
       <div className="sn-sso">
@@ -309,7 +336,7 @@ function LoginForm() {
       </div>
 
       <div className="sn-or">
-        <span>or sign in with email</span>
+        <span>{signup ? "or sign up with email" : "or sign in with email"}</span>
       </div>
 
       {shownErr && (
@@ -350,6 +377,26 @@ function LoginForm() {
           )}
         </label>
 
+        {signup && (
+          <label className="sn-field">
+            <span className="sn-label">Full name</span>
+            <div className="sn-input">
+              <svg className="sn-input-ic" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true">
+                <circle cx="10" cy="6.5" r="3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M4 16.5a6 6 0 0 1 12 0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <input
+                type="text"
+                autoComplete="name"
+                placeholder="Jane Dela Cruz"
+                value={name}
+                disabled={busy}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+          </label>
+        )}
+
         <label className="sn-field">
           <span className="sn-label">Work email</span>
           <div className={"sn-input" + (emailErr ? " is-err" : "")}>
@@ -374,8 +421,8 @@ function LoginForm() {
             <PadlockIcon />
             <input
               type={show ? "text" : "password"}
-              autoComplete="current-password"
-              placeholder="Enter your password"
+              autoComplete={signup ? "new-password" : "current-password"}
+              placeholder={signup ? "Create a password (min. 8 characters)" : "Enter your password"}
               value={pw}
               disabled={busy}
               onChange={(e) => setPw(e.target.value)}
@@ -410,16 +457,20 @@ function LoginForm() {
             </span>
             Keep me signed in
           </label>
-          <button type="button" className="sn-link" onClick={(e) => void forgot(e)} disabled={busy}>
-            Forgot password?
-          </button>
+          {!signup && (
+            <button type="button" className="sn-link" onClick={(e) => void forgot(e)} disabled={busy}>
+              Forgot password?
+            </button>
+          )}
         </div>
 
         <button type="submit" className="sn-submit" disabled={busy}>
           {busy ? (
             <>
-              <Spinner /> Verifying…
+              <Spinner /> {signup ? "Creating…" : "Verifying…"}
             </>
+          ) : signup ? (
+            "Create account"
           ) : (
             "Sign in to workspace"
           )}
@@ -431,6 +482,24 @@ function LoginForm() {
           </button>
         )}
       </form>
+
+      <p className="sn-switch">
+        {signup ? (
+          <>
+            Already have an account?{" "}
+            <button type="button" className="sn-link" disabled={busy} onClick={() => switchMode("signin")}>
+              Sign in
+            </button>
+          </>
+        ) : (
+          <>
+            New to Sentire Books?{" "}
+            <button type="button" className="sn-link" disabled={busy} onClick={() => switchMode("signup")}>
+              Create an account
+            </button>
+          </>
+        )}
+      </p>
 
       <p className="sn-legal">
         <ShieldIcon />

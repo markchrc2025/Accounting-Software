@@ -122,6 +122,29 @@ export const importAccounts = (accounts: ImportAccount[]) =>
     body: JSON.stringify({ accounts }),
   });
 
+export interface UserDto {
+  id: string;
+  email: string;
+  fullName: string | null;
+  role: string;
+  createdAt: string;
+}
+export interface InviteUserInput {
+  email: string;
+  role?: string | undefined;
+  fullName?: string | undefined;
+}
+
+/** The workspace's user allowlist (admin only). */
+export const listUsers = () => apiFetch<{ users: UserDto[] }>("/users").then((r) => r.users);
+
+/** Add a user to the allowlist by email (admin only). */
+export const inviteUser = (input: InviteUserInput) =>
+  apiFetch<{ user: UserDto }>("/users", {
+    method: "POST",
+    body: JSON.stringify(input),
+  }).then((r) => r.user);
+
 export const listJournalEntries = () =>
   apiFetch<{ entries: JournalEntryDto[] }>("/journal-entries").then((r) => r.entries);
 
