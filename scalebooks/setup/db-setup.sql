@@ -555,6 +555,42 @@ CREATE UNIQUE INDEX IF NOT EXISTS contacts_org_no_key
   ON contacts (org_id, contact_no) WHERE contact_no IS NOT NULL;
 CREATE INDEX IF NOT EXISTS contacts_org_parent_idx ON contacts (org_id, parent_id);
 
+-- ───────────────────────────── 0011_journal_workflow.sql ─────────────────────────────
+-- Maker-checker workflow states (pre-posted states are mutable; 'posted' keeps
+-- its append-only, must-balance semantics), entry classification + reference +
+-- accrual auto-reversal link, and the reversed-entries report fix.
+ALTER TYPE entry_status ADD VALUE IF NOT EXISTS 'pending_review';
+ALTER TYPE entry_status ADD VALUE IF NOT EXISTS 'pending_approval';
+ALTER TYPE entry_status ADD VALUE IF NOT EXISTS 'for_clearing';
+ALTER TYPE entry_status ADD VALUE IF NOT EXISTS 'cleared';
+ALTER TYPE entry_status ADD VALUE IF NOT EXISTS 'for_posting';
+ALTER TYPE entry_status ADD VALUE IF NOT EXISTS 'rejected';
+ALTER TYPE entry_status ADD VALUE IF NOT EXISTS 'voided';
+
+ALTER TABLE journal_entries
+  ADD COLUMN IF NOT EXISTS entry_type          text NOT NULL DEFAULT 'Manual',
+  ADD COLUMN IF NOT EXISTS reference           text,
+  ADD COLUMN IF NOT EXISTS accrual_reversal_of uuid REFERENCES journal_entries(id);
+
+-- Reversed entries' postings still happened (the reversal offsets them) — count
+-- both, or reports show a net negative after every reversal.
+CREATE OR REPLACE VIEW v_account_postings
+WITH (security_invoker = true) AS
+SELECT
+  je.org_id,
+  je.id           AS entry_id,
+  je.entry_date,
+  a.id            AS account_id,
+  a.code          AS account_code,
+  a.name          AS account_name,
+  a.type          AS account_type,
+  jl.debit_cents,
+  jl.credit_cents
+FROM journal_lines jl
+JOIN journal_entries je ON je.id = jl.entry_id
+JOIN accounts        a  ON a.id  = jl.account_id
+WHERE je.status IN ('posted', 'reversed');
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════

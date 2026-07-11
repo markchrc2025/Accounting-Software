@@ -34,7 +34,20 @@ export const accountType = pgEnum("account_type", [
   "expense",
 ]);
 
-export const entryStatus = pgEnum("entry_status", ["draft", "posted", "reversed"]);
+// Workflow states (0011): everything before 'posted' is mutable work-in-progress;
+// 'posted' is append-only and must balance; 'reversed' still counts in reports.
+export const entryStatus = pgEnum("entry_status", [
+  "draft",
+  "pending_review",
+  "pending_approval",
+  "for_clearing",
+  "cleared",
+  "for_posting",
+  "posted",
+  "rejected",
+  "voided",
+  "reversed",
+]);
 
 export const userRole = pgEnum("user_role", [
   "maker",
@@ -133,6 +146,9 @@ export const journalEntries = pgTable(
     entryDate: date("entry_date").notNull(),
     memo: text("memo"),
     status: entryStatus("status").notNull().default("draft"),
+    entryType: text("entry_type").notNull().default("Manual"),
+    reference: text("reference"),
+    accrualReversalOf: uuid("accrual_reversal_of"),
     sourceType: text("source_type"),
     sourceId: uuid("source_id"),
     reversalOf: uuid("reversal_of"),
