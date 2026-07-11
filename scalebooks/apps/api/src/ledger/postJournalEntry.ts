@@ -17,11 +17,34 @@ import {
   zJournalEntryInput,
   assertBalanced,
   type JournalEntryInput,
+  type JournalLineInput,
+  type EntryType,
 } from "@scalebooks/domain";
 
 export interface PostJournalEntryResult {
   id: string;
   entryNo: string;
+  status: string;
+  /** Present when an Accrual entry auto-created its future-dated reversing draft. */
+  accrualReversal?: { id: string; entryNo: string; entryDate: string };
+}
+
+/**
+ * Structural input for the shared core: `post`/`entryType` are optional so
+ * internal callers (createVoucher) keep passing plain literals; the public
+ * route path parses the full zod schema first.
+ */
+export interface CoreEntryInput {
+  orgId: string;
+  entryDate: string;
+  memo?: string | null | undefined;
+  entryType?: EntryType | undefined;
+  reference?: string | null | undefined;
+  post?: boolean | undefined;
+  sourceType?: string | null | undefined;
+  sourceId?: string | null | undefined;
+  accrualReversalOf?: string | null | undefined;
+  lines: readonly JournalLineInput[];
 }
 
 /** Reversal target doesn't exist in the caller's org → HTTP 404. */
@@ -51,9 +74,10 @@ function periodKey(prefix: string, isoDate: string): string {
  */
 export async function postJournalEntryCore(
   tx: Tx,
-  input: JournalEntryInput,
+  input: CoreEntryInput,
   ctx: { userId: string; orgId: string },
 ): Promise<PostJournalEntryResult> {
+  const post = input.post !== false;
   const key = periodKey("JE", input.entryDate);
   const counter = (await tx.execute(sql`
     INSERT INTO document_counters (org_id, period_key, seq)
@@ -73,6 +97,9 @@ export async function postJournalEntryCore(
       entryDate: input.entryDate,
       memo: input.memo ?? null,
       status: "draft",
+      entryType: input.entryType ?? "Manual",
+      reference: input.reference ?? null,
+      accrualReversalOf: input.accrualReversalOf ?? null,
       sourceType: input.sourceType ?? null,
       sourceId: input.sourceId ?? null,
       createdBy: ctx.userId,
@@ -93,28 +120,64 @@ export async function postJournalEntryCore(
     })),
   );
 
-  await tx
-    .update(journalEntries)
-    .set({ status: "posted", postedAt: new Date() })
-    .where(sql`${journalEntries.id} = ${entryId}`);
+  if (post) {
+    await tx
+      .update(journalEntries)
+      .set({ status: "posted", postedAt: new Date() })
+      .where(sql`${journalEntries.id} = ${entryId}`);
+  }
 
-  return { id: entryId, entryNo };
+  return { id: entryId, entryNo, status: post ? "posted" : "draft" };
+}
+
+/** First day of the month after an ISO date — the accrual auto-reversal date. */
+export function firstOfNextMonth(isoDate: string): string {
+  const [y, m] = isoDate.split("-").map(Number);
+  const year = m === 12 ? y! + 1 : y!;
+  const month = m === 12 ? 1 : m! + 1;
+  return `${year}-${String(month).padStart(2, "0")}-01`;
 }
 
 export async function postJournalEntry(
   rawInput: unknown,
   ctx: { userId: string; orgId: string },
 ): Promise<PostJournalEntryResult> {
-  // Validate shape + balance up front for a friendly 400 (the DB is the real guard).
+  // Validate shape up front for a friendly 400 (the DB is the real guard).
   const input: JournalEntryInput = zJournalEntryInput.parse(rawInput);
   if (input.orgId !== ctx.orgId) {
     throw new Error("orgId mismatch between payload and authenticated caller");
   }
-  assertBalanced(input.lines);
+  if (input.post) assertBalanced(input.lines);
 
-  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, (tx) =>
-    postJournalEntryCore(tx, input, ctx),
-  );
+  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, async (tx) => {
+    const result = await postJournalEntryCore(tx, input, ctx);
+
+    // Accrual entries auto-create their reversing DRAFT, dated the 1st of the
+    // following month with debits/credits swapped, linked back to the original.
+    if (input.entryType === "Accrual") {
+      const reversalDate = firstOfNextMonth(input.entryDate);
+      const rev = await postJournalEntryCore(
+        tx,
+        {
+          orgId: ctx.orgId,
+          entryDate: reversalDate,
+          memo: `Accrual Reversal of ${result.entryNo}`,
+          entryType: "Reversing",
+          reference: result.entryNo,
+          accrualReversalOf: result.id,
+          post: false,
+          lines: input.lines.map((l) => ({
+            ...l,
+            debitCents: l.creditCents,
+            creditCents: l.debitCents,
+          })),
+        },
+        ctx,
+      );
+      result.accrualReversal = { id: rev.id, entryNo: rev.entryNo, entryDate: reversalDate };
+    }
+    return result;
+  });
 }
 
 /**
@@ -156,6 +219,8 @@ export async function reverseJournalEntry(
         entryDate: original.entryDate,
         memo: `Reversal of ${original.entryNo}`,
         status: "draft",
+        entryType: "Reversing",
+        reference: original.entryNo,
         reversalOf: original.id,
         createdBy: ctx.userId,
       })
@@ -184,6 +249,6 @@ export async function reverseJournalEntry(
       .set({ status: "reversed" })
       .where(sql`${journalEntries.id} = ${original.id}`);
 
-    return { id: rev!.id, entryNo };
+    return { id: rev!.id, entryNo, status: "posted" };
   });
 }

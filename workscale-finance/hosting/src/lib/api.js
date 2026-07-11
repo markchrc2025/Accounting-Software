@@ -98,9 +98,22 @@ export const createContact = (payload) =>
 export const updateContact = (id, payload) =>
   apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(payload) }).then((r) => r.contact);
 export const deleteContact = (id) => apiFetch(`/contacts/${id}`, { method: 'DELETE' });
-export const listJournalEntries = () => apiFetch('/journal-entries').then((r) => r.entries);
+export const listJournalEntries = (params) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== '') s.set(k, v);
+  const q = s.toString();
+  return apiFetch(`/journal-entries${q ? `?${q}` : ''}`).then((r) => r.entries);
+};
+export const getJournalEntry = (id) => apiFetch(`/journal-entries/${id}`);
 export const createJournalEntry = (payload) =>
   apiFetch('/journal-entries', { method: 'POST', body: JSON.stringify(payload) });
+export const updateJournalEntry = (id, payload) =>
+  apiFetch(`/journal-entries/${id}`, { method: 'PUT', body: JSON.stringify(payload) }).then((r) => r.entry);
+export const deleteJournalEntry = (id) => apiFetch(`/journal-entries/${id}`, { method: 'DELETE' });
+export const transitionJournalEntry = (id, to) =>
+  apiFetch(`/journal-entries/${id}/status`, { method: 'POST', body: JSON.stringify({ to }) }).then((r) => r.entry);
+export const reverseJournalEntry = (id) =>
+  apiFetch(`/journal-entries/${id}/reverse`, { method: 'POST', body: JSON.stringify({}) });
 export const listVouchers = () => apiFetch('/vouchers').then((r) => r.vouchers);
 export const createVoucher = (payload) =>
   apiFetch('/vouchers', { method: 'POST', body: JSON.stringify(payload) });
