@@ -82,7 +82,9 @@ function mapCallbackError(code: string): string {
 
 /** Send the browser through the API's OIDC login, returning here afterwards. */
 function redirectToLogin(): void {
-  const returnTo = window.location.pathname + window.location.search;
+  const path = window.location.pathname + window.location.search;
+  // Never round-trip an /auth/* path back as returnTo (avoids nested returnTo loops).
+  const returnTo = path.startsWith("/auth") ? "/" : path;
   window.location.href = `${API_BASE}/auth/login?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
