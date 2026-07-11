@@ -37,7 +37,7 @@ jobs:
       # Owner connection — runs migrations + seed (exempt from RLS).
       DATABASE_URL_DIRECT: postgres://postgres:postgres@localhost:5432/scalebooks
       # App-role connection — runs the integration tests (subject to RLS).
-      DATABASE_URL: postgres://scalebooks_app:app@localhost:5432/scalebooks
+      DATABASE_URL: postgres://sentire_books_app:app@localhost:5432/scalebooks
 
     steps:
       - uses: actions/checkout@v4
@@ -72,8 +72,9 @@ jobs:
             psql "$DATABASE_URL_DIRECT" -v ON_ERROR_STOP=1 -f "$f"
           done
           # Give the app role a login so the integration tests can connect as it.
+          # The role is created (NOLOGIN) by 0001_rls.sql — here we just add a login.
           psql "$DATABASE_URL_DIRECT" -v ON_ERROR_STOP=1 \
-            -c "ALTER ROLE scalebooks_app WITH LOGIN PASSWORD 'app';"
+            -c "ALTER ROLE sentire_books_app WITH LOGIN PASSWORD 'app';"
 
       - name: Seed (as owner)
         run: pnpm --filter @scalebooks/db seed
