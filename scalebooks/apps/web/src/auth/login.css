@@ -284,6 +284,9 @@
   opacity: 0.5;
   cursor: default;
 }
+.sn-sso-wide {
+  width: 100%;
+}
 
 .sn-or {
   display: flex;

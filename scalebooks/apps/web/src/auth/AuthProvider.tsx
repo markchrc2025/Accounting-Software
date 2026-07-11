@@ -5,6 +5,7 @@ import {
   setTokenRefresher,
   getMe,
   listWorkspaces,
+  signInWithPassword,
   ApiError,
   type WorkspaceDto,
 } from "../lib/api";
@@ -93,6 +94,11 @@ interface AuthState {
   authError: string | null;
   clearAuthError: () => void;
   login: () => void;
+  signInPassword: (
+    companyCode: string,
+    email: string,
+    password: string,
+  ) => Promise<{ error: string | null }>;
   chooseWorkspace: (orgId: string) => void;
   switchWorkspace: () => void;
   signOut: () => void;
@@ -144,8 +150,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** With a valid token, decide which workspace to enter. */
-  async function resolveWorkspaces(token: string) {
+  /**
+   * With a valid token, decide which workspace to enter. `preferredCode` is the
+   * company code from the password form: when given we go straight to that
+   * workspace (and error if the account isn't in it); when absent we auto-enter a
+   * lone workspace or show the picker.
+   */
+  async function resolveWorkspaces(token: string, preferredCode?: string) {
     setAccessToken(token);
     setPhase("verifying");
     try {
@@ -161,6 +172,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setPhase("anon");
         return;
       }
+
+      if (preferredCode) {
+        const match = list.find((w) => w.code.toLowerCase() === preferredCode.toLowerCase());
+        if (!match) {
+          writeSS(TOKEN_KEY, null);
+          setAccessToken(null);
+          setAuthError(
+            `This account isn't in workspace "${preferredCode.toUpperCase()}". Check the company code or contact your admin.`,
+          );
+          setPhase("anon");
+          return;
+        }
+        await enter(match.id);
+        return;
+      }
+
       if (list.length === 1) {
         await enter(list[0]!.id);
         return;
@@ -217,6 +244,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = () => redirectToLogin();
 
+  /** In-app email/password sign-in; the company code picks the workspace. */
+  const signInPassword = async (companyCode: string, email: string, password: string) => {
+    setAuthError(null);
+    try {
+      const { token } = await signInWithPassword(email.trim(), password);
+      writeSS(TOKEN_KEY, token);
+      await resolveWorkspaces(token, companyCode.trim() || undefined);
+      return { error: null };
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        return { error: "invalid_credentials" };
+      }
+      return { error: "network" };
+    }
+  };
+
   const chooseWorkspace = (orgId: string) => {
     setAuthError(null);
     void enter(orgId);
@@ -250,6 +293,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         authError,
         clearAuthError: () => setAuthError(null),
         login,
+        signInPassword,
         chooseWorkspace,
         switchWorkspace,
         signOut,

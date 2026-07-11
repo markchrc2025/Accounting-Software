@@ -1,8 +1,29 @@
 import { Hono } from "hono";
 import { getUserWorkspaces } from "@scalebooks/db";
 import { requireAuth, requireIdentity } from "../auth";
+import { passwordSignIn } from "../password";
 
 export const authRoutes = new Hono();
+
+// In-app email/password sign-in (public). Verifies against Authenticize
+// server-side and returns a JWT the SPA uses as a Bearer token. The workspace is
+// then resolved as usual (the form's company code selects it).
+authRoutes.post("/password", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  const email = typeof (body as { email?: unknown })?.email === "string" ? (body as { email: string }).email.trim() : "";
+  const password =
+    typeof (body as { password?: unknown })?.password === "string" ? (body as { password: string }).password : "";
+  if (!email || !password) return c.json({ error: "missing_credentials" }, 400);
+
+  const result = await passwordSignIn(email, password);
+  if ("error" in result) return c.json({ error: result.error }, result.status as 401 | 502);
+  return c.json({ token: result.token });
+});
 
 // Every workspace the signed-in identity can access. Needs only a valid token
 // (no workspace chosen yet) — the web app calls this right after login to decide
