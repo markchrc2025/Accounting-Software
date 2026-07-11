@@ -522,6 +522,39 @@ $$;
 REVOKE ALL ON FUNCTION get_user_context(text, uuid) FROM public;
 GRANT EXECUTE ON FUNCTION get_user_context(text, uuid) TO sentire_books_app;
 
+-- ───────────────────────────── 0010_contacts_extend.sql ─────────────────────────────
+-- Full portal contact model: rich multi-category types (canonical enum stays
+-- derived), hierarchy, AR/AP refs, terms/credit (centavos), structured
+-- addresses, banks, contact persons, notes; server-assigned CNT numbers.
+ALTER TABLE contacts
+  ADD COLUMN IF NOT EXISTS contact_no            text,
+  ADD COLUMN IF NOT EXISTS display_name          text,
+  ADD COLUMN IF NOT EXISTS parent_id             uuid REFERENCES contacts(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS types                 text[],
+  ADD COLUMN IF NOT EXISTS cost_center           text,
+  ADD COLUMN IF NOT EXISTS category              text,
+  ADD COLUMN IF NOT EXISTS branch                text,
+  ADD COLUMN IF NOT EXISTS department            text,
+  ADD COLUMN IF NOT EXISTS ar_account_code       text,
+  ADD COLUMN IF NOT EXISTS ap_account_code       text,
+  ADD COLUMN IF NOT EXISTS payment_terms         text,
+  ADD COLUMN IF NOT EXISTS currency              text,
+  ADD COLUMN IF NOT EXISTS credit_limit_cents    bigint,
+  ADD COLUMN IF NOT EXISTS opening_balance_cents bigint,
+  ADD COLUMN IF NOT EXISTS tax_ref               text,
+  ADD COLUMN IF NOT EXISTS mobile                text,
+  ADD COLUMN IF NOT EXISTS website               text,
+  ADD COLUMN IF NOT EXISTS billing_address       jsonb,
+  ADD COLUMN IF NOT EXISTS shipping_address      jsonb,
+  ADD COLUMN IF NOT EXISTS banks                 jsonb,
+  ADD COLUMN IF NOT EXISTS contact_persons       jsonb,
+  ADD COLUMN IF NOT EXISTS notes                 text,
+  ADD COLUMN IF NOT EXISTS internal_remarks      text,
+  ADD COLUMN IF NOT EXISTS needs_completion      boolean NOT NULL DEFAULT false;
+CREATE UNIQUE INDEX IF NOT EXISTS contacts_org_no_key
+  ON contacts (org_id, contact_no) WHERE contact_no IS NOT NULL;
+CREATE INDEX IF NOT EXISTS contacts_org_parent_idx ON contacts (org_id, parent_id);
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════

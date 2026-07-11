@@ -22,6 +22,7 @@ import {
   unique,
   index,
   check,
+  jsonb,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -179,16 +180,46 @@ export const contacts = pgTable(
     orgId: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
+    // Canonical enum used by vouchers/filters; derived from `types` when the
+    // rich portal labels are supplied (see 0010_contacts_extend.sql).
     type: contactType("type").notNull(),
     name: text("name").notNull(),
     tin: text("tin"),
     email: text("email"),
     phone: text("phone"),
     address: text("address"),
+    // ── Rich portal fields (0010) ──
+    contactNo: text("contact_no"),
+    displayName: text("display_name"),
+    parentId: uuid("parent_id"),
+    types: text("types").array(),
+    costCenter: text("cost_center"),
+    category: text("category"),
+    branch: text("branch"),
+    department: text("department"),
+    arAccountCode: text("ar_account_code"),
+    apAccountCode: text("ap_account_code"),
+    paymentTerms: text("payment_terms"),
+    currency: text("currency"),
+    creditLimitCents: bigint("credit_limit_cents", { mode: "number" }),
+    openingBalanceCents: bigint("opening_balance_cents", { mode: "number" }),
+    taxRef: text("tax_ref"),
+    mobile: text("mobile"),
+    website: text("website"),
+    billingAddress: jsonb("billing_address"),
+    shippingAddress: jsonb("shipping_address"),
+    banks: jsonb("banks"),
+    contactPersons: jsonb("contact_persons"),
+    notes: text("notes"),
+    internalRemarks: text("internal_remarks"),
+    needsCompletion: boolean("needs_completion").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("contacts_org_type_idx").on(t.orgId, t.type)],
+  (t) => [
+    index("contacts_org_type_idx").on(t.orgId, t.type),
+    index("contacts_org_parent_idx").on(t.orgId, t.parentId),
+  ],
 );
 
 export const vouchers = pgTable(

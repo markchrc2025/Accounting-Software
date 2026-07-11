@@ -1,10 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, orderBy, query, getDocs
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+  listContacts, createContact, updateContact, deleteContact as apiDeleteContact,
+  listAccounts, ApiError,
+} from '../../../lib/api.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
-import { nextContactId } from '../../../utils/documentIds.js';
 
 // ── Constants ─────────────────────────────────────────────
 const CONTACT_TYPES = ['Customer','Supplier','Employee','Contractor','Government','Other'];
@@ -62,6 +61,62 @@ const EMPTY_MODAL = () => ({
   banks:[EMPTY_BANK()],
   contactPersons:[],
   notes:'', internalRemarks:'',
+});
+
+// ── API <-> UI mapping ────────────────────────────────────
+// The API keeps a canonical enum (vendor|customer|employee) for vouchers and
+// filters, and stores the portal's rich labels in `types` so they round-trip.
+const ENUM_TO_LABEL = { vendor:'Supplier', customer:'Customer', employee:'Employee' };
+const addr = (a) => a || { street:'', city:'', zip:'', country:'' };
+const fromApi = (r) => ({
+  id: r.id,
+  contactId: r.contactNo || '',
+  name: r.name || '',
+  displayName: r.displayName || '',
+  types: Array.isArray(r.types) && r.types.length ? r.types : (r.type ? [ENUM_TO_LABEL[r.type] || 'Other'] : []),
+  parentId: r.parentId || '',
+  status: r.isActive === false ? 'Inactive' : 'Active',
+  costCenter: r.costCenter || '', category: r.category || '',
+  branch: r.branch || '', department: r.department || '',
+  arAccountCode: r.arAccountCode || '', apAccountCode: r.apAccountCode || '',
+  paymentTerms: r.paymentTerms || 'Due on Receipt', currency: r.currency || 'PHP',
+  creditLimit: (r.creditLimitCents ?? 0) / 100,
+  openingBalance: (r.openingBalanceCents ?? 0) / 100,
+  taxRateId: r.taxRef || '',
+  tin: r.tin || '', email: r.email || '', phone: r.phone || '',
+  mobile: r.mobile || '', website: r.website || '',
+  billingStreet: addr(r.billingAddress).street || '', billingCity: addr(r.billingAddress).city || '',
+  billingZip: addr(r.billingAddress).zip || '', billingCountry: addr(r.billingAddress).country || '',
+  shippingStreet: addr(r.shippingAddress).street || '', shippingCity: addr(r.shippingAddress).city || '',
+  shippingZip: addr(r.shippingAddress).zip || '', shippingCountry: addr(r.shippingAddress).country || '',
+  banks: Array.isArray(r.banks) ? r.banks : [],
+  contactPersons: Array.isArray(r.contactPersons) ? r.contactPersons : [],
+  notes: r.notes || '', internalRemarks: r.internalRemarks || '',
+  needsCompletion: !!r.needsCompletion,
+});
+const packAddr = (street, city, zip, country) =>
+  (street || city || zip || country) ? { street, city, zip, country } : null;
+const toApi = (m) => ({
+  name: m.name.trim(),
+  displayName: (m.displayName || m.name).trim(),
+  types: m.types || [],
+  parentId: m.parentId || null,
+  isActive: (m.status || 'Active') === 'Active',
+  costCenter: m.costCenter || '', category: m.category || '',
+  branch: m.branch || '', department: m.department || '',
+  arAccountCode: m.arAccountCode || '', apAccountCode: m.apAccountCode || '',
+  paymentTerms: m.paymentTerms || '', currency: m.currency || '',
+  creditLimitCents: Math.max(0, Math.round((Number(m.creditLimit) || 0) * 100)),
+  openingBalanceCents: Math.round((Number(m.openingBalance) || 0) * 100),
+  taxRef: m.taxRateId || null,
+  tin: m.tin || '', email: m.email || '', phone: m.phone || '',
+  mobile: m.mobile || '', website: m.website || '',
+  billingAddress: packAddr(m.billingStreet||'', m.billingCity||'', m.billingZip||'', m.billingCountry||''),
+  shippingAddress: packAddr(m.shippingStreet||'', m.shippingCity||'', m.shippingZip||'', m.shippingCountry||''),
+  banks: (m.banks || []).filter(b => b.bankCode || b.accountNumber || b.accountName),
+  contactPersons: (m.contactPersons || []).filter(p => p.firstName || p.lastName || p.email || p.mobile),
+  notes: m.notes || '', internalRemarks: m.internalRemarks || '',
+  needsCompletion: false,
 });
 
 // ── CSS ───────────────────────────────────────────────────
@@ -137,18 +192,26 @@ export default function ContactsPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
-  // ── Live data ───────────────────────────────────────────
-  useEffect(() => {
-    const u1 = onSnapshot(query(collection(db,'contacts'), orderBy('name','asc')),
-      s => setContacts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    getDocs(collection(db,'accounts')).then(s =>
-      setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const u2 = onSnapshot(query(collection(db,'taxRates'), orderBy('name')),
-      s => setTaxRates(s.docs.map(d=>({id:d.id,...d.data()})).filter(r=>r.isActive!==false)));
-    const u3 = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')),
-      s => setTaxGroups(s.docs.map(d=>({id:d.id,...d.data()})).filter(g=>g.isActive!==false)));
-    return () => { u1(); u2(); u3(); };
+  // ── Data (API; refetched after every mutation) ───────────
+  const loadContacts = useCallback(async () => {
+    try {
+      const rows = await listContacts();
+      setContacts(rows.map(fromApi));
+    } catch (e) {
+      showToast(`Couldn't load contacts: ${e instanceof ApiError ? e.detail : e.message}`);
+    }
   }, []);
+
+  useEffect(() => {
+    loadContacts();
+    listAccounts()
+      .then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' }))))
+      .catch(() => {});
+    // Tax rates/groups move to the API with the tax subsystem; until then the
+    // default-tax dropdown offers only "None" (the stored ref still round-trips).
+    setTaxRates([]);
+    setTaxGroups([]);
+  }, [loadContacts]);
 
   const arOptions = useMemo(() => accounts.filter(isReceivableAcct).map(a => ({ value:a.code, label:`(${a.code}) ${a.name}` })), [accounts]);
   const apOptions = useMemo(() => accounts.filter(isPayableAcct).map(a => ({ value:a.code, label:`(${a.code}) ${a.name}` })), [accounts]);
@@ -171,10 +234,7 @@ export default function ContactsPage() {
     return a;
   }, [contacts, search, filterType, filterStatus, filterIncomplete]);
 
-  // ── Sequential ID (atomic, assigned at save) ──────────────
-  const todayStr = () => new Date().toISOString().slice(0,10);
-
-  // ── Save ────────────────────────────────────────────────
+  // ── Save (contact number is assigned server-side on create) ──
   const save = async () => {
     if (!modal) return;
     if (!modal.name?.trim()) { showToast('Name is required.'); return; }
@@ -182,30 +242,13 @@ export default function ContactsPage() {
     if (modal.parentId && modal.parentId === modal.id) { showToast('A contact cannot be its own parent.'); return; }
     setSaving(true);
     try {
-      const email = auth.currentUser?.email || '';
-      const { isNew, id, ...rest } = modal;
-      const payload = {
-        ...rest,
-        name: rest.name.trim(),
-        displayName: (rest.displayName || rest.name).trim(),
-        type: rest.types[0] || '',          // legacy single-type compatibility
-        creditLimit: Number(rest.creditLimit)||0,
-        openingBalance: Number(rest.openingBalance)||0,
-        banks: (rest.banks||[]).filter(b => b.bankCode || b.accountNumber || b.accountName),
-        contactPersons: (rest.contactPersons||[]).filter(p => p.firstName || p.lastName || p.email || p.mobile),
-        needsCompletion: false,
-        updatedAt: serverTimestamp(),
-        updatedBy: email,
-      };
-      if (isNew) {
-        if (!payload.contactId) payload.contactId = await nextContactId(todayStr());
-        await addDoc(collection(db,'contacts'), { ...payload, createdAt:serverTimestamp(), createdBy:email });
-      } else {
-        await updateDoc(doc(db,'contacts',id), payload);
-      }
+      const payload = toApi(modal);
+      if (modal.isNew) await createContact(payload);
+      else await updateContact(modal.id, payload);
       showToast('Contact saved.'); setModal(null);
+      await loadContacts();
     } catch (e) {
-      showToast('Error: ' + e.message);
+      showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message));
     }
     setSaving(false);
   };
@@ -213,11 +256,17 @@ export default function ContactsPage() {
   const doDelete = (c) => {
     const childCount = contacts.filter(x => x.parentId === c.id).length;
     const msg = childCount > 0
-      ? `Delete contact "${c.name}"? It has ${childCount} sub-contact(s) which will be orphaned.`
+      ? `Delete contact "${c.name}"? It has ${childCount} sub-contact(s) which will be detached.`
       : `Delete contact "${c.name}"?`;
     askConfirm(msg, async () => {
-      await deleteDoc(doc(db,'contacts',c.id));
-      showToast('Contact deleted.');
+      try {
+        await apiDeleteContact(c.id);
+        showToast('Contact deleted.');
+        await loadContacts();
+      } catch (e) {
+        // 409 contact_in_use → referenced by vouchers; suggest deactivating.
+        showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message));
+      }
     });
   };
 
