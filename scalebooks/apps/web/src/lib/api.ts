@@ -23,6 +23,14 @@ export function setTokenRefresher(fn: (() => Promise<string | null>) | null): vo
   _refresher = fn;
 }
 
+// The active workspace (an identity may belong to several). Sent as `x-org-id`
+// so the API scopes every request to the chosen org. Set by AuthProvider once
+// the user picks (or auto-selects) a workspace.
+let _orgId: string | null = null;
+export function setActiveOrg(orgId: string | null): void {
+  _orgId = orgId;
+}
+
 export interface AccountDto {
   id: string;
   code: string;
@@ -71,6 +79,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, retried = false): P
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (_accessToken) headers["authorization"] = `Bearer ${_accessToken}`;
   else if (DEV_USER_ID) headers["x-user-id"] = DEV_USER_ID; // local dev only
+  if (_orgId) headers["x-org-id"] = _orgId; // active workspace
   if (init?.headers) Object.assign(headers, init.headers);
 
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
@@ -104,6 +113,17 @@ export interface MeDto {
 
 /** The signed-in user's resolved workspace (org id, name, tenant code) + role. */
 export const getMe = () => apiFetch<MeDto>("/auth/me");
+
+export interface WorkspaceDto {
+  id: string;
+  code: string;
+  name: string;
+  role: string;
+}
+
+/** Every workspace the signed-in identity can access (drives the picker). */
+export const listWorkspaces = () =>
+  apiFetch<{ email: string; workspaces: WorkspaceDto[] }>("/auth/workspaces");
 
 export const listAccounts = () =>
   apiFetch<{ accounts: AccountDto[] }>("/accounts").then((r) => r.accounts);

@@ -6,10 +6,11 @@ import { VouchersPage } from "./pages/VouchersPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { UsersPage } from "./pages/UsersPage";
 import { LoginPage } from "./auth/LoginPage";
+import { WorkspacePicker } from "./auth/WorkspacePicker";
 import { authEnabled, useAuth } from "./auth/AuthProvider";
 
 function Nav() {
-  const { session, org, signOut } = useAuth();
+  const { session, org, workspaces, switchWorkspace, signOut } = useAuth();
   const link = (isActive: boolean) =>
     `rounded-lg px-3 py-1.5 text-sm font-medium ${
       isActive ? "bg-primary-subtle text-primary" : "text-[#6B7280] hover:text-[#1F2937]"
@@ -19,8 +20,19 @@ function Nav() {
       <span className="flex items-baseline gap-2">
         <span className="text-lg font-semibold">Sentire Books</span>
         {org && (
-          <span className="text-xs font-medium text-[#9CA3AF]" title={`Workspace: ${org.code}`}>
-            {org.name}
+          <span className="flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[#9CA3AF]" title={`Workspace: ${org.code}`}>
+              {org.name}
+            </span>
+            {workspaces.length > 1 && (
+              <button
+                onClick={() => switchWorkspace()}
+                className="text-[11px] font-medium text-primary hover:underline"
+                title="Switch workspace"
+              >
+                Switch
+              </button>
+            )}
           </span>
         )}
       </span>
@@ -74,6 +86,7 @@ export function App() {
         </div>
       );
     }
+    if (phase === "choosing") return <WorkspacePicker />;
     if (phase !== "ready" || !session) return <LoginPage />;
   }
 

@@ -26,7 +26,7 @@ app.use(
   "*",
   cors({
     origin: (origin) => (allowedOrigins.includes(origin) ? origin : (allowedOrigins[0] ?? "*")),
-    allowHeaders: ["content-type", "authorization", "x-user-id"],
+    allowHeaders: ["content-type", "authorization", "x-user-id", "x-org-id"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   }),
 );

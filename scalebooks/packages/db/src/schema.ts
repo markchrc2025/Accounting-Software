@@ -74,7 +74,10 @@ export const appUsers = pgTable(
     role: userRole("role").notNull().default("maker"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [unique("app_users_email_key").on(t.email)],
+  // Unique PER workspace, not globally: one email may belong to many workspaces
+  // (a bookkeeper serving several clients). Case-insensitivity is enforced by the
+  // expression index app_users_org_email_lower_key — see 0009_multi_workspace.sql.
+  (t) => [unique("app_users_org_email_key").on(t.orgId, t.email)],
 );
 
 export const accounts = pgTable(

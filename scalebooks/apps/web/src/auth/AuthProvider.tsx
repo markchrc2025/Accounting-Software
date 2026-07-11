@@ -1,26 +1,34 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { setAccessToken, setTokenRefresher, getMe, ApiError } from "../lib/api";
+import {
+  setAccessToken,
+  setActiveOrg,
+  setTokenRefresher,
+  getMe,
+  listWorkspaces,
+  ApiError,
+  type WorkspaceDto,
+} from "../lib/api";
 
 /**
  * Auth + workspace state, backed by Authenticize via the OIDC Authorization Code
- * flow. Login is a full redirect handled by our API:
+ * flow. Login is a full redirect handled by our API (see src/oidc.ts):
  *
- *   login()                → browser goes to <API>/auth/login
- *   API redirects to Authenticize, user signs in there, comes back to the API
- *   API hands us a JWT in the URL fragment (#token=…)
+ *   login()  → <API>/auth/login → Authenticize → back with a JWT in the fragment
  *
- * We keep that token in memory (sessionStorage survives a refresh within the
- * tab) and send it as `Authorization: Bearer`. The API verifies it via
- * Authenticize's JWKS and admits the caller by email against the app_users
- * allowlist. No cross-domain cookies are involved, so this works across
- * separate *.sliplane.app hosts.
+ * We keep that token in sessionStorage and send it as `Authorization: Bearer`.
+ * Because one identity can belong to several workspaces (a bookkeeper serving
+ * many clients), after the token lands we list the caller's workspaces:
+ *   - exactly one  → enter it automatically
+ *   - more than one → show a picker (phase "choosing")
+ * The chosen workspace is sent as `x-org-id` on every request and remembered.
  *
- *   loading   → checking for a token (fragment or stored)
- *   anon      → no token; show the "Sign in with Sentire" screen
- *   verifying → have a token; confirming the workspace (GET /auth/me)
+ *   loading   → checking for a token
+ *   anon      → no token; show "Sign in with Sentire"
+ *   choosing  → signed in, multiple workspaces, waiting for a pick
+ *   verifying → confirming the chosen workspace (GET /auth/me)
  *   ready     → verified; the app can render
  */
-export type AuthPhase = "loading" | "anon" | "verifying" | "ready";
+export type AuthPhase = "loading" | "anon" | "choosing" | "verifying" | "ready";
 
 export interface OrgContext {
   id: string;
@@ -35,6 +43,7 @@ export interface AuthSession {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
 const TOKEN_KEY = "sb.token";
+const ORG_KEY = "sb.org";
 
 // Auth is on unless a dev user id is configured (local no-login bypass, paired
 // with the API's AUTH_DEV_BYPASS).
@@ -56,7 +65,6 @@ const writeSS = (k: string, v: string | null) => {
   }
 };
 
-/** Human-readable copy for the error codes the API callback can hand back. */
 function mapCallbackError(code: string): string {
   switch (code) {
     case "management_account":
@@ -81,9 +89,12 @@ interface AuthState {
   session: AuthSession | null;
   phase: AuthPhase;
   org: OrgContext | null;
+  workspaces: WorkspaceDto[];
   authError: string | null;
   clearAuthError: () => void;
   login: () => void;
+  chooseWorkspace: (orgId: string) => void;
+  switchWorkspace: () => void;
   signOut: () => void;
 }
 
@@ -93,6 +104,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [phase, setPhase] = useState<AuthPhase>(authEnabled ? "loading" : "ready");
   const [org, setOrg] = useState<OrgContext | null>(null);
+  const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
   const [authError, setAuthError] = useState<string | null>(null);
   const started = useRef(false);
 
@@ -113,7 +125,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const hashError = frag.get("error");
 
     if (hashToken || hashError) {
-      // Strip the fragment so the token/error doesn't linger in the URL bar.
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
 
@@ -129,12 +140,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     writeSS(TOKEN_KEY, token);
-    void verify(token);
+    void resolveWorkspaces(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function verify(token: string) {
+  /** With a valid token, decide which workspace to enter. */
+  async function resolveWorkspaces(token: string) {
     setAccessToken(token);
+    setPhase("verifying");
+    try {
+      const { workspaces: list } = await listWorkspaces();
+      setWorkspaces(list);
+
+      if (list.length === 0) {
+        writeSS(TOKEN_KEY, null);
+        setAccessToken(null);
+        setAuthError(
+          "Your account isn't on any workspace's user list yet. Ask your admin to add you.",
+        );
+        setPhase("anon");
+        return;
+      }
+      if (list.length === 1) {
+        await enter(list[0]!.id);
+        return;
+      }
+      // Multiple workspaces — reuse a remembered choice, else ask.
+      const remembered = readSS(ORG_KEY);
+      if (remembered && list.some((w) => w.id === remembered)) {
+        await enter(remembered);
+      } else {
+        setPhase("choosing");
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        writeSS(TOKEN_KEY, null);
+        setAccessToken(null);
+        setPhase("anon");
+      } else {
+        setAuthError("We couldn't reach the server. Check your connection and try again.");
+        setPhase("anon");
+      }
+    }
+  }
+
+  /** Activate a workspace and confirm it server-side. */
+  async function enter(orgId: string) {
+    setActiveOrg(orgId);
+    writeSS(ORG_KEY, orgId);
     setPhase("verifying");
     try {
       const me = await getMe();
@@ -143,21 +196,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAuthError(null);
       setPhase("ready");
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) {
-        // Authenticated by Authenticize, but not on this workspace's allowlist.
-        writeSS(TOKEN_KEY, null);
-        setAccessToken(null);
-        setAuthError(
-          "Your account isn't on this workspace's user list yet. Ask your admin to add you.",
-        );
-        setPhase("anon");
-      } else if (err instanceof ApiError && err.status === 401) {
-        // Token rejected/expired and no silent path — start over.
-        writeSS(TOKEN_KEY, null);
-        setAccessToken(null);
-        setPhase("anon");
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        // Token expired, or no access to this workspace — start over.
+        writeSS(ORG_KEY, null);
+        setActiveOrg(null);
+        if (err.status === 401) {
+          writeSS(TOKEN_KEY, null);
+          setAccessToken(null);
+          setPhase("anon");
+        } else {
+          setAuthError("You don't have access to that workspace.");
+          setPhase("choosing");
+        }
       } else {
-        // Transient (API unreachable) — keep the token, let the user retry.
         setAuthError("We couldn't reach the server. Check your connection and try again.");
         setPhase("anon");
       }
@@ -166,9 +217,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = () => redirectToLogin();
 
+  const chooseWorkspace = (orgId: string) => {
+    setAuthError(null);
+    void enter(orgId);
+  };
+
+  const switchWorkspace = () => {
+    setActiveOrg(null);
+    writeSS(ORG_KEY, null);
+    setOrg(null);
+    setAuthError(null);
+    setPhase("choosing");
+  };
+
   const signOut = () => {
     writeSS(TOKEN_KEY, null);
+    writeSS(ORG_KEY, null);
     setAccessToken(null);
+    setActiveOrg(null);
     setSession(null);
     setOrg(null);
     window.location.href = `${API_BASE}/auth/logout`;
@@ -180,9 +246,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         session,
         phase,
         org,
+        workspaces,
         authError,
         clearAuthError: () => setAuthError(null),
         login,
+        chooseWorkspace,
+        switchWorkspace,
         signOut,
       }}
     >
