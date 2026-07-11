@@ -2,9 +2,9 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, orderBy, query
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+  listAccounts, createAccount, updateAccount, deleteAccount as apiDeleteAccount,
+  importAccounts, ApiError,
+} from '../../../lib/api.js';
 
 const ACCOUNT_TYPES = ['Asset','Cost of Services','Equity','Expense','Income','Liability'];
 
@@ -21,6 +21,33 @@ const NORMAL_BALANCE = {
   'Asset':'Debit', 'Cost of Services':'Debit', 'Expense':'Debit',
   'Liability':'Credit', 'Equity':'Credit', 'Income':'Credit',
 };
+
+// ── Map between the portal's Title-case types and the API's lowercase enum.
+// 'Cost of Services' has no enum member yet, so it maps to 'expense' with the
+// label preserved in the subtype (round-trips via toUiType). Bank credit-line
+// fields (isCreditLine/creditLimit/interestRate) are deferred — no columns yet.
+const TYPE_TO_API = {
+  'Asset':'asset', 'Liability':'liability', 'Equity':'equity',
+  'Income':'income', 'Expense':'expense', 'Cost of Services':'expense',
+};
+const API_TO_TYPE = { asset:'Asset', liability:'Liability', equity:'Equity', income:'Income', expense:'Expense' };
+const toApiType = (t) => TYPE_TO_API[t] || 'expense';
+const toUiType = (apiType, subtype) =>
+  (subtype || '') === 'Cost of Services' ? 'Cost of Services' : (API_TO_TYPE[apiType] || 'Asset');
+// API row -> the shape the table/modal expect.
+const fromApi = (a) => {
+  const type = toUiType(a.type, a.subtype);
+  return {
+    id: a.id, code: a.code || '', name: a.name || '', type,
+    subType: a.subtype || '', normalBalance: NORMAL_BALANCE[type] || 'Debit',
+    notes: a.description || '', isActive: a.isActive,
+  };
+};
+// modal/preview -> API create/update payload.
+const toApiPayload = (r) => ({
+  code: (r.code || '').trim(), name: (r.name || '').trim(), type: toApiType(r.type),
+  subtype: r.subType || null, description: r.notes || null,
+});
 
 /* ── Import wizard field definitions ─────────────────────────── */
 const IMPORT_FIELDS = [
@@ -169,6 +196,16 @@ export default function COAPage() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
+  /* ── Load accounts from the API (replaces the Firestore live listener) ─────── */
+  const loadAccounts = useCallback(async () => {
+    try {
+      const rows = await listAccounts();
+      setAccounts(rows.map(fromApi));
+    } catch (e) {
+      showToast(`Couldn't load accounts: ${e instanceof ApiError ? e.detail : e.message}`);
+    }
+  }, []);
+
   /* ── Import: parse file via SheetJS ─────────────────────────── */
   const parseFile = useCallback((file) => {
     const ext = file.name.split('.').pop().toLowerCase();
@@ -196,31 +233,42 @@ export default function COAPage() {
     return wiz.rawRows.map(r => buildPreviewRow(r, wiz.mapping, existing));
   }, [accounts]);
 
-  /* ── Import: write to Firestore ─────────────────────────────── */
+  /* ── Import via the API: bulk-insert new rows, per-row update on overwrite ──── */
   const runImport = useCallback(async (wiz) => {
-    const toWrite = wiz.previewRows.filter(r =>
-      r.status === 'new' || (r.status === 'duplicate' && wiz.dupMode === 'overwrite')
-    );
-    if (!toWrite.length) { showToast('Nothing to import.'); return; }
-    setImpWiz(w => ({...w, importing:true, progress:0}));
-    let done = 0;
-    for (const r of toWrite) {
-      const payload = { code:r.code, name:r.name, type:r.type, subType:r.subType,
-        normalBalance:r.normalBalance, isCreditLine:r.isCreditLine,
-        creditLimit:r.creditLimit, interestRate:r.interestRate, notes:r.notes,
-        updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
-      try {
-        if (r.status === 'duplicate' && r.existingId)
-          await updateDoc(doc(db,'accounts',r.existingId), payload);
-        else
-          await addDoc(collection(db,'accounts'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
-      } catch { /* skip failed rows silently */ }
-      done++;
-      setImpWiz(w => w ? {...w, progress:Math.round((done/toWrite.length)*100)} : w);
+    const newRows = wiz.previewRows.filter(r => r.status === 'new');
+    const overwriteRows = wiz.dupMode === 'overwrite'
+      ? wiz.previewRows.filter(r => r.status === 'duplicate' && r.existingId) : [];
+    if (!newRows.length && !overwriteRows.length) { showToast('Nothing to import.'); return; }
+    setImpWiz(w => ({ ...w, importing:true, progress:0 }));
+
+    let inserted = 0, updated = 0, failed = 0;
+    try {
+      if (newRows.length) {
+        const res = await importAccounts(newRows.map(r => ({
+          code: r.code, name: r.name, type: toApiType(r.type),
+          subtype: r.subType || undefined, description: r.notes || undefined,
+          parentName: r.parent || undefined,
+        })));
+        inserted = (res && typeof res.inserted === 'number') ? res.inserted : newRows.length;
+        setImpWiz(w => w ? { ...w, progress: overwriteRows.length ? 50 : 100 } : w);
+      }
+      let done = 0;
+      for (const r of overwriteRows) {
+        try { await updateAccount(r.existingId, toApiPayload(r)); updated++; }
+        catch { failed++; }
+        done++;
+        setImpWiz(w => w ? { ...w, progress: 50 + Math.round((done / overwriteRows.length) * 50) } : w);
+      }
+    } catch (e) {
+      setImpWiz(null);
+      showToast(`Import failed: ${e instanceof ApiError ? e.detail : e.message}`);
+      return;
     }
+    await loadAccounts();
     setImpWiz(null);
-    showToast(`✅ Imported ${done} account${done!==1?'s':''}!`);
-  }, []);
+    const ok = inserted + updated;
+    showToast(`✅ Imported ${ok} account${ok !== 1 ? 's' : ''}!${failed ? ` (${failed} failed)` : ''}`);
+  }, [loadAccounts]);
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
   // Open create form when navigating from CreateFlyout
@@ -229,13 +277,7 @@ export default function COAPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({isNew:true,code:'',name:'',type:'Expense',subType:SUBTYPES_BY_TYPE['Expense'][0],isCreditLine:false,creditLimit:0,interestRate:0,notes:''}); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    const unsub = onSnapshot(
-      query(collection(db,'accounts'), orderBy('code','asc')),
-      s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() })))
-    );
-    return unsub;
-  }, []);
+  useEffect(() => { loadAccounts(); }, [loadAccounts]);
 
   const filtered = useMemo(() => {
     let a = [...accounts];
@@ -247,24 +289,31 @@ export default function COAPage() {
 
   const save = async () => {
     if (!modal) return;
-    const { isNew, id, code, name, type, subType, isCreditLine, creditLimit, interestRate, notes } = modal;
+    const { isNew, id, code, name } = modal;
     if (!code?.trim() || !name?.trim()) { showToast('Code and Name required.'); return; }
     setSaving(true);
     try {
-      const isBank = subType === 'Bank';
-      const hasCL  = isBank && !!isCreditLine;
-      const payload = { code:code.trim(), name:name.trim(), type:type||'Asset', normalBalance:NORMAL_BALANCE[type]||'Debit', subType:subType||'', isCreditLine:hasCL, creditLimit:hasCL?Number(creditLimit||0):0, interestRate:hasCL?Number(interestRate||0):0, notes:notes||'' };
-      if (isNew) await addDoc(collection(db,'accounts'), { ...payload, createdAt:serverTimestamp() });
-      else       await updateDoc(doc(db,'accounts',id), { ...payload, updatedAt:serverTimestamp() });
+      const payload = toApiPayload(modal);
+      if (isNew) await createAccount(payload);
+      else       await updateAccount(id, payload);
       showToast('Account saved.'); setModal(null);
-    } catch(e) { showToast('Error: '+e.message); }
+      await loadAccounts();
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message));
+    }
     setSaving(false);
   };
 
   const deleteAccount = (a) => {
     askConfirm(`Delete account "${a.code} - ${a.name}"?`, async () => {
-      await deleteDoc(doc(db,'accounts',a.id));
-      showToast('Account deleted.');
+      try {
+        await apiDeleteAccount(a.id);
+        showToast('Account deleted.');
+        await loadAccounts();
+      } catch (e) {
+        // API returns 409 account_in_use with a "deactivate instead" message.
+        showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message));
+      }
     });
   };
 
@@ -356,30 +405,6 @@ export default function COAPage() {
                     {(SUBTYPES_BY_TYPE[modal.type]||[]).map(s=><option key={s}>{s}</option>)}
                   </select>
                 </div>
-                <div className="col2" style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',background:modal.subType==='Bank'?'#f0f9ff':'#f8fafc',border:'1px solid',borderColor:modal.subType==='Bank'?'#bae6fd':'#e5e7eb',borderRadius:10}}>
-                  <input type="checkbox" id="coa-is-cl"
-                    checked={!!modal.isCreditLine}
-                    disabled={modal.subType !== 'Bank'}
-                    onChange={e=>setModal(m=>({...m,isCreditLine:e.target.checked}))}
-                    style={{width:16,height:16,cursor:modal.subType==='Bank'?'pointer':'not-allowed',flexShrink:0}}
-                  />
-                  <label htmlFor="coa-is-cl" style={{fontSize:13,fontWeight:700,color:modal.subType==='Bank'?'#0369a1':'#94a3b8',cursor:modal.subType==='Bank'?'pointer':'not-allowed',userSelect:'none',margin:0}}>
-                    Credit Line
-                    {modal.subType !== 'Bank' && <span style={{fontSize:11,fontWeight:400,marginLeft:6}}>— only available for Bank accounts</span>}
-                  </label>
-                </div>
-                {modal.isCreditLine && (
-                  <>
-                    <div className="field">
-                      <label>Credit Limit</label>
-                      <input type="number" value={modal.creditLimit||0} onChange={e=>setModal(m=>({...m,creditLimit:e.target.value}))} />
-                    </div>
-                    <div className="field">
-                      <label>Interest Rate (monthly, e.g. 0.015 = 1.5%)</label>
-                      <input type="number" step="0.001" value={modal.interestRate||0} onChange={e=>setModal(m=>({...m,interestRate:e.target.value}))} />
-                    </div>
-                  </>
-                )}
                 <div className="field col2" style={{marginTop:4}}>
                   <label>Notes</label>
                   <input value={modal.notes||''} onChange={e=>setModal(m=>({...m,notes:e.target.value}))} placeholder="Optional notes" />
@@ -466,7 +491,7 @@ export default function COAPage() {
               <div style={{marginTop:20}}>
                 <div style={{fontSize:11,fontWeight:800,color:'#64748b',letterSpacing:'.06em',textTransform:'uppercase',marginBottom:10}}>Duplicate Handling</div>
                 {[
-                  {val:'skip',      label:'Skip Duplicates',    desc:'Keep existing accounts in Firestore; rows with a matching Account Code are ignored.'},
+                  {val:'skip',      label:'Skip Duplicates',    desc:'Keep existing accounts; rows whose name already exists are ignored.'},
                   {val:'overwrite', label:'Overwrite Accounts', desc:'Update existing accounts with the values from this import file.'},
                 ].map(opt => (
                   <label key={opt.val} style={{display:'flex',alignItems:'flex-start',gap:10,padding:'11px 14px',border:'1px solid',borderColor:impWiz.dupMode===opt.val?'#f97316':'#e5e7eb',borderRadius:10,marginBottom:8,cursor:'pointer',background:impWiz.dupMode===opt.val?'#fff7ed':'#fff'}}>

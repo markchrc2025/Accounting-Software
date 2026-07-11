@@ -23,6 +23,8 @@ export const zAccountInput = z.object({
     .regex(/^[0-9A-Za-z.\-]+$/, "Code may contain only letters, digits, dot, and dash"),
   name: z.string().trim().min(1, "Account name is required").max(120),
   type: z.enum(ACCOUNT_TYPES),
+  subtype: z.string().trim().max(120).nullable().optional(),
+  description: z.string().trim().max(2000).nullable().optional(),
   isActive: z.boolean().default(true),
 });
 
