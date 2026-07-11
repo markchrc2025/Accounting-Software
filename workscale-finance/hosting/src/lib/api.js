@@ -84,6 +84,11 @@ function periodQuery(p) {
 }
 
 export const listAccounts = () => apiFetch('/accounts').then((r) => r.accounts);
+export const createAccount = (payload) =>
+  apiFetch('/accounts', { method: 'POST', body: JSON.stringify(payload) }).then((r) => r.account);
+export const updateAccount = (id, payload) =>
+  apiFetch(`/accounts/${id}`, { method: 'PUT', body: JSON.stringify(payload) }).then((r) => r.account);
+export const deleteAccount = (id) => apiFetch(`/accounts/${id}`, { method: 'DELETE' });
 export const listContacts = (type) =>
   apiFetch(`/contacts${type ? `?type=${type}` : ''}`).then((r) => r.contacts);
 export const createContact = (payload) =>
