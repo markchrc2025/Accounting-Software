@@ -1,66 +1,29 @@
-import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { auth, db } from '../firebase.js';
+import { useAuth } from './AuthProvider.jsx';
+import WorkspacePicker from './WorkspacePicker.jsx';
 
+/**
+ * Gate the app on an Authenticize session that resolves to a workspace. The
+ * allowlist check now happens server-side (GET /auth/me against app_users) — the
+ * provider surfaces "not on the list" as an auth error on the login screen.
+ */
 export default function AuthGuard({ children }) {
-  const [status, setStatus] = useState('loading'); // 'loading' | 'allowed' | 'denied'
-  const [denyReason, setDenyReason] = useState('');
-  const [denyUid, setDenyUid] = useState('');
+  const { phase } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        navigate('/login', { replace: true });
-        return;
-      }
+    if (phase === 'anon') navigate('/login', { replace: true });
+  }, [phase, navigate]);
 
-      // Check if user exists in appUsers by email
-      const email = user.email?.toLowerCase();
-      if (!email) {
-        setStatus('denied');
-        setDenyReason('No email on this account.');
-        setDenyUid(user.uid);
-        return;
-      }
-      const q = query(collection(db, 'appUsers'), where('email', '==', email));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        setStatus('allowed');
-      } else {
-        setStatus('denied');
-        setDenyReason(user.email);
-        setDenyUid(user.uid);
-      }
-    });
-    return unsub;
-  }, [navigate]);
-
-  if (status === 'loading') {
+  if (phase === 'loading' || phase === 'verifying') {
     return (
       <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', fontFamily: 'Inter, sans-serif', color: '#64748b' }}>
         Loading…
       </div>
     );
   }
-
-  if (status === 'denied') {
-    return (
-      <div style={{ display: 'flex', height: '100vh', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: 'Inter, sans-serif', gap: 12 }}>
-        <div style={{ fontSize: 48 }}>🔒</div>
-        <h2 style={{ margin: 0 }}>Access Denied</h2>
-        <p style={{ color: '#666', margin: 0 }}>Your account (<strong>{denyReason}</strong>) is not authorised to access this portal.</p>
-        <p style={{ fontFamily: 'monospace', fontSize: 12, background: '#f1f5f9', padding: '6px 12px', borderRadius: 8, margin: 0, userSelect: 'all' }}>UID: {denyUid}</p>
-        <p style={{ color: '#999', fontSize: 12, margin: 0 }}>Contact your system administrator.</p>
-        <button onClick={() => { auth.signOut(); navigate('/login'); }}
-          style={{ marginTop: 8, padding: '10px 20px', borderRadius: 12, border: 'none', background: '#0b1220', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>
-          Sign out
-        </button>
-      </div>
-    );
-  }
-
+  if (phase === 'choosing') return <WorkspacePicker />;
+  if (phase !== 'ready') return null; // 'anon' → redirecting to /login
   return children;
 }

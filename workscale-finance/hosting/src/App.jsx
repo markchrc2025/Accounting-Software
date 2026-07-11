@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider } from './auth/AuthProvider.jsx';
 import AuthGuard from './auth/AuthGuard.jsx';
 import LoginPage from './auth/LoginPage.jsx';
 import AppShell from './layouts/AppShell.jsx';
@@ -8,7 +9,8 @@ import ScaleBooksApp from './modules/scalebooks/ScaleBooksApp.jsx';
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
+      <AuthProvider>
+        <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route
           path="/*"
@@ -26,7 +28,8 @@ export default function App() {
             </AuthGuard>
           }
         />
-      </Routes>
+        </Routes>
+      </AuthProvider>
     </BrowserRouter>
   );
 }
