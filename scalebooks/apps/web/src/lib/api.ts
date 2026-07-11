@@ -125,6 +125,13 @@ export interface WorkspaceDto {
 export const listWorkspaces = () =>
   apiFetch<{ email: string; workspaces: WorkspaceDto[] }>("/auth/workspaces");
 
+/** In-app email/password sign-in — returns a JWT (verified against Authenticize). */
+export const signInWithPassword = (email: string, password: string) =>
+  apiFetch<{ token: string }>("/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+
 export const listAccounts = () =>
   apiFetch<{ accounts: AccountDto[] }>("/accounts").then((r) => r.accounts);
 
