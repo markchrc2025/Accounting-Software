@@ -487,6 +487,41 @@ $$;
 REVOKE ALL ON FUNCTION get_user_context(text) FROM public;
 GRANT EXECUTE ON FUNCTION get_user_context(text) TO sentire_books_app;
 
+-- ───────────────────────────── 0009_multi_workspace.sql ─────────────────────────────
+-- One identity (email) may belong to MULTIPLE workspaces (a bookkeeper serving
+-- several clients). Email is unique PER workspace; after login the app lists the
+-- caller's workspaces and (if >1) shows a picker. Each request carries the chosen
+-- org (x-org-id) and resolves to that specific membership.
+ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_email_key;
+DROP INDEX IF EXISTS app_users_email_lower_key;
+CREATE UNIQUE INDEX IF NOT EXISTS app_users_org_email_lower_key ON app_users (org_id, lower(email));
+
+DROP FUNCTION IF EXISTS get_user_workspaces(text);
+CREATE FUNCTION get_user_workspaces(p_email text)
+RETURNS TABLE (user_id text, org_id uuid, role user_role, email text, full_name text, org_code text, org_name text)
+LANGUAGE sql SECURITY DEFINER SET search_path = public STABLE AS $$
+  SELECT u.id, u.org_id, u.role, u.email, u.full_name, o.code, o.name
+  FROM app_users u
+  JOIN organizations o ON o.id = u.org_id
+  WHERE lower(u.email) = lower(p_email)
+  ORDER BY o.name
+$$;
+REVOKE ALL ON FUNCTION get_user_workspaces(text) FROM public;
+GRANT EXECUTE ON FUNCTION get_user_workspaces(text) TO sentire_books_app;
+
+DROP FUNCTION IF EXISTS get_user_context(text);
+DROP FUNCTION IF EXISTS get_user_context(text, uuid);
+CREATE FUNCTION get_user_context(p_email text, p_org_id uuid)
+RETURNS TABLE (user_id text, org_id uuid, role user_role, email text, full_name text, org_code text, org_name text)
+LANGUAGE sql SECURITY DEFINER SET search_path = public STABLE AS $$
+  SELECT u.id, u.org_id, u.role, u.email, u.full_name, o.code, o.name
+  FROM app_users u
+  JOIN organizations o ON o.id = u.org_id
+  WHERE lower(u.email) = lower(p_email) AND u.org_id = p_org_id
+$$;
+REVOKE ALL ON FUNCTION get_user_context(text, uuid) FROM public;
+GRANT EXECUTE ON FUNCTION get_user_context(text, uuid) TO sentire_books_app;
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════
@@ -508,10 +543,13 @@ ON CONFLICT (id) DO NOTHING;
 --    generated seed you can run instead.)
 
 -- ════════════════════════════════════════════════════════════════════════════
--- MAKE YOURSELF ADMIN — add your email to the workspace allowlist. Sentire admits
--- users by their VERIFIED email, so you only need the email here (the id is
+-- MAKE YOURSELF ADMIN — add your email to THIS workspace's allowlist. Sentire
+-- admits users by their VERIFIED email, so you only need the email here (the id is
 -- generated). Do this once for the first admin; after that, invite users from the
--- app's Users page. Then sign up / sign in with this same email via Authenticize.
+-- app's Users page. Then sign in with this same email via Authenticize.
+--
+-- The same email may be added to several workspaces (one row per workspace, each
+-- with its own role) — after login the app lets you pick which to enter.
 -- ════════════════════════════════════════════════════════════════════════════
 -- INSERT INTO app_users (org_id, email, full_name, role)
 -- VALUES (
@@ -520,4 +558,4 @@ ON CONFLICT (id) DO NOTHING;
 --   'Your Name',                              -- EDIT: your name
 --   'admin'
 -- )
--- ON CONFLICT (email) DO NOTHING;
+-- ON CONFLICT (org_id, lower(email)) DO NOTHING;
