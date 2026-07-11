@@ -95,6 +95,9 @@ export const listContacts = (type) =>
   apiFetch(`/contacts${type ? `?type=${type}` : ''}`).then((r) => r.contacts);
 export const createContact = (payload) =>
   apiFetch('/contacts', { method: 'POST', body: JSON.stringify(payload) }).then((r) => r.contact);
+export const updateContact = (id, payload) =>
+  apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(payload) }).then((r) => r.contact);
+export const deleteContact = (id) => apiFetch(`/contacts/${id}`, { method: 'DELETE' });
 export const listJournalEntries = () => apiFetch('/journal-entries').then((r) => r.entries);
 export const createJournalEntry = (payload) =>
   apiFetch('/journal-entries', { method: 'POST', body: JSON.stringify(payload) });
