@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { ZodError } from "zod";
 import { and, asc, eq } from "drizzle-orm";
-import { zAccountInput, zImportAccounts, normalBalanceFor } from "@scalebooks/domain";
+import { zAccountInput, zAccountUpdate, zImportAccounts, normalBalanceFor } from "@scalebooks/domain";
 import { withOrgContext, accounts } from "@scalebooks/db";
 import { requireAuth } from "../auth";
 
@@ -68,6 +68,103 @@ accountRoutes.post("/", async (c) => {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
     console.error("[createAccount]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Update an account (admin only). Partial: omitted fields are left unchanged.
+accountRoutes.put("/:id", async (c) => {
+  const auth = c.get("auth");
+  if (auth.role !== "admin") {
+    return c.json({ error: "forbidden", detail: "Admin role required" }, 403);
+  }
+  const id = c.req.param("id");
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+
+  try {
+    const input = zAccountUpdate.parse(body);
+    const set: Record<string, unknown> = {};
+    if (input.code !== undefined) set.code = input.code;
+    if (input.name !== undefined) set.name = input.name;
+    if (input.type !== undefined) {
+      set.type = input.type;
+      set.normalBalance = normalBalanceFor(input.type);
+    }
+    if (input.subtype !== undefined) set.subtype = input.subtype;
+    if (input.description !== undefined) set.description = input.description;
+    if (input.isActive !== undefined) set.isActive = input.isActive;
+    if (Object.keys(set).length === 0) {
+      return c.json({ error: "no_fields", detail: "Nothing to update" }, 400);
+    }
+
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        if (typeof set.name === "string") {
+          const dup = await tx
+            .select({ id: accounts.id })
+            .from(accounts)
+            .where(and(eq(accounts.orgId, auth.orgId), eq(accounts.name, set.name as string)));
+          if (dup.length > 0 && dup[0]!.id !== id) return { conflict: true as const };
+        }
+        const [row] = await tx
+          .update(accounts)
+          .set(set)
+          .where(and(eq(accounts.orgId, auth.orgId), eq(accounts.id, id)))
+          .returning();
+        return { row };
+      },
+    );
+
+    if ("conflict" in outcome) {
+      return c.json({ error: "duplicate_name", detail: "Another account already has that name" }, 409);
+    }
+    if (!outcome.row) return c.json({ error: "not_found" }, 404);
+    return c.json({ account: outcome.row });
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return c.json({ error: "validation_error", issues: err.issues }, 400);
+    }
+    console.error("[updateAccount]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Delete an account (admin only). Blocked if the account has postings (FK).
+accountRoutes.delete("/:id", async (c) => {
+  const auth = c.get("auth");
+  if (auth.role !== "admin") {
+    return c.json({ error: "forbidden", detail: "Admin role required" }, 403);
+  }
+  const id = c.req.param("id");
+
+  try {
+    const deleted = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const [row] = await tx
+          .delete(accounts)
+          .where(and(eq(accounts.orgId, auth.orgId), eq(accounts.id, id)))
+          .returning({ id: accounts.id });
+        return row;
+      },
+    );
+    if (!deleted) return c.json({ error: "not_found" }, 404);
+    return c.json({ ok: true });
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "23503") {
+      return c.json(
+        { error: "account_in_use", detail: "This account has postings and can't be deleted. Deactivate it instead." },
+        409,
+      );
+    }
+    console.error("[deleteAccount]", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

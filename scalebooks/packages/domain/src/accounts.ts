@@ -28,6 +28,26 @@ export const zAccountInput = z.object({
 
 export type AccountInput = z.infer<typeof zAccountInput>;
 
+/** Partial update of an account. Any omitted field is left unchanged; subtype and
+ * description may be set to null to clear them. */
+export const zAccountUpdate = z
+  .object({
+    code: z
+      .string()
+      .trim()
+      .min(1)
+      .max(20)
+      .regex(/^[0-9A-Za-z.\-]+$/, "Code may contain only letters, digits, dot, and dash"),
+    name: z.string().trim().min(1).max(120),
+    type: z.enum(ACCOUNT_TYPES),
+    subtype: z.string().trim().max(120).nullable(),
+    description: z.string().trim().max(2000).nullable(),
+    isActive: z.boolean(),
+  })
+  .partial();
+
+export type AccountUpdate = z.infer<typeof zAccountUpdate>;
+
 /**
  * A single account row from a Chart-of-Accounts import (e.g. an uploaded Excel).
  * More lenient than zAccountInput: codes are freeform display labels (real charts
