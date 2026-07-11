@@ -51,6 +51,8 @@ accountRoutes.post("/", async (c) => {
             code: input.code,
             name: input.name,
             type: input.type,
+            subtype: input.subtype ?? null,
+            description: input.description ?? null,
             normalBalance: normalBalanceFor(input.type),
             isActive: input.isActive,
           })
