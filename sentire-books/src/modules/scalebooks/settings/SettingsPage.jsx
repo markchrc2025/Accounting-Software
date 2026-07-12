@@ -192,6 +192,10 @@ export default function SettingsPage() {
   const [meName,        setMeName]        = useState('');
   const [counters,      setCounters]      = useState({}); // { periodKey: seq }
   const [seqOverrides,  setSeqOverrides]  = useState({}); // { periodKey: editedSeq }
+  // Data Settings (section bodies are plain-called, so their state lives here)
+  const [working,     setWorking]     = useState('');   // 'export' | 'import' | 'reset'
+  const [resetModal,  setResetModal]  = useState(null); // { typed }
+  const [importModal, setImportModal] = useState(null); // { snapshot, fileName, typed }
   // Users & Roles inner tabs
   const [usersRolesTab,     setUsersRolesTab]     = useState('user-list');
   const [approvalRouting,   setApprovalRouting]   = useState({ routes: [], delegates: [] });
@@ -1303,6 +1307,9 @@ export default function SettingsPage() {
   }
 
   // ── DataSettings section ──────────────────────────────────────────────────
+  // Section bodies are invoked as plain functions (SECTIONS[active]()), so they
+  // must NOT call hooks — their state lives on the parent (working/resetModal/
+  // importModal are declared with the other SettingsPage useState calls above).
   function DataSettings() {
     if (!isAdmin) {
       return (
@@ -1318,10 +1325,6 @@ export default function SettingsPage() {
         </>
       );
     }
-    const [working, setWorking] = useState('');           // 'export' | 'import' | 'reset'
-    const [resetModal, setResetModal] = useState(null);   // { typed }
-    const [importModal, setImportModal] = useState(null); // { snapshot, fileName, typed }
-
     const doExport = async () => {
       setWorking('export');
       try {
