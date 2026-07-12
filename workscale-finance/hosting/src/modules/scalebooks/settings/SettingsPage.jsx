@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import {
   getMe, getSettings, updateSettings,
-  listUsers, inviteUser, updateUser, deleteUser,
+  listUsers, inviteUser, updateUser, deleteUser, setUserPassword,
   listCounters, overrideCounter,
   purposeCategoriesApi, paymentTermsApi,
   ApiError,
@@ -338,9 +338,12 @@ export default function SettingsPage() {
   const saveUser = async () => {
     if (!userModal?.email?.trim()) return showToast('Email required.');
     if (!userModal?.fullName?.trim()) return showToast('Full Name required.');
+    const newPassword = (userModal.newPassword || '').trim();
+    if (newPassword && newPassword.length < 8) return showToast('Password must be at least 8 characters.');
     setSaving(true);
     try {
-      const { isNew, id, _isMeNotSaved, ...rest } = userModal;
+      const { isNew, id, _isMeNotSaved, newPassword: _np, ...rest } = userModal;
+      void _np;
       const treatAsNew = isNew || _isMeNotSaved;
       const roles        = Array.isArray(rest.roles) ? rest.roles : [];
       const moduleAccess = (rest.moduleAccess && typeof rest.moduleAccess === 'object') ? rest.moduleAccess : {};
@@ -356,15 +359,17 @@ export default function SettingsPage() {
       const email    = rest.email.trim().toLowerCase();
       const fullName = rest.fullName.trim();
       if (treatAsNew) {
-        await inviteUser({
+        const created = await inviteUser({
           email,
           fullName,
           role: deriveRole(roles),
           profile: { ...profile, inviteStatus: 'invited', invitedAt: new Date().toISOString() },
         });
-        showToast('User saved. ' + email + ' must also register at the Sentire account portal before signing in.');
+        if (newPassword && created?.id) await setUserPassword(created.id, newPassword);
+        showToast(newPassword ? 'User saved.' : 'User saved. Set a password (Edit) so they can sign in.');
       } else {
         await updateUser(id, { fullName, role: deriveRole(roles), profile });
+        if (newPassword) await setUserPassword(id, newPassword);
         showToast('User saved.');
       }
       setUserModal(null);
@@ -1402,9 +1407,8 @@ export default function SettingsPage() {
               </div>
               {userModal.isNew && (
                 <div className="info-box" style={{marginBottom:0}}>
-                  <strong>Heads up:</strong> adding a user here does not create their login. They sign up once at
-                  the Sentire account portal; this list controls which workspaces admit them. Ask them to register
-                  at the account portal with the <strong>same email</strong> before they sign in.
+                  <strong>Heads up:</strong> adding a user here admits their email to this workspace. Set a
+                  password below (or later, via Edit) so they can sign in with their email and that password.
                 </div>
               )}
               <div className="grid2">
@@ -1414,12 +1418,19 @@ export default function SettingsPage() {
                     disabled={!userModal.isNew}
                     onChange={e=>setUserModal(m=>({...m,email:e.target.value}))}
                     placeholder="user@company.com" autoFocus={userModal.isNew} />
-                  {userModal.isNew && <span style={{fontSize:11,color:'#94a3b8'}}>The user will sign in with this email — it must match their Sentire account portal registration.</span>}
+                  {userModal.isNew && <span style={{fontSize:11,color:'#94a3b8'}}>The user signs in with this email and the password you set.</span>}
                 </div>
                 <div className="field">
                   <label>Full Name *</label>
                   <input value={userModal.fullName||''} onChange={e=>setUserModal(m=>({...m,fullName:e.target.value}))}
                     placeholder="First M. Last" autoFocus={!userModal.isNew} />
+                </div>
+                <div className="field col2">
+                  <label>{userModal.isNew ? 'Password' : 'New password'}</label>
+                  <input type="password" autoComplete="new-password" value={userModal.newPassword||''}
+                    onChange={e=>setUserModal(m=>({...m,newPassword:e.target.value}))}
+                    placeholder="Min 8 characters" />
+                  <span style={{fontSize:11,color:'#94a3b8'}}>{userModal.isNew ? "Sets the user's sign-in password." : 'Leave blank to keep the current password.'}</span>
                 </div>
                 <div className="field">
                   <label>Work Email</label>

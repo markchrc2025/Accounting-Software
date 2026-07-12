@@ -2,11 +2,11 @@
  * API client for the Sentire Books Hono backend — the replacement for direct
  * Firestore access as this app is re-platformed onto Postgres.
  *
- * Auth model mirrors the rest of the ecosystem: a JWT (from Authenticize) is sent
- * as `Authorization: Bearer`, and the active workspace as `x-org-id`. On a 401 we
- * refresh once via the registered refresher, then bounce to login. Every module
- * calls these helpers instead of talking to Firestore; module-specific calls are
- * added here as each screen is rewired.
+ * A Books access token (from POST /auth/password) is sent as
+ * `Authorization: Bearer`, and the active workspace as `x-org-id`. On a 401 we
+ * bounce back to the login screen. Every module calls these helpers instead of
+ * talking to Firestore; module-specific calls are added here as each screen is
+ * rewired.
  */
 const BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787';
 
@@ -141,6 +141,8 @@ export const inviteUser = (p) =>
 export const updateUser = (id, p) =>
   apiFetch(`/users/${id}`, { method: 'PUT', body: JSON.stringify(p) }).then((r) => r.user);
 export const deleteUser = (id) => apiFetch(`/users/${id}`, { method: 'DELETE' });
+export const setUserPassword = (id, password) =>
+  apiFetch(`/users/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) });
 
 // ── document counters (admin inspection/override) ────────────────────────────
 export const listCounters = () => apiFetch('/settings/counters').then((r) => r.counters);
