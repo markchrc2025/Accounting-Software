@@ -37,6 +37,8 @@ RUN npm run build
 
 # ---- serve stage ----
 FROM nginx:1.27-alpine
-COPY workscale-finance/hosting/nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf comes via the build stage (it was copied in with the source),
+# so this stage never reads the build context — one less path to misconfigure.
+COPY --from=build /app/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
