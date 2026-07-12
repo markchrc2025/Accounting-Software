@@ -1,13 +1,12 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
-  collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
-  serverTimestamp, getDoc, getDocs
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+  listVouchers, getVoucher, createVoucherDraft, updateVoucher, deleteVoucher as apiDeleteVoucher,
+  transitionVoucher, voidVoucher as apiVoidVoucher,
+  listAccounts, listContacts, createAccount, getJournalEntry, ApiError,
+} from '../../../lib/api.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
-import { nextVoucherId, previewVoucherId, nextJournalEntryId } from '../../../utils/documentIds.js';
 import { consumeSchedulePrefill } from '../../../utils/schedulePrefill.js';
 import VoucherPdfModal from './VoucherPdfModal.jsx';
 
@@ -44,6 +43,47 @@ const STATUS_STYLES = {
 };
 
 const EMPTY_LINE = () => ({ id: uid(), contactId:'', contact:'', expenseAccount:'', description:'', amount:'', category:'', taxRateId:'', taxType:'N/A', taxRate:0, taxAmt:0, inclusive:false });
+
+// ── API <-> UI mapping ────────────────────────────────────────
+// The API speaks lowercase enums + centavos; the screen keeps its labels/pesos.
+const TYPE_TO_API = { PAYMENT:'payment', RECEIPT:'receipt', PAYROLL:'payroll', FINAL_PAY:'final_pay', LOAN:'loan', CHECK:'check' };
+const API_TO_TYPE = Object.fromEntries(Object.entries(TYPE_TO_API).map(([k,v])=>[v,k]));
+const VSTATUS_LABEL = {
+  draft:'Draft', pending:'Pending', for_verification:'For Verification', verified:'Verified',
+  for_approval:'For Approval', approved:'Approved', paid:'Paid', rejected:'Rejected',
+  posted:'Approved', void:'Voided',
+};
+// API list row -> the shape this screen renders (legacy portal fields).
+const fromApi = (v) => {
+  const m = v.meta || {};
+  return {
+    id: v.id,
+    voucherId: v.voucherNo,
+    voucherType: API_TO_TYPE[v.voucherType] || 'PAYMENT',
+    preparationDate: v.voucherDate,
+    purposeCategory: v.purposeCategory || '',
+    contactSummary: m.contactSummary || v.contactName || '',
+    totalAmount: (v.totalCents ?? 0) / 100,
+    status: VSTATUS_LABEL[v.status] || v.status,
+    notes: v.notes || '',
+    linkedJeId: v.journalEntryId || null,
+    paymentFromAccountCode: v.paymentFromAccountCode || '',
+    loanId: m.loanId || '', checkVoucherId: m.checkVoucherId || '',
+    createdBy: v.createdByEmail || '',
+    lines: null, // loaded on demand via getVoucher (see withLines)
+  };
+};
+// API detail line -> the legacy line shape (tax/contact config lives in meta).
+const lineFromApi = (l) => {
+  const m = l.meta || {};
+  return {
+    lineNo: l.lineNo, contactId: m.contactId || '', contact: m.contact || '',
+    expenseAccountCode: l.accountCode || '', description: l.description || '',
+    amount: (l.amountCents ?? 0) / 100, category: m.category || '',
+    taxRateId: m.taxRateId || '', taxType: m.taxType || 'N/A',
+    taxRate: m.taxRate || 0, taxAmt: m.taxAmt || 0, inclusive: !!m.inclusive,
+  };
+};
 
 const CSS = `
   .vp-wrap   { display:flex; flex-direction:column; height:100%; overflow:hidden; font-family:Inter,system-ui,sans-serif; background:#f8fafc; }
@@ -173,53 +213,53 @@ export default function VouchersPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const [confirmModal, setConfirmModal] = useState(null);
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
-  const user = auth.currentUser?.email || '';
 
-  // Fetch linked JE when viewModal opens
+  // Fetch the linked JE (posted at approval) when the view modal opens.
   useEffect(() => {
     setPreviewJe(null);
     if (!viewModal?.linkedJeId) return;
-    getDoc(doc(db, 'journalEntries', viewModal.linkedJeId))
-      .then(snap => { if (snap.exists()) setPreviewJe({ id: snap.id, ...snap.data() }); })
+    getJournalEntry(viewModal.linkedJeId)
+      .then(({ entry, lines: jl }) => setPreviewJe({
+        id: entry.id, jeId: entry.entryNo, date: entry.entryDate, status: entry.status,
+        lines: (jl || []).map(l => ({
+          accountCode: l.accountCode || '', accountName: l.accountName || '',
+          description: l.description || '', debit: (l.debitCents ?? 0) / 100, credit: (l.creditCents ?? 0) / 100,
+        })),
+      }))
       .catch(() => {});
   }, [viewModal]);
 
-  // Live data
-  useEffect(() => {
-    const unsub = onSnapshot(
-      query(collection(db, 'vouchers'), orderBy('createdAt', 'desc')),
-      snap => setVouchers(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(v => v.voucherType !== 'CHECK'))
-    );
-    const unsubAccounts = onSnapshot(query(collection(db,'accounts'), orderBy('code')), s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const unsubContacts = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const unsubRates  = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap => setTaxRates(snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>r.isActive!==false)));
-    const unsubGroups = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap => setTaxGroups(snap.docs.map(d=>({id:d.id,...d.data()})).filter(g=>g.isActive!==false)));
-    const unsubCats   = onSnapshot(query(collection(db,'purposeCategories'), orderBy('name')), snap => setPurposeCategories(snap.docs.map(d => d.data().name).filter(Boolean)));
-    // Loans (for LOAN voucher loanId picker)
-    getDoc(doc(db,'finc','profile')).then(snap => {
-      const data = snap.data() || {};
-      setLoans(Array.isArray(data.loans) ? data.loans : []);
-    });
-    // Loan-linked CVs (for checkVoucherId picker on Loan Vouchers)
-    getDocs(query(collection(db,'vouchers'), where('voucherType','==','CHECK'))).then(snap => {
-      setCvList(snap.docs.map(d => ({ docId:d.id, ...d.data() })).filter(v => v.loanId));
-    }).catch(() => {});
-    return () => { unsub(); unsubAccounts(); unsubContacts(); unsubRates(); unsubGroups(); unsubCats(); };
+  // Data (API; refetched after every mutation). CHECK vouchers live in the
+  // Check Registry module, so they're filtered from this list like before.
+  const loadVouchers = useCallback(async () => {
+    try {
+      const rows = await listVouchers({ limit: 500 });
+      setVouchers(rows.filter(v => v.voucherType !== 'check').map(fromApi));
+    } catch (e) {
+      showToast(`Couldn't load vouchers: ${e instanceof ApiError ? e.detail : e.message}`);
+    }
   }, []);
 
-  // Voucher IDs are assigned atomically by `nextVoucherId` at save time
-  // (see saveVoucher / duplicate). The form shows a placeholder preview
-  // computed from settings + the current preparation date.
-  const [idPreview, setIdPreview] = useState('');
   useEffect(() => {
-    if (editing) { setIdPreview(''); return; }
-    if (!showModal) return;
-    let cancelled = false;
-    previewVoucherId(form.voucherType || 'PAYMENT', form.preparationDate)
-      .then(p => { if (!cancelled) setIdPreview(p); })
-      .catch(() => { if (!cancelled) setIdPreview(''); });
-    return () => { cancelled = true; };
-  }, [showModal, editing, form.voucherType, form.preparationDate]);
+    loadVouchers();
+    listAccounts().then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })))).catch(()=>{});
+    listContacts().then(setContacts).catch(()=>{});
+    // Tax rates/groups + purpose categories move to the API with the tax
+    // subsystem (Phase 4); until then the pickers are empty but line tax config
+    // round-trips via voucher-line meta. Loans/check-linkage return with the
+    // loans domain (Phase 6).
+    setTaxRates([]); setTaxGroups([]); setPurposeCategories([]);
+    setLoans([]); setCvList([]);
+  }, [loadVouchers]);
+
+  // Voucher numbers are assigned server-side at save (PV/PR/FP/LV per type).
+  const idPreview = '';
+
+  /** Load a voucher's persisted lines and return it in the legacy shape. */
+  const withLines = useCallback(async (v) => {
+    const d = await getVoucher(v.id);
+    return { ...v, lines: (d.lines || []).map(lineFromApi) };
+  }, []);
 
   // Filtered + sorted
   const filtered = useMemo(() => {
@@ -277,34 +317,35 @@ export default function VouchersPage() {
     }
     const skipNote = skipped > 0 ? ` (${skipped} already submitted/approved will be skipped)` : '';
     askConfirm(`Submit ${submittable.length} Draft voucher(s) for verification?${skipNote}`, async () => {
-      await Promise.all(submittable.map(v => updateDoc(doc(db,'vouchers',v.id), { status:'For Verification', updatedAt:serverTimestamp(), updatedBy:user })));
+      const results = await Promise.allSettled(submittable.map(v => transitionVoucher(v.id, 'for_verification')));
+      const okCount = results.filter(r => r.status === 'fulfilled').length;
       setSelected(new Set());
-      showToast(`${submittable.length} voucher(s) submitted for verification.`);
+      showToast(`${okCount}/${submittable.length} voucher(s) submitted for verification.`);
+      await loadVouchers();
     });
   };
 
   const bulkVoid = () => {
     if (!selected.size) return;
     const count = selected.size;
-    askConfirm(`Void ${count} voucher(s)? This cannot be undone.`, async () => {
-      await Promise.all([...selected].map(id => updateDoc(doc(db,'vouchers',id), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })));
+    askConfirm(`Void ${count} voucher(s)? Approved vouchers will have their journal entries reversed.`, async () => {
+      const results = await Promise.allSettled([...selected].map(id => apiVoidVoucher(id)));
+      const okCount = results.filter(r => r.status === 'fulfilled').length;
       setSelected(new Set());
-      showToast(`${count} voucher(s) voided.`);
+      showToast(`${okCount}/${count} voucher(s) voided.`);
+      await loadVouchers();
     });
   };
 
   const bulkDelete = () => {
     if (!selected.size) return;
     const count = selected.size;
-    askConfirm(`Delete ${count} voucher(s)? This cannot be undone.`, async () => {
-      const ids = [...selected];
-      await Promise.all(ids.map(async id => {
-        const jeSnap = await getDocs(query(collection(db,'journalEntries'), where('sourceDocId','==',id)));
-        await Promise.all(jeSnap.docs.map(d => deleteDoc(d.ref)));
-      }));
-      await Promise.all(ids.map(id => deleteDoc(doc(db,'vouchers',id))));
+    askConfirm(`Delete ${count} voucher(s)? Only draft/rejected vouchers can be deleted.`, async () => {
+      const results = await Promise.allSettled([...selected].map(id => apiDeleteVoucher(id)));
+      const okCount = results.filter(r => r.status === 'fulfilled').length;
       setSelected(new Set());
-      showToast(`${count} voucher(s) deleted.`);
+      showToast(okCount === count ? `${count} voucher(s) deleted.` : `${okCount}/${count} deleted (others aren't deletable — void them instead).`);
+      await loadVouchers();
     });
   };
 
@@ -355,7 +396,22 @@ export default function VouchersPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); openNew(); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const openEdit = (v) => {
+  const openView = async (v) => {
+    try {
+      setViewModal(await withLines(v));
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
+  };
+
+  const openEdit = async (vRow) => {
+    let v = vRow;
+    try {
+      if (!Array.isArray(v.lines)) v = await withLines(v);
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+      return;
+    }
     setEditing(v);
     setForm({ voucherType:v.voucherType||'PAYMENT', preparationDate:v.preparationDate||today(), purposeCategory:v.purposeCategory||'', paymentFrom:v.paymentFromAccountCode||'', status:v.status||'Pending', notes:v.notes||'', inclusive: !!(v.lines||[]).find(l=>l.taxRateId)?.inclusive, loanId: v.loanId || '', checkVoucherId: v.checkVoucherId || '' });
     setLines((v.lines||[]).map(l => ({ id:uid(), contactId:l.contactId||'', contact:l.contact||'', expenseAccount:l.expenseAccountCode||'', description:l.description||'', amount:String(l.amount||''), category:l.category||'', taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:l.taxRate||0, taxAmt:l.taxAmt||0, inclusive:l.inclusive||false })));
@@ -364,144 +420,108 @@ export default function VouchersPage() {
   };
 
   const duplicate = async (v) => {
-    const newId = await nextVoucherId(v.voucherType||'PAYMENT', today());
-    await addDoc(collection(db,'vouchers'), {
-      voucherId: newId, voucherType: v.voucherType, preparationDate: today(),
-      purposeCategory: v.purposeCategory, paymentFromAccountCode: v.paymentFromAccountCode,
-      contactSummary: v.contactSummary, totalAmount: v.totalAmount,
-      status:'Pending', notes: v.notes||'',
-      lines: v.lines||[],
-      createdAt:serverTimestamp(), createdBy:user, updatedAt:serverTimestamp(), updatedBy:user
-    });
-    showToast('Voucher duplicated.');
+    try {
+      const src = Array.isArray(v.lines) ? v : await withLines(v);
+      await createVoucherDraft(toApiPayload({
+        voucherType: src.voucherType, preparationDate: today(),
+        purposeCategory: src.purposeCategory, paymentFrom: src.paymentFromAccountCode,
+        notes: src.notes, loanId: src.loanId, checkVoucherId: src.checkVoucherId,
+      }, (src.lines||[]).map(l => ({ ...l, expenseAccount: l.expenseAccountCode, amount: String(l.amount) }))));
+      showToast('Voucher duplicated.');
+      await loadVouchers();
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
   };
 
   const deleteVoucher = (v) => {
     askConfirm(`Delete voucher ${v.voucherId||v.id}?`, async () => {
-      const jeSnap = await getDocs(query(collection(db,'journalEntries'), where('sourceDocId','==',v.id)));
-      await Promise.all(jeSnap.docs.map(d => deleteDoc(d.ref)));
-      await deleteDoc(doc(db,'vouchers',v.id));
-      showToast('Voucher deleted.');
+      try {
+        await apiDeleteVoucher(v.id);
+        showToast('Voucher deleted.');
+        await loadVouchers();
+      } catch (e) {
+        showToast(e instanceof ApiError ? e.detail : e.message);
+      }
     });
   };
 
-  // Save voucher
-  const saveVoucher = async (newStatus) => {
-    const totalAmount = lines.reduce((s,l) => s + (Number(l.amount)||0), 0);
-    const contactSummary = [...new Set(lines.map(l=>l.contact).filter(Boolean))].join(', ');
-    let status = newStatus || form.status;
-    // Editing a voucher that's already in the approval workflow → revert to For Verification
-    if (editing && ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(editing.status)) {
-      status = 'For Verification';
-    }
-    const payload = {
-      voucherType:           form.voucherType,
-      preparationDate:       form.preparationDate,
-      purposeCategory:       form.purposeCategory,
-      paymentFromAccountCode:form.paymentFrom,
-      contactSummary,
-      totalAmount,
-      status,
-      notes:                 form.notes||'',
-      loanId: isLoanLinked ? (form.loanId || '') : '',
-      checkVoucherId: isLoan ? (form.checkVoucherId || '') : '',
-      lines: lines.map((l,i) => ({ lineNo:i+1, contactId:l.contactId||'', contact:l.contact, expenseAccountCode:l.expenseAccount, description:l.description, amount:Number(l.amount)||0, category:l.category, taxRateId:l.taxRateId||'', taxType:l.taxType||'N/A', taxRate:Number(l.taxRate)||0, taxAmt:Number(l.taxAmt)||0, inclusive:!!l.inclusive })),
-      ...(form.linkedScheduleId   ? { linkedScheduleId:   form.linkedScheduleId }   : {}),
-      ...(form.linkedScheduleDate ? { linkedScheduleDate: form.linkedScheduleDate } : {}),
-      updatedAt: serverTimestamp(), updatedBy: user
+  // Build the API payload from a form + lines. Tax/contact/category per-line
+  // config rides in `meta` (round-trips losslessly); amounts become centavos.
+  const toApiPayload = (f, ls) => {
+    const validLines = ls.filter(l => (Number(l.amount)||0) > 0);
+    const bank = accounts.find(a => a.code === f.paymentFrom || a.id === f.paymentFrom);
+    const contactUuid = validLines.map(l => l.contactId).find(id => id && String(id).length === 36) || null;
+    return {
+      type: TYPE_TO_API[f.voucherType] || 'payment',
+      contactId: contactUuid,
+      voucherDate: f.preparationDate,
+      notes: f.notes || null,
+      purposeCategory: f.purposeCategory || null,
+      paymentFromAccountId: bank?.id || null,
+      meta: {
+        inclusive: !!f.inclusive,
+        loanId: f.loanId || '', checkVoucherId: f.checkVoucherId || '',
+        linkedScheduleId: f.linkedScheduleId || '', linkedScheduleDate: f.linkedScheduleDate || '',
+        contactSummary: [...new Set(validLines.map(l => l.contact).filter(Boolean))].join(', '),
+      },
+      lines: validLines.map(l => {
+        const acct = accounts.find(a => a.code === l.expenseAccount || a.id === l.expenseAccount);
+        return {
+          accountId: acct?.id,
+          description: l.description || undefined,
+          amountCents: Math.round((Number(l.amount)||0) * 100),
+          meta: {
+            contactId: l.contactId || '', contact: l.contact || '', category: l.category || '',
+            taxRateId: l.taxRateId || '', taxType: l.taxType || 'N/A',
+            taxRate: Number(l.taxRate)||0, taxAmt: Number(l.taxAmt)||0, inclusive: !!l.inclusive,
+          },
+        };
+      }),
     };
+  };
 
-    // Build JE lines from current journalLines (parse "(code) Name" format)
-    const buildJeLines = () => journalLines.map(j => {
-      const m = j.account.match(/^\(([^)]+)\)\s*(.*)/);
-      return { accountCode: m ? m[1] : j.account, accountName: m ? m[2] : j.account, description: '', debit: j.debit, credit: j.credit };
-    });
-
+  // Save. The server assigns the voucher number and posts the JE only at
+  // approval — the old client-side JE creation/syncing is gone.
+  const saveVoucher = async () => {
+    const payload = toApiPayload(form, lines);
+    if (!payload.lines.length) { showToast('Add at least one line with an amount.'); return; }
+    if (payload.lines.some(l => !l.accountId)) { showToast('Every line with an amount needs an account.'); return; }
     setSaving(true);
     try {
       if (editing) {
-        await updateDoc(doc(db,'vouchers',editing.id), payload);
-        // Always sync JE lines if already linked
-        if (editing.linkedJeId) {
-          // If this LV was saved without checkVoucherId but now has one, the JE
-          // would double-post. Void it so the clearing JE is the only GL entry.
-          if (form.voucherType === 'LOAN' && form.checkVoucherId) {
-            await updateDoc(doc(db,'journalEntries',editing.linkedJeId), {
-              status: 'Voided', notes: 'Voided — JE will be posted by linked check clearing.',
-              updatedAt: serverTimestamp(), updatedBy: user
-            });
-            await updateDoc(doc(db,'vouchers',editing.id), { linkedJeId: null, updatedAt: serverTimestamp() });
-          } else {
-            const jeLines = buildJeLines();
-            await updateDoc(doc(db,'journalEntries',editing.linkedJeId), {
-              lines: jeLines,
-              totalDebit:  jeLines.reduce((s,l)=>s+l.debit, 0),
-              totalCredit: jeLines.reduce((s,l)=>s+l.credit, 0),
-              date: form.preparationDate,
-              updatedAt: serverTimestamp(), updatedBy: user
-            });
-          }
-        }
-        // Create JE if not yet linked (e.g. old voucher pre-dating this feature)
-        if (!editing.linkedJeId) {
-          const jeLines = buildJeLines();
-          const jeId = await nextJournalEntryId(form.preparationDate);
-          const voucherLabel = VOUCHER_TYPES.find(t=>t.value===form.voucherType)?.label || form.voucherType;
-          const jeRef = await addDoc(collection(db,'journalEntries'), {
-            jeId, date: form.preparationDate,
-            description: `${voucherLabel} ${editing.voucherId||''}${form.purposeCategory?' — '+form.purposeCategory:''}`,
-            type: 'Voucher', reference: editing.voucherId||'', sourceDocId: editing.id, sourceDocType: 'voucher',
-            status: 'For Clearing',
-            lines: jeLines, totalDebit: jeLines.reduce((s,l)=>s+l.debit,0), totalCredit: jeLines.reduce((s,l)=>s+l.credit,0),
-            createdAt: serverTimestamp(), createdBy: user, updatedAt: serverTimestamp(), updatedBy: user
-          });
-          await updateDoc(doc(db,'vouchers',editing.id), { linkedJeId: jeRef.id });
-        }
+        await updateVoucher(editing.id, payload);
         showToast('Voucher updated.');
       } else {
-        const voucherId = await nextVoucherId(form.voucherType, form.preparationDate);
-        const voucherRef = await addDoc(collection(db,'vouchers'), { ...payload, voucherId, createdAt:serverTimestamp(), createdBy:user });
-        // Check-linked Loan Vouchers are non-posting: the GL entry is created when
-        // the linked check is cleared in Check Registry. Skip JE here to prevent
-        // double-booking (LV JE + clearing settlement JE would both Dr expense / Cr Cash).
-        const isCheckLinkedLv = form.voucherType === 'LOAN' && !!(form.checkVoucherId);
-        if (!isCheckLinkedLv) {
-          // Always auto-create JE immediately on voucher creation
-          const jeLines = buildJeLines();
-          const jeId = await nextJournalEntryId(form.preparationDate);
-          const voucherLabel = VOUCHER_TYPES.find(t=>t.value===form.voucherType)?.label || form.voucherType;
-          const jeRef = await addDoc(collection(db,'journalEntries'), {
-            jeId, date: form.preparationDate,
-            description: `${voucherLabel} ${voucherId}${form.purposeCategory?' — '+form.purposeCategory:''}`,
-            type: 'Voucher', reference: voucherId, sourceDocId: voucherRef.id, sourceDocType: 'voucher',
-            status: 'For Clearing',
-            lines: jeLines, totalDebit: jeLines.reduce((s,l)=>s+l.debit,0), totalCredit: jeLines.reduce((s,l)=>s+l.credit,0),
-            createdAt: serverTimestamp(), createdBy: user, updatedAt: serverTimestamp(), updatedBy: user
-          });
-          await updateDoc(voucherRef, { linkedJeId: jeRef.id });
-        }
-        showToast('Voucher created.');
+        const res = await createVoucherDraft(payload);
+        // New vouchers enter the queue as Pending (the portal's default flow).
+        await transitionVoucher(res.id, 'pending').catch(() => {});
+        showToast(`Voucher ${res.voucherNo} created.`);
       }
       setShowModal(false);
-    } catch(e) { showToast('Error: ' + e.message); }
+      await loadVouchers();
+    } catch(e) {
+      showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message));
+    }
     setSaving(false);
   };
 
+  const ACCT_TYPE_TO_API = { 'Asset':'asset', 'Liability':'liability', 'Equity':'equity', 'Income':'income', 'Expense':'expense', 'Cost of Services':'expense' };
   const handleSaveNewAcct = async () => {
     if (!newAcctModal.code.trim() || !newAcctModal.name.trim()) { showToast('Account code and name are required.'); return; }
     setNewAcctModal(m => ({...m, saving:true}));
     try {
-      await addDoc(collection(db,'accounts'), {
-        code:      newAcctModal.code.trim(),
-        name:      newAcctModal.name.trim(),
-        type:      newAcctModal.type,
-        subType:   newAcctModal.subType,
-        parent:    newAcctModal.parent || '',
-        createdAt: serverTimestamp(), createdBy: user,
+      await createAccount({
+        code: newAcctModal.code.trim(),
+        name: newAcctModal.name.trim(),
+        type: ACCT_TYPE_TO_API[newAcctModal.type] || 'expense',
+        subtype: newAcctModal.type === 'Cost of Services' ? 'Cost of Services' : (newAcctModal.subType || null),
       });
+      const rows = await listAccounts();
+      setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })));
       showToast(`Account ${newAcctModal.code.trim()} created.`);
       setNewAcctModal(null);
-    } catch(e) { showToast('Error: ' + e.message); setNewAcctModal(m => ({...m, saving:false})); }
+    } catch(e) { showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message)); setNewAcctModal(m => ({...m, saving:false})); }
   };
 
   const sortIcon = (col) => sortCol === col ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
@@ -801,7 +821,7 @@ export default function VouchersPage() {
               )}
               {paginated.map(v => {
                 return (
-                  <tr key={v.id} style={{cursor:'pointer'}} onClick={() => setViewModal(v)}>
+                  <tr key={v.id} style={{cursor:'pointer'}} onClick={() => openView(v)}>
                     <td style={{textAlign:'center'}} onClick={e=>e.stopPropagation()}>
                       <input type="checkbox" checked={selected.has(v.id)} onChange={()=>toggleSel(v.id)} />
                     </td>
@@ -834,7 +854,7 @@ export default function VouchersPage() {
                             background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,
                             boxShadow:'0 8px 24px rgba(0,0,0,.12)',minWidth:140,padding:'4px 0',
                           }}>
-                            <button className="km-item" onClick={()=>{setViewModal(v);setOpenMenuId(null);}}>View</button>
+                            <button className="km-item" onClick={()=>{openView(v);setOpenMenuId(null);}}>View</button>
                             <button className="km-item" onClick={()=>{setPdfModal(v);setOpenMenuId(null);}}>Download PDF</button>
                             {canEdit(v) && (
                               <button className="km-item" onClick={()=>{openEdit(v);setOpenMenuId(null);}}>Edit</button>
@@ -1364,9 +1384,14 @@ export default function VouchersPage() {
                 {v.status === 'Pending' && (
                   <button className="btn btn-ghost btn-sm" style={{ color:'#c2410c', borderColor:'#fed7aa' }}
                     onClick={async () => {
-                      await updateDoc(doc(db, 'vouchers', v.id), { status: 'For Verification', updatedAt: serverTimestamp(), updatedBy: user });
-                      setViewModal(prev => prev ? { ...prev, status: 'For Verification' } : null);
-                      showToast('Voucher re-submitted for verification.');
+                      try {
+                        await transitionVoucher(v.id, 'for_verification');
+                        setViewModal(prev => prev ? { ...prev, status: 'For Verification' } : null);
+                        showToast('Voucher re-submitted for verification.');
+                        await loadVouchers();
+                      } catch (e) {
+                        showToast(e instanceof ApiError ? e.detail : e.message);
+                      }
                     }}>
                     Re-submit for Verification
                   </button>
