@@ -1319,7 +1319,7 @@ export default function SettingsPage() {
       );
     }
     const [working, setWorking] = useState('');           // 'export' | 'import' | 'reset'
-    const [resetModal, setResetModal] = useState(null);   // { keepContacts, keepReferenceData, keepCheckbooks, typed }
+    const [resetModal, setResetModal] = useState(null);   // { typed }
     const [importModal, setImportModal] = useState(null); // { snapshot, fileName, typed }
 
     const doExport = async () => {
@@ -1365,10 +1365,9 @@ export default function SettingsPage() {
     const doReset = async () => {
       setWorking('reset');
       try {
-        const { keepContacts, keepReferenceData, keepCheckbooks } = resetModal;
-        const r = await resetWorkspaceData({ keepContacts, keepReferenceData, keepCheckbooks });
+        const r = await resetWorkspaceData();
         setResetModal(null);
-        showToast('Workspace reset: ' + Object.values(r.wiped||{}).reduce((a,b)=>a+b,0) + ' records wiped. Document numbers restart at 0001.');
+        showToast('Workspace reset: ' + Object.values(r.wiped||{}).reduce((a,b)=>a+b,0) + ' records wiped. Default chart of accounts reinstalled; document numbers restart at 0001.');
       } catch(e) { showToast('Reset failed: ' + errMsg(e)); }
       setWorking('');
     };
@@ -1404,31 +1403,31 @@ export default function SettingsPage() {
         </div>
 
         <div className="sp-card" style={{border:'1px solid #fecaca'}}>
-          <div className="sp-card-title" style={{color:'#991b1b'}}>Danger Zone — Reset Workspace</div>
+          <div className="sp-card-title" style={{color:'#991b1b'}}>Danger Zone — Factory Reset Workspace</div>
           <p style={{margin:'0 0 12px',fontSize:13,color:'#374151',lineHeight:1.6}}>
-            Wipes all business data (journal, vouchers, billing, banking, loans, assets, projections…) and
-            <strong> restarts every auto-assigned document number at 0001</strong> — made for cleaning out test data
-            before go-live. Your users, sign-ins, organization settings, and chart of accounts are always kept.
-            Download a backup first.
+            Permanently deletes <strong>everything</strong> — all transactions, contacts, reference data, checkbooks,
+            and your chart of accounts — then reinstalls the <strong>default chart of accounts</strong> and
+            <strong> restarts every auto-assigned document number at 0001</strong>, leaving a brand-new workspace.
+            Only your users, sign-ins, and organization settings are kept. This is a testing tool for wiping the
+            books before go-live. <strong>Download a backup first</strong> — this cannot be undone.
           </p>
           <button className="btn btn-sm" style={dangerBtn} disabled={!!working}
-            onClick={()=>setResetModal({ keepContacts:true, keepReferenceData:true, keepCheckbooks:true, typed:'' })}>
-            Reset Workspace…
+            onClick={()=>setResetModal({ typed:'' })}>
+            Factory Reset Workspace…
           </button>
         </div>
 
         {resetModal && (
           <div className="backdrop" onClick={()=>setResetModal(null)}>
             <div className="modal" style={{width:'min(520px,98vw)'}} onClick={e=>e.stopPropagation()}>
-              <div className="modal-h"><strong style={{color:'#991b1b'}}>Reset Workspace</strong><button className="btn btn-ghost btn-sm" onClick={()=>setResetModal(null)}>✕</button></div>
+              <div className="modal-h"><strong style={{color:'#991b1b'}}>Factory Reset Workspace</strong><button className="btn btn-ghost btn-sm" onClick={()=>setResetModal(null)}>✕</button></div>
               <div className="modal-b" style={{display:'flex',flexDirection:'column',gap:12}}>
-                <p style={{margin:0,fontSize:13,color:'#374151'}}>All transactions will be permanently deleted and document numbers restart at 0001. Choose what to keep:</p>
-                {[['keepContacts','Keep contacts'],['keepReferenceData','Keep reference data (tax rates & groups, purpose categories, payment terms, asset types)'],['keepCheckbooks','Keep checkbooks']].map(([k,label])=>(
-                  <label key={k} style={{display:'flex',alignItems:'flex-start',gap:8,fontSize:13,cursor:'pointer'}}>
-                    <input type="checkbox" checked={resetModal[k]} onChange={e=>setResetModal(m=>({...m,[k]:e.target.checked}))} style={{marginTop:2}} />
-                    <span>{label}</span>
-                  </label>
-                ))}
+                <p style={{margin:0,fontSize:13,color:'#374151',lineHeight:1.6}}>
+                  This permanently deletes <strong>ALL data</strong> in this workspace — transactions, contacts,
+                  reference data, checkbooks, and the chart of accounts. The default chart of accounts is reinstalled
+                  and all document numbers restart at 0001. Users, sign-ins, and organization settings are kept.
+                  <strong> This cannot be undone.</strong>
+                </p>
                 <div className="field">
                   <label>Type <strong>RESET</strong> to confirm</label>
                   <input value={resetModal.typed} onChange={e=>setResetModal(m=>({...m,typed:e.target.value}))} placeholder="RESET" />
@@ -1437,7 +1436,7 @@ export default function SettingsPage() {
               <div className="modal-f">
                 <button className="btn btn-ghost" onClick={()=>setResetModal(null)}>Cancel</button>
                 <button className="btn" style={dangerBtn} disabled={resetModal.typed!=='RESET'||!!working} onClick={doReset}>
-                  {working==='reset' ? 'Resetting…' : 'Wipe Data & Reset Numbers'}
+                  {working==='reset' ? 'Resetting…' : 'Delete Everything & Reset'}
                 </button>
               </div>
             </div>
