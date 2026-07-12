@@ -16,6 +16,7 @@ const dayOfMonth = z.number().int().min(1).max(31).nullable().optional();
 const jsonBag = z.record(z.unknown()).nullable().optional();
 
 export const zLoanInput = z.object({
+  loanNo: z.string().trim().max(40).optional(), // server-assigned when absent
   name: z.string().trim().min(1, "Lender is required").max(200),
   loanType: z.string().trim().max(60).default("Term Loan"),
   disbursementDate: nullableDate,

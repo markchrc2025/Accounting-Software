@@ -30,6 +30,7 @@ const toPesos = (c) => Number(c || 0) / 100;
 const toCents = (p) => Math.round(Number(p || 0) * 100);
 const loanFromApi = (r) => ({
   id: r.id,
+  loanNo: r.loanNo || '',
   name: r.name || '',
   loanType: r.loanType || 'Term Loan',
   disbursementDate: r.disbursementDate || '',
@@ -1358,7 +1359,10 @@ export default function FinancialPage() {
                   const dSinceLast = daysBetween(st.lastPaymentDate, today);
                   return (
                     <tr key={l.id}>
-                      <td style={{ fontWeight:700 }}>{l.name || `Loan ${l.id}`}</td>
+                      <td style={{ fontWeight:700 }}>
+                        {l.name || `Loan ${l.id}`}
+                        {l.loanNo && <div style={{ fontFamily:'monospace', fontSize:11, fontWeight:600, color:'#94a3b8' }}>{l.loanNo}</div>}
+                      </td>
                       <td style={{ color:'#64748b' }}>{l.loanType || '—'}</td>
                       <td style={{ textAlign:'right' }}>{fmtCur(parseFloat(l.principal)||0)}</td>
                       <td style={{ textAlign:'right', fontWeight:800, color: st.outstandingPrincipal > 0 ? '#c2410c' : '#15803d' }}>
@@ -2448,6 +2452,7 @@ export default function FinancialPage() {
                       {l.name || 'Unnamed Loan'}
                     </div>
                     <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:3 }}>
+                      {l.loanNo && <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:700, color:'#64748b' }}>{l.loanNo}</span>}
                       <span className="lr-type-badge" style={{ background:typeColor.bg, color:typeColor.color }}>
                         {l.loanType || 'Term Loan'}
                       </span>
