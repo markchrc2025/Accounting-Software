@@ -11,6 +11,7 @@ import { reportRoutes } from "./routes/reports";
 import { contactRoutes } from "./routes/contacts";
 import { voucherRoutes } from "./routes/vouchers";
 import { settingsRoutes } from "./routes/settings";
+import { dataAdminRoutes } from "./routes/dataAdmin";
 import { checkbookRoutes, checkRoutes } from "./routes/checks";
 import { disbursementRoutes } from "./routes/disbursements";
 import {
@@ -75,6 +76,7 @@ app.route("/journal-entries", journalRoutes);
 app.route("/reports", reportRoutes);
 app.route("/contacts", contactRoutes);
 app.route("/vouchers", voucherRoutes);
+app.route("/settings/data", dataAdminRoutes);
 app.route("/settings", settingsRoutes);
 app.route("/checkbooks", checkbookRoutes);
 app.route("/checks", checkRoutes);

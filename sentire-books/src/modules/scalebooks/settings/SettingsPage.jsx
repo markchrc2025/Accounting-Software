@@ -4,6 +4,7 @@ import {
   getMe, getSettings, updateSettings,
   listUsers, inviteUser, updateUser, deleteUser, setUserPassword,
   listCounters, overrideCounter,
+  exportWorkspaceData, resetWorkspaceData, importWorkspaceData,
   purposeCategoriesApi, paymentTermsApi,
   ApiError,
 } from '../../../lib/api.js';
@@ -1317,36 +1318,155 @@ export default function SettingsPage() {
         </>
       );
     }
+    const [working, setWorking] = useState('');           // 'export' | 'import' | 'reset'
+    const [resetModal, setResetModal] = useState(null);   // { keepContacts, keepReferenceData, keepCheckbooks, typed }
+    const [importModal, setImportModal] = useState(null); // { snapshot, fileName, typed }
+
+    const doExport = async () => {
+      setWorking('export');
+      try {
+        const snap = await exportWorkspaceData();
+        const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `sentire-books-backup-${new Date().toISOString().slice(0,10)}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast('Backup downloaded.');
+      } catch(e) { showToast('Export failed: ' + errMsg(e)); }
+      setWorking('');
+    };
+
+    const pickImportFile = () => {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'application/json,.json';
+      inp.onchange = async () => {
+        const file = inp.files?.[0];
+        if (!file) return;
+        try {
+          const snapshot = JSON.parse(await file.text());
+          if (snapshot?.format !== 'sentire-books-export') return showToast('Not a Sentire Books backup file.');
+          setImportModal({ snapshot, fileName: file.name, typed: '' });
+        } catch { showToast('That file is not valid JSON.'); }
+      };
+      inp.click();
+    };
+
+    const doImport = async () => {
+      setWorking('import');
+      try {
+        const r = await importWorkspaceData(importModal.snapshot);
+        setImportModal(null);
+        showToast('Backup restored: ' + Object.values(r.restored||{}).reduce((a,b)=>a+b,0) + ' records.');
+      } catch(e) { showToast('Restore failed: ' + errMsg(e)); }
+      setWorking('');
+    };
+
+    const doReset = async () => {
+      setWorking('reset');
+      try {
+        const { keepContacts, keepReferenceData, keepCheckbooks } = resetModal;
+        const r = await resetWorkspaceData({ keepContacts, keepReferenceData, keepCheckbooks });
+        setResetModal(null);
+        showToast('Workspace reset: ' + Object.values(r.wiped||{}).reduce((a,b)=>a+b,0) + ' records wiped. Document numbers restart at 0001.');
+      } catch(e) { showToast('Reset failed: ' + errMsg(e)); }
+      setWorking('');
+    };
+
+    const dangerBtn = { background:'#dc2626', color:'#fff' };
     return (
       <>
         <div className="sp-ch">
           <h1>Data Settings</h1>
-          <p>How your data is stored, backed up, and restored. Accessible to Admins only.</p>
+          <p>Back up, restore, or reset this workspace. Accessible to Admins only.</p>
         </div>
 
         <div className="sp-card">
-          <div className="sp-card-title">Backups Now Happen at the Database Level</div>
-          <div style={{display:'flex',alignItems:'flex-start',gap:14}}>
-            <span style={{fontSize:22,flexShrink:0}}>🛡️</span>
-            <div>
-              <p style={{margin:'0 0 10px',fontSize:13,color:'#374151',lineHeight:1.6}}>
-                Your data now lives in a managed <strong>Postgres</strong> database hosted on <strong>Sliplane</strong>.
-                Backups are taken at the database level — <code>pg_dump</code> exports and the platform&apos;s managed
-                snapshots — so every module is covered automatically, with nothing to export by hand.
-              </p>
-              <p style={{margin:0,fontSize:13,color:'#374151',lineHeight:1.6}}>
-                If you need a copy of your data or a point-in-time restore, contact your system administrator,
-                who can produce a database export or roll back to a snapshot.
-              </p>
-            </div>
-          </div>
+          <div className="sp-card-title">Backup — Export Workspace Data</div>
+          <p style={{margin:'0 0 12px',fontSize:13,color:'#374151',lineHeight:1.6}}>
+            Downloads a complete JSON snapshot of this workspace — chart of accounts, contacts, reference data,
+            journal, vouchers, billing, banking, loans, assets, projections, and document counters. Keep it
+            somewhere safe; it can be restored below. (Point-in-time recovery is additionally covered by the
+            database&apos;s own Sliplane snapshots.)
+          </p>
+          <button className="btn btn-primary btn-sm" disabled={!!working} onClick={doExport}>
+            {working==='export' ? 'Exporting…' : '⬇ Download Backup'}
+          </button>
         </div>
 
-        <div className="info-box">
-          The previous in-browser JSON <strong>Backup</strong>, <strong>Restore</strong>, and <strong>Complete Reset</strong> tools
-          have been retired — they only covered the old storage system and are no longer needed now that backups are
-          managed by the database itself.
+        <div className="sp-card">
+          <div className="sp-card-title">Restore — Import a Backup</div>
+          <p style={{margin:'0 0 12px',fontSize:13,color:'#374151',lineHeight:1.6}}>
+            Replaces <strong>everything</strong> in this workspace with the contents of a backup file made here.
+            Users, sign-ins, and organization settings are kept.
+          </p>
+          <button className="btn btn-ghost btn-sm" disabled={!!working} onClick={pickImportFile}>⬆ Choose Backup File…</button>
         </div>
+
+        <div className="sp-card" style={{border:'1px solid #fecaca'}}>
+          <div className="sp-card-title" style={{color:'#991b1b'}}>Danger Zone — Reset Workspace</div>
+          <p style={{margin:'0 0 12px',fontSize:13,color:'#374151',lineHeight:1.6}}>
+            Wipes all business data (journal, vouchers, billing, banking, loans, assets, projections…) and
+            <strong> restarts every auto-assigned document number at 0001</strong> — made for cleaning out test data
+            before go-live. Your users, sign-ins, organization settings, and chart of accounts are always kept.
+            Download a backup first.
+          </p>
+          <button className="btn btn-sm" style={dangerBtn} disabled={!!working}
+            onClick={()=>setResetModal({ keepContacts:true, keepReferenceData:true, keepCheckbooks:true, typed:'' })}>
+            Reset Workspace…
+          </button>
+        </div>
+
+        {resetModal && (
+          <div className="backdrop" onClick={()=>setResetModal(null)}>
+            <div className="modal" style={{width:'min(520px,98vw)'}} onClick={e=>e.stopPropagation()}>
+              <div className="modal-h"><strong style={{color:'#991b1b'}}>Reset Workspace</strong><button className="btn btn-ghost btn-sm" onClick={()=>setResetModal(null)}>✕</button></div>
+              <div className="modal-b" style={{display:'flex',flexDirection:'column',gap:12}}>
+                <p style={{margin:0,fontSize:13,color:'#374151'}}>All transactions will be permanently deleted and document numbers restart at 0001. Choose what to keep:</p>
+                {[['keepContacts','Keep contacts'],['keepReferenceData','Keep reference data (tax rates & groups, purpose categories, payment terms, asset types)'],['keepCheckbooks','Keep checkbooks']].map(([k,label])=>(
+                  <label key={k} style={{display:'flex',alignItems:'flex-start',gap:8,fontSize:13,cursor:'pointer'}}>
+                    <input type="checkbox" checked={resetModal[k]} onChange={e=>setResetModal(m=>({...m,[k]:e.target.checked}))} style={{marginTop:2}} />
+                    <span>{label}</span>
+                  </label>
+                ))}
+                <div className="field">
+                  <label>Type <strong>RESET</strong> to confirm</label>
+                  <input value={resetModal.typed} onChange={e=>setResetModal(m=>({...m,typed:e.target.value}))} placeholder="RESET" />
+                </div>
+              </div>
+              <div className="modal-f">
+                <button className="btn btn-ghost" onClick={()=>setResetModal(null)}>Cancel</button>
+                <button className="btn" style={dangerBtn} disabled={resetModal.typed!=='RESET'||!!working} onClick={doReset}>
+                  {working==='reset' ? 'Resetting…' : 'Wipe Data & Reset Numbers'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {importModal && (
+          <div className="backdrop" onClick={()=>setImportModal(null)}>
+            <div className="modal" style={{width:'min(520px,98vw)'}} onClick={e=>e.stopPropagation()}>
+              <div className="modal-h"><strong>Restore Backup</strong><button className="btn btn-ghost btn-sm" onClick={()=>setImportModal(null)}>✕</button></div>
+              <div className="modal-b" style={{display:'flex',flexDirection:'column',gap:12}}>
+                <p style={{margin:0,fontSize:13,color:'#374151'}}>
+                  Restore <strong>{importModal.fileName}</strong>{importModal.snapshot?.exportedAt ? ` (exported ${new Date(importModal.snapshot.exportedAt).toLocaleString()})` : ''}?
+                  Everything currently in this workspace will be replaced by the backup&apos;s contents.
+                </p>
+                <div className="field">
+                  <label>Type <strong>RESTORE</strong> to confirm</label>
+                  <input value={importModal.typed} onChange={e=>setImportModal(m=>({...m,typed:e.target.value}))} placeholder="RESTORE" />
+                </div>
+              </div>
+              <div className="modal-f">
+                <button className="btn btn-ghost" onClick={()=>setImportModal(null)}>Cancel</button>
+                <button className="btn btn-primary" disabled={importModal.typed!=='RESTORE'||!!working} onClick={doImport}>
+                  {working==='import' ? 'Restoring…' : 'Replace Workspace Data'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </>
     );
   }
