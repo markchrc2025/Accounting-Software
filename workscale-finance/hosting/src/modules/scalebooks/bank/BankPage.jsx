@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-import { bankBalancesApi, bankTransactionsApi, bankReconciliationsApi, listAccounts, ApiError } from '../../../lib/api.js';
+import { bankBalancesApi, bankTransactionsApi, bankReconciliationsApi, creditLinesApi, listAccounts, ApiError } from '../../../lib/api.js';
 
 const BANK_PALETTE = ['#1e40af','#15803d','#b91c1c','#a16207','#7e22ce','#0e7490','#9a3412','#64748b'];
 const fmtPHP = n => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
@@ -115,6 +115,12 @@ export default function BankPage() {
   const loadBalances = () => bankBalancesApi.list().then(rs => setBalances(rs.map(balFromApi))).catch(()=>{});
   const loadTxs = () => bankTransactionsApi.list().then(rs => setTransactions(rs.map(txFromApi))).catch(()=>{});
   const loadRecons = () => bankReconciliationsApi.list().then(rs => setReconciliations(rs.map(reconFromApi))).catch(()=>{});
+  const clFromApi = (r) => ({
+    id: r.id, bankCode: r.bankCode || '', displayName: r.displayName || '',
+    creditLimit: (r.creditLimitCents ?? 0) / 100, availableBalance: (r.availableBalanceCents ?? 0) / 100,
+    interestRate: Number(r.interestRate) || 0, asOfDate: r.asOfDate || '', notes: r.notes || '',
+  });
+  const loadCreditLines = () => creditLinesApi.list().then(rs => setCreditLines(rs.map(clFromApi))).catch(()=>{});
 
   useEffect(() => {
     loadBalances(); loadTxs(); loadRecons();
@@ -123,8 +129,7 @@ export default function BankPage() {
         rows.filter(a => (a.subtype||'') === 'Bank').map(a => ({ ...a, subType: a.subtype || '' }))
             .sort((a,b)=>(a.code||'').localeCompare(b.code||''))))
       .catch(()=>{});
-    // Credit lines arrive with the loans/credit domain (Phase 6).
-    setCreditLines([]);
+    loadCreditLines();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -290,11 +295,20 @@ export default function BankPage() {
     async function saveCl(form) {
       setSaving2(true);
       try {
-        // Credit lines move to the loans/credit domain in Phase 6.
-        showToast('Credit lines are coming back with the Loans module.', 'info');
-        if (false) console.log(form);
+        const payload = {
+          bankCode: form.bankCode || null,
+          displayName: (form.displayName || '').trim(),
+          creditLimitCents: Math.round((Number(form.creditLimit) || 0) * 100),
+          availableBalanceCents: Math.round((Number(form.availableBalance) || 0) * 100),
+          interestRate: Number(form.interestRate) || 0,
+          asOfDate: form.asOfDate || null,
+          notes: form.notes || null,
+        };
+        if (form.id) await creditLinesApi.update(form.id, payload);
+        else         await creditLinesApi.create(payload);
         setClModal(null); showToast('Credit line saved.');
-      } catch(e) { console.error(e); alert('Save failed.'); }
+        await loadCreditLines();
+      } catch(e) { console.error(e); alert('Save failed: ' + (e?.detail || e?.message || e)); }
       setSaving2(false);
     }
 
@@ -364,7 +378,7 @@ export default function BankPage() {
                         <td onClick={e=>e.stopPropagation()}>
                           <div style={{display:'flex',gap:4}}>
                             <button className="btn btn-ghost btn-sm" onClick={()=>setClModal({...cl})}>Edit</button>
-                            <button onClick={()=>askConfirm('Delete this credit line?',async()=>{showToast('Credit lines are coming back with the Loans module.', 'info');})} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
+                            <button onClick={()=>askConfirm('Delete this credit line?',async()=>{try{await creditLinesApi.remove(cl.id);showToast('Credit line deleted.');await loadCreditLines();}catch(e){alert('Delete failed: '+(e?.detail||e?.message||e));}})} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
                           </div>
                         </td>
                       </tr>

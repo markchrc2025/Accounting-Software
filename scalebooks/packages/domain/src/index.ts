@@ -8,4 +8,5 @@ export * from "./reports";
 export * from "./operations";
 export * from "./reference";
 export * from "./billing";
+export * from "./financial";
 export * from "./tax/trainTax";

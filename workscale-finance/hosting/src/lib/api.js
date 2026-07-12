@@ -190,6 +190,16 @@ export const bankBalancesApi = crud('/bank-balances', 'balances', 'balance');
 export const bankTransactionsApi = crud('/bank-transactions', 'transactions', 'transaction');
 export const bankReconciliationsApi = crud('/bank-reconciliations', 'reconciliations', 'reconciliation');
 
+// ── loans / assets / projections / credit lines ─────────────────────────────
+export const loansApi = crud('/loans', 'loans', 'loan');
+export const loanPaymentsApi = crud('/loan-payments', 'payments', 'payment');
+export const assetTypesApi = crud('/asset-types', 'types', 'type');
+export const fixedAssetsApi = crud('/fixed-assets', 'assets', 'asset');
+export const assetInstallmentPaymentsApi = crud('/asset-installment-payments', 'payments', 'payment');
+export const assetDeprPostingsApi = crud('/asset-depr-postings', 'postings', 'posting');
+export const weeklyProjectionsApi = crud('/weekly-projections', 'projections', 'projection');
+export const creditLinesApi = crud('/credit-lines', 'creditLines', 'creditLine');
+
 // ── billing / accounts receivable ────────────────────────────────────────────
 export const billingStatementsApi = crud('/billing-statements', 'statements', 'statement');
 export const serviceInvoicesApi = crud('/service-invoices', 'invoices', 'invoice');

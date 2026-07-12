@@ -1,9 +1,8 @@
 import { useState, useEffect } from 'react';
 import {
-  collection, addDoc, getDocs, updateDoc, doc,
-  query, where, serverTimestamp,
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+  listVouchers, getVoucher, loanPaymentsApi, listChecks, setCheckStatus,
+  transitionVoucher, ApiError,
+} from '../../../lib/api.js';
 
 const fmtPHP = (n) => new Intl.NumberFormat('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
 const fmtCur = (n) => '₱' + fmtPHP(n);
@@ -12,9 +11,11 @@ const PAYMENT_METHODS = ['Check', 'Auto-Debit', 'Bank Transfer', 'Cash', 'Online
 
 /**
  * Modal to record an actual loan payment against a loan.
- * Requires a pre-existing Loan Voucher (LV, voucherType:'PAYMENT') as pre-requisite.
- * If the LV has a linked Check Voucher (checkVoucherId), the associated check(s)
- * are automatically cleared and the CV is marked Paid when the payment is saved.
+ * Requires a pre-existing Loan Voucher (LV) as pre-requisite. Consumption is
+ * tracked on the payment side (loan_payments.voucher_doc_id), so an LV already
+ * referenced by a payment stops being selectable. If the LV has a linked Check
+ * Voucher (checkVoucherId in its meta), the associated check(s) are cleared
+ * and the CV transitions to Paid when the payment is saved.
  */
 export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }) {
   const today = new Date().toISOString().slice(0, 10);
@@ -42,19 +43,30 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
   // Derived: currently selected LV object
   const selectedLv = lvs.find(l => l.docId === selectedLvDocId) || null;
 
-  // ── Load available LVs (PAYMENT type, same loan, not yet consumed) ─────────
+  // All vouchers for this org — kept so the CV (by human number) can be
+  // resolved back to its row when clearing checks.
+  const [allVouchers, setAllVouchers] = useState([]);
+
+  // ── Load available LVs (loan type, same loan, not yet consumed) ────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const snap = await getDocs(query(
-          collection(db, 'vouchers'),
-          where('voucherType', '==', 'LOAN'),
-        ));
+        const [rows, pays] = await Promise.all([listVouchers(), loanPaymentsApi.list()]);
         if (cancelled) return;
-        const forLoan = snap.docs
-          .map(d => ({ docId: d.id, ...d.data() }))
-          .filter(v => String(v.loanId) === String(loan.id) && !v.loanPaymentId);
+        const consumed = new Set(pays.map(p => p.voucherDocId).filter(Boolean));
+        setAllVouchers(rows);
+        const forLoan = rows
+          .filter(v => v.voucherType === 'loan'
+            && String(v.meta?.loanId || '') === String(loan.id)
+            && !consumed.has(v.id))
+          .map(v => ({
+            docId: v.id,
+            voucherId: v.voucherNo,
+            preparationDate: v.voucherDate,
+            totalAmount: (v.totalCents ?? 0) / 100,
+            checkVoucherId: v.meta?.checkVoucherId || '',
+          }));
         setLvs(forLoan);
       } catch (e) {
         console.error('Failed to load LVs:', e);
@@ -65,26 +77,36 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
     return () => { cancelled = true; };
   }, [loan.id]);
 
-  // ── Auto-fill amounts when LV is selected ─────────────────────────────────
+  // ── Auto-fill amounts when LV is selected (lines hydrate on demand) ───────
   useEffect(() => {
-    if (!selectedLv) return;
-    const lines = selectedLv.lines || [];
-    let interest = 0, principal = 0, penalty = 0;
-    lines.forEach(l => {
-      const name = (l.category || l.description || '').toLowerCase();
-      const code = l.expenseAccountCode || '';
-      const amt  = Math.abs(Number(l.amount) || 0);
-      if (name.includes('penalty'))                                                                  penalty  += amt;
-      else if (name.includes('interest') || name.includes('finance cost') || code.startsWith('500')) interest += amt;
-      else if (name.includes('principal') || name.includes('loans payable'))                         principal += amt;
-    });
-    setForm(f => ({
-      ...f,
-      interest:  interest  > 0 ? interest.toFixed(2)  : f.interest,
-      principal: principal > 0 ? principal.toFixed(2) : f.principal,
-      penalty:   penalty   > 0 ? penalty.toFixed(2)   : f.penalty,
-      method: selectedLv.checkVoucherId ? 'Check' : f.method,
-    }));
+    if (!selectedLvDocId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const detail = await getVoucher(selectedLvDocId);
+        if (cancelled) return;
+        let interest = 0, principal = 0, penalty = 0;
+        (detail.lines || []).forEach(l => {
+          const m = l.meta || {};
+          const name = (m.category || l.description || '').toLowerCase();
+          const code = l.accountCode || '';
+          const amt  = Math.abs((l.amountCents ?? 0) / 100);
+          if (name.includes('penalty'))                                                                  penalty  += amt;
+          else if (name.includes('interest') || name.includes('finance cost') || code.startsWith('500')) interest += amt;
+          else if (name.includes('principal') || name.includes('loans payable'))                         principal += amt;
+        });
+        setForm(f => ({
+          ...f,
+          interest:  interest  > 0 ? interest.toFixed(2)  : f.interest,
+          principal: principal > 0 ? principal.toFixed(2) : f.principal,
+          penalty:   penalty   > 0 ? penalty.toFixed(2)   : f.penalty,
+          method: selectedLv?.checkVoucherId ? 'Check' : f.method,
+        }));
+      } catch (e) {
+        console.error('Failed to load LV lines:', e);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [selectedLvDocId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { setError(''); }, [form]);
@@ -110,71 +132,50 @@ export default function RecordPaymentModal({ loan, loanState, onClose, onSaved }
     if (total <= 0)       { setError('Enter at least one of Interest / Principal / Penalty.');       return; }
     setSaving(true);
     try {
-      const user = auth.currentUser?.email || '';
-
-      // 1. Write the loanPayments record referencing the LV (and CV if linked)
-      const payload = {
-        loanId:          loan.id,
-        loanName:        loan.name || `Loan ${loan.id}`,
-        date:            form.date,
-        interest:        Number(form.interest)  || 0,
-        principal:       Number(form.principal) || 0,
-        penalty:         Number(form.penalty)   || 0,
-        total,
-        method:          form.method,
-        referenceNo:     form.referenceNo || '',
-        bank:            form.bank        || '',
-        voucherId:       selectedLv.voucherId      || '',   // LV human-readable ID
-        checkVoucherId:  selectedLv.checkVoucherId || '',   // CV human-readable ID (if any)
-        checkId:         '',
-        checkRegisterId: '',
-        notes:           form.notes || '',
-        allocations:     form.appliedPeriod
+      // 1. Write the loan-payment record referencing the LV (and CV if linked).
+      //    Referencing the LV's row id is what consumes it (see header comment).
+      const created = await loanPaymentsApi.create({
+        loanId:         String(loan.id).length === 36 ? loan.id : null,
+        loanName:       loan.name || `Loan ${loan.id}`,
+        payDate:        form.date,
+        interestCents:  Math.round((Number(form.interest)  || 0) * 100),
+        principalCents: Math.round((Number(form.principal) || 0) * 100),
+        penaltyCents:   Math.round((Number(form.penalty)   || 0) * 100),
+        totalCents:     Math.round(total * 100),
+        method:         form.method || null,
+        referenceNo:    form.referenceNo || null,
+        bank:           form.bank || null,
+        voucherNo:      selectedLv.voucherId || null,       // LV human-readable ID
+        voucherDocId:   selectedLvDocId,                    // LV row id — the consumption stamp
+        checkVoucherNo: selectedLv.checkVoucherId || null,  // CV human-readable ID (if any)
+        notes:          form.notes || null,
+        allocations:    form.appliedPeriod
           ? [{ period: form.appliedPeriod, interest: Number(form.interest) || 0, principal: Number(form.principal) || 0, penalty: Number(form.penalty) || 0 }]
           : [],
-        createdAt: serverTimestamp(),
-        createdBy: user,
-      };
-      const lpRef = await addDoc(collection(db, 'loanPayments'), payload);
-
-      // 2. Mark the LV as consumed so it cannot be used for another payment
-      await updateDoc(doc(db, 'vouchers', selectedLvDocId), {
-        loanPaymentId: lpRef.id,
-        updatedAt: serverTimestamp(), updatedBy: user,
       });
 
-      // 3. If LV is linked to a CV: clear the associated check(s) and mark the CV Paid
+      // 2. If LV is linked to a CV: clear the associated check(s) and mark the CV Paid
       if (selectedLv.checkVoucherId) {
         try {
-          const crSnap = await getDocs(query(
-            collection(db, 'checkRegister'),
-            where('referenceId', '==', selectedLv.checkVoucherId),
-          ));
-          let cvFirestoreDocId = null;
-          for (const crDoc of crSnap.docs) {
-            const crData = crDoc.data();
-            if (!cvFirestoreDocId && crData.voucherDocId) cvFirestoreDocId = crData.voucherDocId;
-            const patch = { loanPaymentId: lpRef.id, updatedAt: serverTimestamp(), updatedBy: user };
-            if (crData.status === 'Issued') {
-              patch.status      = 'Cleared';
-              patch.clearedDate = form.date;
+          const cv = allVouchers.find(v => v.voucherNo === selectedLv.checkVoucherId);
+          const checks = await listChecks();
+          const related = checks.filter(ch =>
+            (cv && ch.voucherId === cv.id) || ch.referenceId === selectedLv.checkVoucherId);
+          for (const ch of related) {
+            if (ch.status === 'Issued') {
+              await setCheckStatus(ch.id, 'Cleared', { date: form.date }).catch(e => console.warn('check clear failed:', e));
             }
-            await updateDoc(doc(db, 'checkRegister', crDoc.id), patch);
           }
-          if (cvFirestoreDocId) {
-            await updateDoc(doc(db, 'vouchers', cvFirestoreDocId), {
-              status: 'Paid', updatedAt: serverTimestamp(), updatedBy: user,
-            });
-          }
+          if (cv) await transitionVoucher(cv.id, 'paid').catch(e => console.warn('CV paid transition failed:', e));
         } catch (e) {
           console.warn('Could not auto-clear check:', e);
         }
       }
 
-      onSaved && onSaved({ id: lpRef.id, ...payload });
+      onSaved && onSaved(created);
       onClose();
     } catch (e) {
-      setError(e.message || 'Failed to save.');
+      setError((e instanceof ApiError ? e.detail : e.message) || 'Failed to save.');
     } finally {
       setSaving(false);
     }
