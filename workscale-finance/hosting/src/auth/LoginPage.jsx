@@ -36,12 +36,6 @@ export default function LoginPage() {
     // success → provider flips to ready → effect navigates
   }
 
-  function handleSso() {
-    setFormError('');
-    clearAuthError();
-    login(); // redirect to Authenticize (Google / Microsoft / password)
-  }
-
   return (
     <div style={styles.page}>
       <form onSubmit={handleEmailLogin} style={styles.card}>
@@ -94,23 +88,6 @@ export default function LoginPage() {
         <button type="submit" disabled={busy} style={styles.signInBtn}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
-
-        <div style={styles.divider}>
-          <span style={styles.dividerLine} />
-          <span style={styles.dividerText}>or</span>
-          <span style={styles.dividerLine} />
-        </div>
-
-        <div style={styles.ssoRow}>
-          <button type="button" onClick={handleSso} disabled={busy} style={styles.ssoBtn}>
-            {googleIcon}
-            <span>Google</span>
-          </button>
-          <button type="button" onClick={handleSso} disabled={busy} style={styles.ssoBtn}>
-            {microsoftIcon}
-            <span>Microsoft</span>
-          </button>
-        </div>
 
         <p style={styles.footer}>Access is restricted to authorized personnel only.</p>
       </form>

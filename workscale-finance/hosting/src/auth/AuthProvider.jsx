@@ -57,9 +57,11 @@ function mapCallbackError(code) {
 }
 
 function redirectToLogin() {
-  const path = window.location.pathname + window.location.search;
-  const returnTo = path.startsWith('/login') || path.startsWith('/auth') ? '/' : path;
-  window.location.href = `${API_BASE}/auth/login?returnTo=${encodeURIComponent(returnTo)}`;
+  // Sign-in is the portal's own /login form (the API's OIDC redirect flow is
+  // retired). No-op when already there so the 401 refresher can't loop.
+  if (!window.location.pathname.startsWith('/login')) {
+    window.location.href = '/login';
+  }
 }
 
 const Ctx = createContext(null);
@@ -213,7 +215,7 @@ export function AuthProvider({ children }) {
     setActiveOrg(null);
     setSession(null);
     setOrg(null);
-    window.location.href = `${API_BASE}/auth/logout`;
+    window.location.href = '/login';
   };
 
   return (
