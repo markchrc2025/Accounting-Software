@@ -109,21 +109,12 @@ export default function UserProfilePage() {
           </div>
         </Card>
 
-        {/* ── Password — managed by the Sentire account portal ─────────── */}
+        {/* ── Password — set by a workspace admin ─────────────────────── */}
         <Card title="Password">
           <p className="text-sm text-[#6B7280] leading-relaxed">
-            Your password is managed by the Sentire account portal (Authenticize), which handles
-            sign-in for all Sentire workspaces. It is not stored in this app, so it can only be
-            changed from the account portal.
+            Your sign-in password is managed by your workspace admin. If you need it reset, ask an
+            admin to set a new one for you from Settings → Users &amp; Roles.
           </p>
-          <a
-            href="https://auth.sentire.solutions"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 mt-3 text-sm font-semibold text-[#F97316] hover:underline"
-          >
-            Manage your password in the Sentire account portal ↗
-          </a>
         </Card>
 
         {/* ── Approval routing ─────────────────────────────────────────── */}

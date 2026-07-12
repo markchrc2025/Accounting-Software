@@ -10,13 +10,13 @@ import {
 } from '../lib/api.js';
 
 /**
- * Auth + workspace state for the portal, backed by Authenticize (replacing
- * Firebase Auth). Password sign-in is proxied through our API; SSO/social go
- * through the OIDC redirect. A JWT is kept in sessionStorage and sent as Bearer;
- * the active workspace is sent as x-org-id. One identity may belong to several
- * workspaces — if so, we show a picker after login.
+ * Auth + workspace state for the portal. Sign-in is email/password against the
+ * Sentire Books API (POST /auth/password), which returns a short-lived Books
+ * access token kept in sessionStorage and sent as Bearer; the active workspace
+ * is sent as x-org-id. One identity may belong to several workspaces — if so, we
+ * show a picker after login.
  *
- *   loading   → checking for a token (fragment or stored)
+ *   loading   → checking for a stored token
  *   anon      → no token; show the login screen
  *   choosing  → signed in, multiple workspaces, awaiting a pick
  *   verifying → confirming the chosen workspace (GET /auth/me)
@@ -45,7 +45,7 @@ const writeSS = (k, v) => {
 function mapCallbackError(code) {
   switch (code) {
     case 'management_account':
-      return "That account manages Authenticize itself and can't sign in to an app. Use your Sentire Books account instead.";
+      return "That account can't sign in here. Use your Sentire Books account instead.";
     case 'token_exchange_failed':
     case 'token_unreachable':
       return "We couldn't complete sign-in with the identity provider. Please try again.";
