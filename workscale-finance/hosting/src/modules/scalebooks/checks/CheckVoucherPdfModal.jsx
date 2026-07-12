@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getDoc, doc, getDocs, collection, query, where } from 'firebase/firestore';
-import { db } from '../../../firebase.js';
+import { getSettings, listUsers } from '../../../lib/api.js';
 import jsPDF from 'jspdf';
 
 function fmtDate(str) {
@@ -132,33 +131,24 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
     let cancelled = false;
     async function load() {
       const creatorEmail = voucher?.createdBy || '__none__';
-      const [profSnap, userSnap, routingSnap] = await Promise.all([
-        getDoc(doc(db, 'settings', 'profile')),
-        getDocs(query(collection(db, 'appUsers'), where('email', '==', creatorEmail))),
-        getDoc(doc(db, 'settings', 'approvalRouting')),
-      ]);
+      const settings = await getSettings().catch(() => ({}));
+      let usersByEmail = new Map();
+      try {
+        const users = await listUsers();
+        usersByEmail = new Map(users.map(u => [(u.email||'').toLowerCase(), u]));
+      } catch { /* non-admin — names fall back to emails */ }
       if (cancelled) return;
 
-      setProfile(profSnap.exists() ? profSnap.data() : {});
+      setProfile(settings?.profile || {});
+      const nameFor = (email) => usersByEmail.get((email||'').toLowerCase())?.fullName || email || '';
+      setPreparedByName(nameFor(voucher?.createdBy) || voucher?.createdBy || '');
 
-      const appUser = userSnap?.docs?.[0]?.data();
-      setPreparedByName(appUser?.fullName || appUser?.displayName || voucher?.createdBy || '');
-
-      const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+      const routes = settings?.approvalRouting?.routes || [];
       const route  = routes.find(r => r.documentType === 'Vouchers' && r.makerEmail === creatorEmail);
       const verifierEmail = route?.verifierEmail || '';
       const approverEmail = route?.approverEmail || '';
-
-      const [verSnap, apprSnap] = await Promise.all([
-        verifierEmail ? getDocs(query(collection(db, 'appUsers'), where('email', '==', verifierEmail))) : Promise.resolve(null),
-        approverEmail ? getDocs(query(collection(db, 'appUsers'), where('email', '==', approverEmail))) : Promise.resolve(null),
-      ]);
-      if (cancelled) return;
-
-      const verUser  = verSnap?.docs?.[0]?.data();
-      const apprUser = apprSnap?.docs?.[0]?.data();
-      setCheckedByName(verUser?.fullName  || verUser?.displayName  || verifierEmail  || '');
-      setApprovedByName(apprUser?.fullName || apprUser?.displayName || approverEmail || '');
+      setCheckedByName(nameFor(verifierEmail));
+      setApprovedByName(nameFor(approverEmail));
       setLoading(false);
     }
     load();

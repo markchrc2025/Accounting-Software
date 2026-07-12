@@ -1,16 +1,79 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
-  collection, query, orderBy, where, onSnapshot, addDoc, updateDoc, deleteDoc,
-  doc, serverTimestamp, writeBatch, getDocs, getDoc, limit,
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+  listChecks, createChecks, updateCheck, setCheckStatus, deleteCheck as apiDeleteCheck,
+  listCheckbooks, createCheckbook, updateCheckbook, deleteCheckbook,
+  listVouchers, getVoucher, createVoucherDraft, updateVoucher, deleteVoucher as apiDeleteVoucher,
+  transitionVoucher, voidVoucher as apiVoidVoucher,
+  listAccounts, listContacts, createJournalEntry, ApiError,
+} from '../../../lib/api.js';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
-import { nextCheckVoucherId, nextJournalEntryId } from '../../../utils/documentIds.js';
 import { consumeSchedulePrefill } from '../../../utils/schedulePrefill.js';
 import CheckVoucherPdfModal from './CheckVoucherPdfModal.jsx';
+
+// ── API <-> UI mapping ────────────────────────────────────────
+// The register keeps the portal's field names; typed money columns are
+// centavos server-side and pesos here. Voucher/check extras (tax config,
+// check-group layout, multi-check flags) round-trip in meta.
+const VTYPE_LABEL = { payment:'PAYMENT', receipt:'RECEIPT', payroll:'PAYROLL', final_pay:'FINAL_PAY', loan:'LOAN', check:'CHECK' };
+const VSTAT_LABEL = { draft:'Draft', pending:'Pending', for_verification:'For Verification', verified:'Verified', for_approval:'For Approval', approved:'Approved', for_disbursement:'For Disbursement', paid:'Paid', rejected:'Rejected', posted:'Approved', void:'Voided' };
+const checkFromApi = (c) => ({
+  id: c.id,
+  checkId: c.checkNo || '',
+  checkbookId: c.checkbookId || '',
+  bankCode: c.bankCode || '',
+  checkNumber: c.checkNumber || '',
+  checkDate: c.checkDate || '', issueDate: c.issueDate || '',
+  payeeName: c.payeeName || '',
+  amount: (c.amountCents ?? 0) / 100,
+  netAmount: c.netAmountCents != null ? c.netAmountCents / 100 : (c.amountCents ?? 0) / 100,
+  status: c.status || 'Issued',
+  referenceType: c.referenceType || '', referenceId: c.referenceId || '',
+  voucherDocId: c.voucherId || null,
+  linkedJeId: c.journalEntryId || '',
+  isPartOfMultiple: !!c.isPartOfMultiple,
+  lineNo: c.lineNo ?? null,
+  voidReason: c.voidReason || '', clearedDate: c.clearedDate || '',
+  voidedDate: c.voidedDate || '', stoppedDate: c.stoppedDate || '', staleDate: c.staleDate || '',
+  notes: c.notes || '',
+  loanPaymentId: (c.meta || {}).loanPaymentId || '',
+});
+const voucherLineFromApi = (l) => {
+  const m = l.meta || {};
+  return {
+    lineNo: l.lineNo, physicalLineNo: m.physicalLineNo || 1, checkGroupId: m.checkGroupId || '',
+    contactId: m.contactId || '', contact: m.contact || '',
+    expenseAccountCode: l.accountCode || '', description: l.description || '',
+    amount: (l.amountCents ?? 0) / 100,
+    taxRateId: m.taxRateId || '', taxType: m.taxType || 'N/A',
+    taxRate: m.taxRate || 0, taxAmt: m.taxAmt || 0, inclusive: !!m.inclusive,
+    lineCheckNo: m.lineCheckNo || '', lineCheckDate: m.lineCheckDate || '',
+  };
+};
+const cvFromApi = (v) => {
+  const m = v.meta || {};
+  return {
+    id: v.id,
+    voucherId: v.voucherNo,
+    voucherType: VTYPE_LABEL[v.voucherType] || 'PAYMENT',
+    status: VSTAT_LABEL[v.status] || v.status,
+    preparationDate: v.voucherDate || '',
+    purposeCategory: v.purposeCategory || '',
+    paymentFromAccountCode: v.paymentFromAccountCode || '',
+    contactSummary: m.contactSummary || v.contactName || '',
+    totalAmount: (v.totalCents ?? 0) / 100,
+    notes: v.notes || '',
+    isMultipleChecks: !!m.isMultipleChecks,
+    checkNumber: m.checkNumber || '', checkDate: m.checkDate || '',
+    checkId: m.checkId || '', pdcAccountCode: m.pdcAccountCode || '',
+    loanId: m.loanId || '', checkVoucherId: m.checkVoucherId || '',
+    loanPaymentId: m.loanPaymentId || '', linkedJeId: v.journalEntryId || '',
+    taxTotal: m.taxTotal || 0, netCash: m.netCash || 0,
+    lines: null, // hydrated on demand via getVoucher
+  };
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CHECKBOOK_TYPES = ['Loose', 'Bound'];
@@ -130,7 +193,7 @@ const CSS = `
 `;
 
 export default function CheckRegistryPage() {
-  const { can } = usePermissions();
+  const { can, userRecord } = usePermissions();
   const cvCanMake    = can('Check Registry', 'Maker');
   const cvCanVerify  = can('Check Registry', 'Verifier');
   const cvCanApprove = can('Check Registry', 'Approver');
@@ -173,7 +236,7 @@ export default function CheckRegistryPage() {
 
   const showToast  = (msg, type = 'success') => { setToast({ msg, type }); setTimeout(() => setToast(null), 3200); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
-  const user = auth.currentUser?.email || '';
+  const user = userRecord?.email || '';
 
   // ── Bulk selection helpers ─────────────────────────────────────────────────
   const toggleSel = id => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -188,10 +251,11 @@ export default function CheckRegistryPage() {
     const voucherDocIds = ids.map(id => checks.find(c => c.id === id)?.voucherDocId).filter(Boolean);
     askConfirm(`Submit ${ids.length} check voucher(s) for approval?`, async () => {
       try {
-        await Promise.all(voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user })));
+        await Promise.allSettled(voucherDocIds.map(vid => transitionVoucher(vid, 'pending')));
         setSelected(new Set());
         showToast(`${ids.length} check voucher(s) submitted for approval.`, 'success');
-      } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        await loadVouchers();
+      } catch(e) { showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message), 'error'); }
     });
   };
 
@@ -201,31 +265,39 @@ export default function CheckRegistryPage() {
     const voucherDocIds = ids.map(id => checks.find(c => c.id === id)?.voucherDocId).filter(Boolean);
     askConfirm(`Void ${ids.length} check voucher(s)? This cannot be undone.`, async () => {
       try {
-        await Promise.all([
-          ...voucherDocIds.map(vid => updateDoc(doc(db,'vouchers',vid), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
-          ...ids.map(id => updateDoc(doc(db,'checkRegister',id), { status:'Voided', updatedAt:serverTimestamp(), updatedBy:user })),
+        await Promise.allSettled([
+          ...voucherDocIds.map(vid => apiVoidVoucher(vid)),
+          ...ids.map(id => setCheckStatus(id, 'Voided', { reason: 'Bulk void' })),
         ]);
         setSelected(new Set());
         showToast(`${ids.length} check voucher(s) voided.`, 'success');
-      } catch(e) { showToast('Error: ' + e.message, 'error'); }
+        await loadChecks(); await loadVouchers();
+      } catch(e) { showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message), 'error'); }
     });
   };
 
-  // ── Live Data ──────────────────────────────────────────────────────────────
+  // ── Data (API; refetched after every mutation) ────────────────────────────
+  const loadChecks = useCallback(async () => {
+    try { setChecks((await listChecks({ limit: 1000 })).map(checkFromApi)); }
+    catch (e) { showToast(`Couldn't load checks: ${e instanceof ApiError ? e.detail : e.message}`, 'error'); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const loadCheckbooks = useCallback(async () => {
+    try { setCheckbooks(await listCheckbooks()); } catch { /* covered by checks toast */ }
+  }, []);
+  const loadVouchers = useCallback(async () => {
+    try { setVouchers((await listVouchers({ limit: 500 })).map(cvFromApi)); } catch { /* ditto */ }
+  }, []);
+
   useEffect(() => {
-    const u1 = onSnapshot(query(collection(db,'checkRegister'),   orderBy('issueDate','desc')), snap => setChecks(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const u2 = onSnapshot(query(collection(db,'checkbookMaster'), orderBy('bankCode','asc')),   snap => setCheckbooks(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const u3 = onSnapshot(query(collection(db,'vouchers'),         orderBy('createdAt','desc')), snap => setVouchers(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const u4 = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap => setTaxRates(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(r => r.isActive !== false)));
-    const u5 = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap => setTaxGroups(snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(g => g.isActive !== false)));
-    getDocs(collection(db,'accounts')).then(s => setAccounts(s.docs.map(d => ({ id:d.id, ...d.data() }))));
-    getDoc(doc(db,'finc','profile')).then(snap => {
-      const data = snap.exists() ? snap.data() : {};
-      setLoans(Array.isArray(data.loans) ? data.loans : []);
-    });
-    const u6 = onSnapshot(query(collection(db,'contacts'), orderBy('name')), snap => setContacts(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    const u7 = onSnapshot(query(collection(db,'purposeCategories'), orderBy('name')), snap => setPurposeCategories(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
-    return () => { u1(); u2(); u3(); u4(); u5(); u6(); u7(); };
+    loadChecks(); loadCheckbooks(); loadVouchers();
+    listAccounts().then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })))).catch(()=>{});
+    listContacts().then(setContacts).catch(()=>{});
+    // Tax rates/groups + purpose categories arrive with the tax subsystem
+    // (Phase 4); loans with the loans domain (Phase 6). Line tax config still
+    // round-trips via voucher-line meta meanwhile.
+    setTaxRates([]); setTaxGroups([]); setPurposeCategories([]); setLoans([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Derived ────────────────────────────────────────────────────────────────
@@ -615,12 +687,19 @@ export default function CheckRegistryPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); openNewCv(); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const openEditCv = (check) => {
+  const openEditCv = async (check) => {
     if (!check.voucherDocId) return alert('No voucher linked to this check.');
-    const v = vouchers.find(x => x.id === check.voucherDocId);
+    let v = vouchers.find(x => x.id === check.voucherDocId);
     if (!v) return alert('Voucher not found.');
     if (['Paid','Voided'].includes(v.status))
       return alert(`Cannot edit: voucher is "${v.status}". Paid/Voided vouchers cannot be edited.`);
+    if (!Array.isArray(v.lines)) {
+      try {
+        const d = await getVoucher(v.id);
+        v = { ...v, lines: (d.lines || []).map(voucherLineFromApi) };
+        setVouchers(cur => cur.map(x => x.id === v.id ? v : x));
+      } catch (e) { return alert(e instanceof ApiError ? e.detail : e.message); }
+    }
     const isInclusive = !!(v.lines?.[0]?.inclusive);
     setCvForm({
       bankCode:         v.paymentFromAccountCode || '',
@@ -674,7 +753,6 @@ export default function CheckRegistryPage() {
     setSaving(true);
     try {
       const payeeSummary = [...new Set(cvLines.map(l => l.contact).filter(Boolean))].join(', ') || cvForm.purposeCategory || '';
-      // Build ordered check-group list for physicalLineNo
       const checkGroupOrder = [];
       if (cvModal._isMultiple) {
         const seenGroups = new Set();
@@ -683,119 +761,106 @@ export default function CheckRegistryPage() {
           if (!seenGroups.has(gid)) { seenGroups.add(gid); checkGroupOrder.push(gid); }
         });
       }
-      const linesPayload = cvLines.map((l, i) => ({
-        lineNo:             i + 1,
-        physicalLineNo:     cvModal._isMultiple ? (checkGroupOrder.indexOf(l.checkGroupId || '_default') + 1) : 1,
-        checkGroupId:       l.checkGroupId || '',
-        contactId:          l.contactId          || '',
-        contact:            l.contact            || '',
-        expenseAccountCode: l.expenseAccount     || '',
-        description:        l.description        || '',
-        amount:             Number(l.amount)     || 0,
-        taxRateId:          l.taxRateId          || '',
-        taxType:            l.taxType            || 'N/A',
-        taxRate:            Number(l.taxRate)    || 0,
-        taxAmt:             Number(l.taxAmt)     || 0,
-        inclusive:          !!cvForm.inclusive,
-        lineCheckNo:   cvModal._isMultiple ? (l.lineCheckNo||'')   : (cvForm.globalCheckNo||''),
-        lineCheckDate: cvModal._isMultiple ? (l.lineCheckDate||'') : (cvForm.globalCheckDate||cvForm.issueDate||''),
-      }));
+      const apiLines = cvLines.map((l, i) => {
+        const acct = accounts.find(a => a.code === l.expenseAccount || a.id === l.expenseAccount);
+        return {
+          accountId: acct?.id,
+          description: l.description || undefined,
+          amountCents: Math.round((Number(l.amount)||0) * 100),
+          meta: {
+            physicalLineNo: cvModal._isMultiple ? (checkGroupOrder.indexOf(l.checkGroupId || '_default') + 1) : 1,
+            checkGroupId: l.checkGroupId || '', contactId: l.contactId || '', contact: l.contact || '',
+            taxRateId: l.taxRateId || '', taxType: l.taxType || 'N/A',
+            taxRate: Number(l.taxRate)||0, taxAmt: Number(l.taxAmt)||0, inclusive: !!cvForm.inclusive,
+            lineCheckNo: cvModal._isMultiple ? (l.lineCheckNo||'') : (cvForm.globalCheckNo||''),
+            lineCheckDate: cvModal._isMultiple ? (l.lineCheckDate||'') : (cvForm.globalCheckDate||cvForm.issueDate||''),
+          },
+        };
+      });
+      if (apiLines.some(l => !l.accountId)) { setSaving(false); return alert('An account could not be resolved for one of the lines.'); }
 
-      // 1. Update the voucher doc
-      const statusRevert = ['For Verification','Verified','For Approval','Approved','For Disbursement'].includes(cvModal._status)
-        ? { status: 'For Verification' }
-        : {};
-      await updateDoc(doc(db,'vouchers',cvModal._docId), {
-        purposeCategory: cvForm.purposeCategory || '',
-        contactSummary:  payeeSummary,
-        totalAmount:     lineTotal,
-        taxTotal,
-        netCash,
-        notes:           cvForm.notes || '',
-        lines:           linesPayload,
-        ...(cvForm.loanId ? { loanId: cvForm.loanId } : {}),
-        ...statusRevert,
-        updatedAt:       serverTimestamp(), updatedBy: user,
+      // 1. Update the voucher (extras ride in meta; totals recompute server-side)
+      await updateVoucher(cvModal._docId, {
+        purposeCategory: cvForm.purposeCategory || null,
+        notes: cvForm.notes || null,
+        lines: apiLines,
+        meta: {
+          isMultipleChecks: !!cvModal._isMultiple,
+          checkNumber: cvModal._isMultiple ? '' : (cvForm.globalCheckNo||''),
+          checkDate: cvModal._isMultiple ? '' : (cvForm.globalCheckDate||cvForm.issueDate||''),
+          checkId: cvModal._checkId || '', pdcAccountCode: pdcAccount?.code || '',
+          contactSummary: payeeSummary, taxTotal, netCash,
+          ...(cvForm.loanId ? { loanId: cvForm.loanId } : {}),
+        },
       });
 
       // 2. (No GL update — IFRS 9 §3.3.1: no JE at check voucher preparation)
 
-      // 3. Sync check register amounts
+      // 3. Sync check register rows
       if (!cvModal._isMultiple && cvModal._checkDocIds?.length === 1) {
-        await updateDoc(doc(db,'checkRegister',cvModal._checkDocIds[0]), {
-          amount: lineTotal, netAmount: netCash, payeeName: payeeSummary,
-          updatedAt: serverTimestamp(), updatedBy: user,
+        await updateCheck(cvModal._checkDocIds[0], {
+          amountCents: Math.round(lineTotal * 100),
+          netAmountCents: Math.round(netCash * 100),
+          payeeName: payeeSummary,
         });
       } else if (cvModal._isMultiple) {
-        // Sync one check register doc per check GROUP (not per sub-line)
         const checkDocs = checks.filter(c => cvModal._checkDocIds.includes(c.id));
         const cb = activeCheckbook(cvForm.bankCode);
-        const syncPromises = [];
-        let newChecksAdded = false;
-        checkGroupOrder.forEach((groupId, gIdx) => {
+        const newChecks = [];
+        for (let gIdx = 0; gIdx < checkGroupOrder.length; gIdx++) {
+          const groupId = checkGroupOrder[gIdx];
           const groupLines = cvLines.filter(l => (l.checkGroupId || '_default') === groupId);
           const groupAmt   = groupLines.reduce((s, l) => s + (Number(l.amount) || 0), 0);
           const groupTax   = groupLines.reduce((s, l) => s + (Number(l.taxAmt) || 0), 0);
           const firstLine  = groupLines[0] || {};
           const cd = checkDocs.find(c => c.lineNo === gIdx + 1);
           if (cd) {
-            // Update existing check register doc
-            syncPromises.push(updateDoc(doc(db,'checkRegister',cd.id), {
-              amount: groupAmt, netAmount: groupAmt - groupTax,
+            await updateCheck(cd.id, {
+              amountCents: Math.round(groupAmt * 100),
+              netAmountCents: Math.round((groupAmt - groupTax) * 100),
               payeeName: firstLine.contact || payeeSummary,
               checkNumber: String(firstLine.lineCheckNo || cd.checkNumber || ''),
-              checkDate:   firstLine.lineCheckDate || cd.checkDate || '',
-              lineNo:      gIdx + 1,
-              updatedAt: serverTimestamp(), updatedBy: user,
-            }));
+              checkDate: firstLine.lineCheckDate || cd.checkDate || null,
+              lineNo: gIdx + 1,
+            });
           } else {
-            // New check group added during edit — create a new checkRegister doc
-            newChecksAdded = true;
             const lineCheckNo = String(firstLine?.lineCheckNo || '').trim();
-            syncPromises.push(addDoc(collection(db, 'checkRegister'), {
-              checkId:          genCheckId(lineCheckNo),
-              checkbookId:      cb?.id || '',
-              bankCode:         cvForm.bankCode,
-              checkNumber:      lineCheckNo,
-              checkDate:        firstLine?.lineCheckDate || cvForm.issueDate,
-              issueDate:        cvForm.issueDate,
-              payeeName:        firstLine?.contact || payeeSummary,
-              amount:           groupAmt,
-              netAmount:        groupAmt - groupTax,
-              status:           'Issued',
-              referenceType:    'Check Voucher',
-              referenceId:      cvModal._voucherId,
-              voucherDocId:     cvModal._docId,
-              linkedJeId:       cvModal._linkedJeId || '',
+            newChecks.push({
+              checkNo: genCheckId(lineCheckNo),
+              checkbookId: cb?.id || null,
+              bankCode: cvForm.bankCode,
+              checkNumber: lineCheckNo,
+              checkDate: firstLine?.lineCheckDate || cvForm.issueDate,
+              issueDate: cvForm.issueDate,
+              payeeName: firstLine?.contact || payeeSummary,
+              amountCents: Math.round(groupAmt * 100),
+              netAmountCents: Math.round((groupAmt - groupTax) * 100),
+              referenceType: 'Check Voucher',
+              referenceId: cvModal._voucherId,
+              voucherId: cvModal._docId,
               isPartOfMultiple: true,
-              lineNo:           gIdx + 1,
-              voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
-              notes:            cvForm.notes || '',
-              createdAt: serverTimestamp(), createdBy: user,
-              updatedAt: serverTimestamp(), updatedBy: user,
-            }));
+              lineNo: gIdx + 1,
+              notes: cvForm.notes || null,
+            });
           }
-        });
-        await Promise.all(syncPromises);
+        }
+        if (newChecks.length) await createChecks(newChecks);
 
-        // If new checks were added, advance checkbook nextCheckNumber past the highest used number
-        if (newChecksAdded && cb) {
+        // Advance checkbook next number past the highest used
+        if (newChecks.length && cb) {
           const end     = parseInt(cb.endingNumber) || 0;
           const usedNos = cvLines.map(l => parseInt(l.lineCheckNo || '0') || 0).filter(n => n > 0);
           const maxUsed = usedNos.length > 0 ? Math.max(...usedNos) : 0;
           if (maxUsed > 0 && maxUsed >= (parseInt(cb.nextCheckNumber) || 0)) {
-            const nextNo = String(maxUsed + 1).padStart(String(end).length, '0');
-            await updateDoc(doc(db, 'checkbookMaster', cb.id), {
-              nextCheckNumber: nextNo,
-              updatedAt: serverTimestamp(), updatedBy: user,
-            });
+            await updateCheckbook(cb.id, { nextCheckNumber: String(maxUsed + 1).padStart(String(end).length, '0') });
           }
         }
       }
 
       showToast(`Check Voucher ${cvModal._voucherId} updated.`, 'success');
       setCvModal(null);
-    } catch(e) { console.error(e); showToast('Update failed: ' + e.message, 'error'); }
+      await loadChecks(); await loadVouchers(); await loadCheckbooks();
+        } catch(e) { console.error(e); showToast('Update failed: ' + e.message, 'error'); }
     setSaving(false);
   };
 
@@ -824,12 +889,9 @@ export default function CheckRegistryPage() {
       ? [...new Set(cvLines.map(l => String(l.lineCheckNo||'').trim()).filter(Boolean))]
       : [String(assignedCheckNo)];
 
-    // 0. All lines must have a check number in Multiple Checks mode
     if (cvForm.isMultipleChecks && cvLines.some(l => !String(l.lineCheckNo||'').trim())) {
       return alert('All lines need a check number in Multiple Checks mode. Use "Use Next #" to auto-fill.');
     }
-
-    // 1. Intra-form duplicates: check numbers must be unique ACROSS groups (sub-lines share the same number)
     if (cvForm.isMultipleChecks) {
       const groupNos = new Map();
       for (const l of cvLines) {
@@ -842,141 +904,106 @@ export default function CheckRegistryPage() {
         seen.add(no);
       }
     }
-
-    // 2. Already-used in Firestore
+    // Already used for this bank (server registry)
     try {
-      const snap = await getDocs(query(
-        collection(db,'checkRegister'),
-        where('bankCode','==',cvForm.bankCode),
-        where('checkNumber','in', numbersToValidate.slice(0,30)),
-      ));
-      if (!snap.empty) {
-        const dupes = snap.docs.map(d => d.data().checkNumber).join(', ');
-        return alert(`Check number(s) already used for this bank: ${dupes}. Please use a different check number.`);
-      }
+      const existing = await listChecks({ bankCode: cvForm.bankCode, limit: 1000 });
+      const used = new Set(existing.map(c => String(c.checkNumber)));
+      const dupes = numbersToValidate.filter(n => used.has(n));
+      if (dupes.length) return alert(`Check number(s) already used for this bank: ${dupes.join(', ')}. Please use a different check number.`);
     } catch(e) { console.error('Duplicate check validation failed:', e); }
 
     setSaving(true);
     try {
-      const voucherId    = await nextCheckVoucherId(cvForm.issueDate);
-      const checkId      = genCheckId(assignedCheckNo);
       const payeeSummary = [...new Set(cvLines.map(l => l.contact).filter(Boolean))].join(', ') || cvForm.purposeCategory || '';
-
-      const linesPayload = (() => {
-        // Build ordered check-group list for physicalLineNo
-        const checkGroupOrder = [];
-        if (cvForm.isMultipleChecks) {
-          const seenGroups = new Set();
-          cvLines.forEach(l => {
-            const gid = l.checkGroupId || '_default';
-            if (!seenGroups.has(gid)) { seenGroups.add(gid); checkGroupOrder.push(gid); }
-          });
-        }
-        // Store on outer scope so check-register creation can reuse it
-        createCheckVoucher._groupOrder = checkGroupOrder;
-        return cvLines.map((l, i) => ({
-          lineNo:             i + 1,
-          physicalLineNo:     cvForm.isMultipleChecks ? (checkGroupOrder.indexOf(l.checkGroupId || '_default') + 1) : 1,
-          checkGroupId:       l.checkGroupId || '',
-          contactId:          l.contactId || '',
-          contact:            l.contact,
-          expenseAccountCode: l.expenseAccount,
-          description:        l.description,
-          amount:             Number(l.amount) || 0,
-          taxRateId:          l.taxRateId  || '',
-          taxType:            l.taxType    || 'N/A',
-          taxRate:            Number(l.taxRate) || 0,
-          taxAmt:             Number(l.taxAmt)  || 0,
-          inclusive:          !!l.inclusive,
-          lineCheckNo:   cvForm.isMultipleChecks ? (l.lineCheckNo||'')   : String(assignedCheckNo),
-          lineCheckDate: cvForm.isMultipleChecks ? (l.lineCheckDate||'') : (cvForm.globalCheckDate||cvForm.issueDate||''),
-        }));
-      })();
-      const checkGroupOrder = createCheckVoucher._groupOrder || [];
-
-      const batch      = writeBatch(db);
-      const voucherRef = doc(collection(db, 'vouchers'));
-      const checkRefs  = []; // one entry per checkRegister document
-
-      batch.set(voucherRef, {
-        voucherId, voucherType:'CHECK',
-        preparationDate:        cvForm.issueDate,
-        purposeCategory:        cvForm.purposeCategory || '',
-        paymentFromAccountCode: cvForm.bankCode,
-        pdcAccountCode:         pdcAccount?.code || '',
-        contactSummary:         payeeSummary,
-        totalAmount:            lineTotal, taxTotal, netCash,
-        status:                 'Pending',
-        isMultipleChecks:       !!cvForm.isMultipleChecks,
-        checkNumber:            cvForm.isMultipleChecks ? '' : String(assignedCheckNo),
-        checkDate:              cvForm.isMultipleChecks ? '' : (cvForm.globalCheckDate||cvForm.issueDate),
-        notes:                  cvForm.notes || '',
-        lines:                  linesPayload,
-        checkId, referenceType: 'Check Voucher',
-        ...(cvForm.loanId         ? { loanId:           cvForm.loanId }         : {}),
-        ...(cvForm.linkedScheduleId   ? { linkedScheduleId:   cvForm.linkedScheduleId }   : {}),
-        ...(cvForm.linkedScheduleDate ? { linkedScheduleDate: cvForm.linkedScheduleDate } : {}),
-        createdAt:serverTimestamp(), createdBy:user,
-        updatedAt:serverTimestamp(), updatedBy:user,
-      });
-
+      const checkGroupOrder = [];
       if (cvForm.isMultipleChecks) {
-        // One checkRegister doc per check GROUP (not per sub-line)
+        const seenGroups = new Set();
+        cvLines.forEach(l => {
+          const gid = l.checkGroupId || '_default';
+          if (!seenGroups.has(gid)) { seenGroups.add(gid); checkGroupOrder.push(gid); }
+        });
+      }
+      const checkId = genCheckId(assignedCheckNo);
+      const apiLines = cvLines.map((l, i) => {
+        const acct = accounts.find(a => a.code === l.expenseAccount || a.id === l.expenseAccount);
+        return {
+          accountId: acct?.id,
+          description: l.description || undefined,
+          amountCents: Math.round((Number(l.amount)||0) * 100),
+          meta: {
+            physicalLineNo: cvForm.isMultipleChecks ? (checkGroupOrder.indexOf(l.checkGroupId || '_default') + 1) : 1,
+            checkGroupId: l.checkGroupId || '', contactId: l.contactId || '', contact: l.contact || '',
+            taxRateId: l.taxRateId || '', taxType: l.taxType || 'N/A',
+            taxRate: Number(l.taxRate)||0, taxAmt: Number(l.taxAmt)||0, inclusive: !!l.inclusive,
+            lineCheckNo: cvForm.isMultipleChecks ? (l.lineCheckNo||'') : String(assignedCheckNo),
+            lineCheckDate: cvForm.isMultipleChecks ? (l.lineCheckDate||'') : (cvForm.globalCheckDate||cvForm.issueDate||''),
+          },
+        };
+      });
+      if (apiLines.some(l => !l.accountId)) { setSaving(false); return alert('An account could not be resolved for one of the lines.'); }
+
+      // 1. Create the CHECK voucher (server assigns CHK{YYYYMM}-#### as its number)
+      const created = await createVoucherDraft({
+        type: 'check',
+        voucherDate: cvForm.issueDate,
+        purposeCategory: cvForm.purposeCategory || null,
+        paymentFromAccountId: (accounts.find(a => a.code === cvForm.bankCode || a.id === cvForm.bankCode) || {}).id || null,
+        notes: cvForm.notes || null,
+        meta: {
+          isMultipleChecks: !!cvForm.isMultipleChecks,
+          checkNumber: cvForm.isMultipleChecks ? '' : String(assignedCheckNo),
+          checkDate: cvForm.isMultipleChecks ? '' : (cvForm.globalCheckDate||cvForm.issueDate),
+          checkId, pdcAccountCode: pdcAccount?.code || '',
+          contactSummary: payeeSummary, taxTotal, netCash,
+          ...(cvForm.loanId ? { loanId: cvForm.loanId } : {}),
+          ...(cvForm.linkedScheduleId ? { linkedScheduleId: cvForm.linkedScheduleId } : {}),
+          ...(cvForm.linkedScheduleDate ? { linkedScheduleDate: cvForm.linkedScheduleDate } : {}),
+        },
+        lines: apiLines,
+      });
+      const voucherId = created.voucherNo;
+      await transitionVoucher(created.id, 'pending').catch(()=>{});
+
+      // 2. Create the register rows (one per physical check)
+      const registerRows = [];
+      if (cvForm.isMultipleChecks) {
         checkGroupOrder.forEach((groupId, gIdx) => {
           const groupLines  = cvLines.filter(l => (l.checkGroupId || '_default') === groupId);
           const firstLine   = groupLines[0];
           const lineCheckNo = String(firstLine?.lineCheckNo || '').trim();
           const groupAmt    = groupLines.reduce((s, l) => s + (Number(l.amount) || 0), 0);
           const groupTax    = groupLines.reduce((s, l) => s + (Number(l.taxAmt)  || 0), 0);
-          const lineRef     = doc(collection(db, 'checkRegister'));
-          checkRefs.push(lineRef);
-          batch.set(lineRef, {
-            checkId:          genCheckId(lineCheckNo || (assignedCheckNo + gIdx)),
-            checkbookId:      cb.id,
-            bankCode:         cvForm.bankCode,
-            checkNumber:      lineCheckNo,
-            checkDate:        firstLine?.lineCheckDate || cvForm.issueDate,
-            issueDate:        cvForm.issueDate,
-            payeeName:        firstLine?.contact || payeeSummary,
-            amount:           groupAmt,
-            netAmount:        groupAmt - groupTax,
-            status:           'Issued',
-            referenceType:    'Check Voucher',
-            referenceId:      voucherId,
-            voucherDocId:     voucherRef.id,
-            isPartOfMultiple: true,
-            lineNo:           gIdx + 1,
-            voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
-            notes:            cvForm.notes || '',
-            createdAt: serverTimestamp(), createdBy: user,
-            updatedAt: serverTimestamp(), updatedBy: user,
+          registerRows.push({
+            checkNo: genCheckId(lineCheckNo || (assignedCheckNo + gIdx)),
+            checkbookId: cb.id, bankCode: cvForm.bankCode,
+            checkNumber: lineCheckNo,
+            checkDate: firstLine?.lineCheckDate || cvForm.issueDate,
+            issueDate: cvForm.issueDate,
+            payeeName: firstLine?.contact || payeeSummary,
+            amountCents: Math.round(groupAmt * 100),
+            netAmountCents: Math.round((groupAmt - groupTax) * 100),
+            referenceType: 'Check Voucher', referenceId: voucherId,
+            voucherId: created.id, isPartOfMultiple: true, lineNo: gIdx + 1,
+            notes: cvForm.notes || null,
           });
         });
       } else {
-        const checkRef = doc(collection(db, 'checkRegister'));
-        checkRefs.push(checkRef);
-        batch.set(checkRef, {
-          checkId, checkbookId:cb.id, bankCode:cvForm.bankCode,
-          checkNumber:      String(assignedCheckNo),
-          checkDate:        cvForm.globalCheckDate || cvForm.issueDate,
-          issueDate:        cvForm.issueDate,
-          payeeName:        payeeSummary,
-          amount:           lineTotal, netAmount:netCash,
-          status:           'Issued',
-          referenceType:    'Check Voucher',
-          referenceId:      voucherId,
-          voucherDocId:     voucherRef.id,
-          isPartOfMultiple: false,
-          voidReason:'', clearedDate:'', voidedDate:'', stoppedDate:'', staleDate:'',
-          notes:            cvForm.notes || '',
-          createdAt: serverTimestamp(), createdBy: user,
-          updatedAt: serverTimestamp(), updatedBy: user,
+        registerRows.push({
+          checkNo: checkId, checkbookId: cb.id, bankCode: cvForm.bankCode,
+          checkNumber: String(assignedCheckNo),
+          checkDate: cvForm.globalCheckDate || cvForm.issueDate,
+          issueDate: cvForm.issueDate,
+          payeeName: payeeSummary,
+          amountCents: Math.round(lineTotal * 100),
+          netAmountCents: Math.round(netCash * 100),
+          referenceType: 'Check Voucher', referenceId: voucherId,
+          voucherId: created.id, isPartOfMultiple: false,
+          notes: cvForm.notes || null,
         });
       }
+      await createChecks(registerRows);
 
-      await batch.commit();
-
-      // Advance checkbook next check number
+      // 3. Advance checkbook next number
       let nextNo;
       if (cvForm.isMultipleChecks) {
         const usedNos = cvLines.map(l => parseInt(l.lineCheckNo||'0')||0).filter(n => n > 0);
@@ -985,10 +1012,7 @@ export default function CheckRegistryPage() {
       } else {
         nextNo = String(assignedCheckNo + 1).padStart(String(end).length, '0');
       }
-      await updateDoc(doc(db,'checkbookMaster',cb.id), {
-        nextCheckNumber: nextNo,
-        updatedAt: serverTimestamp(), updatedBy: user,
-      });
+      await updateCheckbook(cb.id, { nextCheckNumber: nextNo });
 
       // No GL journal entry at check voucher preparation — IFRS 9 §3.3.1:
       // financial liabilities are derecognized only on the settlement date.
@@ -998,7 +1022,8 @@ export default function CheckRegistryPage() {
         : `Check #${assignedCheckNo}`;
       showToast(`Check Voucher ${voucherId} created · ${checkSummary}`, 'success');
       setCvModal(null);
-    } catch(e) { console.error(e); showToast('Error: ' + e.message, 'error'); }
+      await loadChecks(); await loadVouchers(); await loadCheckbooks();
+        } catch(e) { console.error(e); showToast('Error: ' + e.message, 'error'); }
     setSaving(false);
   };
 
@@ -1064,200 +1089,125 @@ export default function CheckRegistryPage() {
     if (form.status === 'Voided' && !form.voidReason?.trim()) return alert('Void reason is required.');
 
     // ── Pre-flight LV gate: loan-linked checks require a Loan Voucher ─────────
-    // Must run BEFORE any writes so we can abort cleanly.
-    let preLoadedLv = null; // will be set if an LV is found
-    if (form.status === 'Cleared' && form.voucherDocId && !form.loanPaymentId) {
-      const vPreSnap = await getDoc(doc(db, 'vouchers', form.voucherDocId));
-      const vPre     = vPreSnap.exists() ? vPreSnap.data() : null;
-      if (vPre?.loanId) {
-        // Query for a PAYMENT-type LV whose checkVoucherId matches this CV's human-readable ID
-        const lvSnap = await getDocs(query(
-          collection(db, 'vouchers'),
-          where('voucherType', '==', 'LOAN'),
-          where('checkVoucherId', '==', vPre.voucherId || ''),
-        ));
-        if (lvSnap.empty) {
-          showToast(
-            'Cannot clear: A Loan Voucher (LV) of type PAYMENT must be created and linked to this CV before clearing.',
-            'error',
-          );
-          return; // abort — no writes made
-        }
-        preLoadedLv = { docId: lvSnap.docs[0].id, ...lvSnap.docs[0].data() };
+    let voucherData = null;
+    if (form.voucherDocId) {
+      voucherData = vouchers.find(v => v.id === form.voucherDocId) || null;
+      if (voucherData && !Array.isArray(voucherData.lines)) {
+        try {
+          const d = await getVoucher(voucherData.id);
+          voucherData = { ...voucherData, lines: (d.lines || []).map(voucherLineFromApi) };
+          setVouchers(cur => cur.map(x => x.id === voucherData.id ? voucherData : x));
+        } catch { /* proceed without lines; JE step will skip */ }
+      }
+    }
+    if (form.status === 'Cleared' && voucherData?.loanId && !form.loanPaymentId) {
+      const lv = vouchers.find(v => v.voucherType === 'LOAN' && v.checkVoucherId === (voucherData.voucherId || ''));
+      if (!lv) {
+        showToast(
+          'Cannot clear: A Loan Voucher (LV) of type PAYMENT must be created and linked to this CV before clearing.',
+          'error',
+        );
+        return; // abort — no writes made
       }
     }
 
     setSaving(true);
     try {
-      const patch = { status:form.status, updatedAt:serverTimestamp(), updatedBy:user };
-      if (form.status === 'Cleared') patch.clearedDate = form.clearedDate || today();
-      if (form.status === 'Voided')  { patch.voidedDate = form.voidedDate || today(); patch.voidReason = form.voidReason; }
-      if (form.status === 'Stopped') patch.stoppedDate = form.stoppedDate || today();
-      if (form.status === 'Stale')   patch.staleDate   = form.staleDate   || today();
-      await updateDoc(doc(db,'checkRegister',form.id), patch);
+      const stampDate =
+        form.status === 'Cleared' ? (form.clearedDate || today()) :
+        form.status === 'Voided'  ? (form.voidedDate  || today()) :
+        form.status === 'Stopped' ? (form.stoppedDate || today()) :
+        form.status === 'Stale'   ? (form.staleDate   || today()) : undefined;
+      await setCheckStatus(form.id, form.status, {
+        ...(stampDate ? { date: stampDate } : {}),
+        ...(form.voidReason ? { reason: form.voidReason } : {}),
+      });
 
-      // Voucher side effects: Cleared→Paid only when ALL sibling checks are cleared; Voided→Pending
+      // Voucher echoes: Cleared→Paid when ALL sibling checks are cleared; Voided→Pending.
+      // The transitions are attempted; if the voucher isn't in an eligible state
+      // the server refuses and the register remains the source of truth.
       if (form.voucherDocId) {
         if (form.status === 'Cleared') {
           const allSiblings = checks.filter(c => c.voucherDocId === form.voucherDocId && c.id !== form.id);
-          // A sibling counts as "will be cleared" if it's already Cleared in state OR is also being
-          // cleared in the same batch save (batchClearedIds tracks all IDs cleared in this pass).
           const allWillBeCleared = allSiblings.every(c => c.status === 'Cleared' || batchClearedIds.has(c.id));
-          // Only fire the voucher→Paid update once per voucher: on the last check being cleared.
-          // If multiple checks share the same voucherDocId in this batch, only the last one triggers.
           const batchForVoucher = [...batchClearedIds].filter(id => {
             const c = checks.find(x => x.id === id);
             return c?.voucherDocId === form.voucherDocId;
           });
           const isLastClearInBatch = batchForVoucher.length === 0 || batchForVoucher[batchForVoucher.length - 1] === form.id;
           if (allWillBeCleared && isLastClearInBatch) {
-            await updateDoc(doc(db,'vouchers',form.voucherDocId), { status:'Paid', updatedAt:serverTimestamp(), updatedBy:user });
+            await transitionVoucher(form.voucherDocId, 'paid').catch(()=>{});
           }
         }
         if (form.status === 'Voided') {
-          await updateDoc(doc(db,'vouchers',form.voucherDocId), { status:'Pending', updatedAt:serverTimestamp(), updatedBy:user });
+          await transitionVoucher(form.voucherDocId, 'pending').catch(()=>{});
         }
       }
 
-      // ── On clearing: post settlement JE + auto-record loan payment ──────────────
+      // ── On clearing: post the settlement JE ──────────────────────────────────
       // IFRS 9 §3.3.1 — liability derecognized on settlement date only.
-      // JE: Dr expense/liability accounts (from voucher lines), Cr Cash in Bank.
+      // JE: Dr expense/tax accounts (from voucher lines), Cr Cash in Bank.
       if (form.status === 'Cleared') {
         const clearDate = form.clearedDate || today();
         const bankAcct  = accounts.find(a => a.code === form.bankCode || a.id === form.bankCode);
 
-        // Fetch voucher once — used for settlement JE and loan payment
-        let vData = null;
-        if (form.voucherDocId) {
-          const vSnap = await getDoc(doc(db, 'vouchers', form.voucherDocId));
-          vData = vSnap.exists() ? vSnap.data() : null;
-        }
+        if (bankAcct && voucherData?.lines?.length) {
+          const isInclusive = !!(voucherData.lines[0]?.inclusive);
+          const checkLines  = (voucherData.isMultipleChecks && form.lineNo)
+            ? voucherData.lines.filter(l => (l.physicalLineNo || 1) === form.lineNo)
+            : voucherData.lines;
 
-        // Build settlement JE from voucher lines (Dr expense accts, Cr Cash in Bank)
-        if (bankAcct && vData?.lines?.length) {
-          const isInclusive = !!(vData.lines[0]?.inclusive);
-          const checkLines  = (vData.isMultipleChecks && form.lineNo)
-            ? vData.lines.filter(l => (l.physicalLineNo || 1) === form.lineNo)
-            : vData.lines;
-
-          const accMap = new Map(); // accountCode → { accountCode, accountName, debit }
-          const addDebit = (code, name, amt) => {
-            if (!code || !(amt > 0)) return;
-            const prev = accMap.get(code) || { accountCode: code, accountName: name, debit: 0 };
-            accMap.set(code, { ...prev, debit: prev.debit + amt });
+          const accMap = new Map(); // accountId → debit pesos
+          const addDebit = (acct, amt) => {
+            if (!acct?.id || !(amt > 0)) return;
+            accMap.set(acct.id, (accMap.get(acct.id) || 0) + amt);
           };
           let grossTotal = 0;
-
           checkLines.forEach(l => {
             const lineAmt = Number(l.amount) || 0;
             const taxAmt  = Number(l.taxAmt)  || 0;
             const netAmt  = isInclusive ? lineAmt - taxAmt : lineAmt;
             const gross   = isInclusive ? lineAmt : lineAmt + taxAmt;
-            if (l.expenseAccountCode) {
-              const acct = accounts.find(a => a.code === l.expenseAccountCode);
-              addDebit(l.expenseAccountCode, acct?.name || l.expenseAccountCode, netAmt);
-            }
-            if (taxAmt > 0) {
-              const rateDoc = taxRates.find(r => r.id === l.taxRateId);
-              const raw = rateDoc
-                ? (rateDoc.trackingType === 'separate'
-                    ? (rateDoc.taxAccountPurchases || rateDoc.taxAccountSingle || '')
-                    : (rateDoc.taxAccountSingle || ''))
-                : '';
-              if (raw) {
-                const taxAcct = accounts.find(a => a.code === raw);
-                addDebit(raw, taxAcct?.name || raw, taxAmt);
-              } else if (l.expenseAccountCode) {
-                const acct = accounts.find(a => a.code === l.expenseAccountCode);
-                addDebit(l.expenseAccountCode, acct?.name || l.expenseAccountCode, taxAmt);
-              }
-            }
+            const expAcct = accounts.find(a => a.code === l.expenseAccountCode);
+            addDebit(expAcct, netAmt);
+            // Tax splits to dedicated tax accounts once the tax subsystem lands
+            // (Phase 4); until then tax stays on the expense line's account.
+            if (taxAmt > 0) addDebit(expAcct, taxAmt);
             grossTotal += gross;
           });
 
           if (accMap.size > 0 && grossTotal > 0) {
-            const jeLines = [
-              ...Array.from(accMap.values()).map(({ accountCode, accountName, debit }) => ({
-                accountCode, accountName, description: '', debit, credit: 0,
-              })),
-              {
-                accountCode: bankAcct.code,
-                accountName: bankAcct.name,
-                description: `Check #${form.checkNumber} cleared`,
-                debit: 0, credit: grossTotal,
-              },
-            ];
-            const clearJeId = await nextJournalEntryId(clearDate);
-            await addDoc(collection(db, 'journalEntries'), {
-              jeId: clearJeId, date: clearDate,
-              description: `Check Cleared — ${form.referenceId || form.checkId} · Check #${form.checkNumber}`,
-              type: 'Check Cleared', reference: form.referenceId || form.checkId || '',
-              sourceDocId: form.voucherDocId || '', sourceDocType: 'voucher',
-              status: 'Posted',
-              lines: jeLines,
-              totalDebit: grossTotal, totalCredit: grossTotal,
-              createdAt: serverTimestamp(), createdBy: user,
-              updatedAt: serverTimestamp(), updatedBy: user,
-            });
+            try {
+              const je = await createJournalEntry({
+                entryDate: clearDate,
+                memo: `Check Cleared — ${form.referenceId || form.checkId} · Check #${form.checkNumber}`,
+                entryType: 'Manual',
+                reference: form.referenceId || form.checkId || '',
+                post: true,
+                lines: [
+                  ...[...accMap.entries()].map(([accountId, debit]) => ({
+                    accountId, debitCents: Math.round(debit * 100), creditCents: 0,
+                  })),
+                  {
+                    accountId: bankAcct.id, debitCents: 0, creditCents: Math.round(grossTotal * 100),
+                    description: `Check #${form.checkNumber} cleared`,
+                  },
+                ],
+              });
+              await updateCheck(form.id, { journalEntryId: je.id }).catch(()=>{});
+            } catch (e) {
+              showToast(`Cleared, but the settlement JE failed: ${e instanceof ApiError ? e.detail : e.message}`, 'error');
+            }
           }
         }
 
-        // Auto-post to loanPayments via the pre-vetted LV (preLoadedLv set in gate above)
-        if (vData?.loanId && !form.loanPaymentId) {
-          if (preLoadedLv?.loanPaymentId) {
-            // LV already consumed (edge case): just stamp loanPaymentId on this checkRegister row
-            await updateDoc(doc(db, 'checkRegister', form.id), {
-              loanPaymentId: preLoadedLv.loanPaymentId,
-              updatedAt: serverTimestamp(), updatedBy: user,
-            });
-          } else if (preLoadedLv) {
-            // LV found and available — use its lines to derive interest/principal/penalty
-            const total        = Number(form.netAmount || form.amount || 0);
-            const linesToParse = (vData.isMultipleChecks && form.checkNumber)
-              ? (preLoadedLv.lines || []).filter(l => l.lineCheckNo === form.checkNumber)
-              : (preLoadedLv.lines || []);
-            let interest = 0; let penalty = 0;
-            linesToParse.forEach(l => {
-              const acct = accounts.find(a => a.code === l.expenseAccountCode);
-              const name = (acct?.name || l.accountName || l.description || '').toLowerCase();
-              const amt  = Math.abs(Number(l.amount || l.debit || 0));
-              if (name.includes('interest') || name.includes('finance cost')) interest += amt;
-              else if (name.includes('penalty'))                               penalty  += amt;
-            });
-            const principal = Math.max(0, total - interest - penalty);
-            const lpRef = await addDoc(collection(db, 'loanPayments'), {
-              loanId:          vData.loanId,
-              loanName:        vData.loanName || '',
-              date:            clearDate,
-              interest, principal, penalty, total,
-              method:          'Check',
-              referenceNo:     form.checkNumber       || '',
-              bank:            form.bankCode          || '',
-              voucherId:       preLoadedLv.voucherId  || '',  // LV's human-readable ID
-              checkVoucherId:  vData.voucherId        || '',  // CV's human-readable ID
-              checkId:         form.checkId           || '',
-              checkRegisterId: form.id                || '',
-              notes:           'Auto-posted from Check Registry upon check clearing.',
-              allocations:     [],
-              createdAt:       serverTimestamp(), createdBy: user,
-            });
-            // Stamp checkRegister with loanPaymentId
-            await updateDoc(doc(db, 'checkRegister', form.id), {
-              loanPaymentId: lpRef.id,
-              updatedAt: serverTimestamp(), updatedBy: user,
-            });
-            // Mark the LV as consumed so it cannot be double-posted
-            await updateDoc(doc(db, 'vouchers', preLoadedLv.docId), {
-              loanPaymentId: lpRef.id,
-              updatedAt: serverTimestamp(), updatedBy: user,
-            });
-          }
-          // If preLoadedLv is null here, the gate already blocked us above — this path won't run.
-        }
+        // Loan-payment auto-posting returns with the loans domain (Phase 6);
+        // the LV gate above still protects against clearing unlinked loan checks.
       }
 
       if (!silent) showToast(`Check #${form.checkNumber} updated to ${form.status}.`, 'success');
-    } catch(e) { console.error(e); showToast('Update failed: ' + e.message, 'error'); }
+      await loadChecks(); await loadVouchers();
+        } catch(e) { console.error(e); showToast('Update failed: ' + e.message, 'error'); }
     setSaving(false);
   };
 
@@ -1318,15 +1268,11 @@ export default function CheckRegistryPage() {
         ...(isLoose ? { checksCount: parseInt(form.checksCount) } : {}),
         nextCheckNumber:form.nextCheckNumber||form.startingNumber,
         isActive:form.isActive!==false, notes:form.notes||'',
-        updatedAt:serverTimestamp(), updatedBy:user,
       };
-      // Enforce one-active-per-bank
-      if (payload.isActive) {
-        const others = checkbooks.filter(cb => cb.bankCode === form.bankCode && cb.id !== form.id);
-        await Promise.all(others.map(cb => updateDoc(doc(db,'checkbookMaster',cb.id), { isActive:false, updatedAt:serverTimestamp(), updatedBy:user })));
-      }
-      if (form.id) await updateDoc(doc(db,'checkbookMaster',form.id), payload);
-      else await addDoc(collection(db,'checkbookMaster'), { ...payload, createdAt:serverTimestamp(), createdBy:user });
+      // One-active-per-bank is enforced server-side.
+      if (form.id) await updateCheckbook(form.id, payload);
+      else await createCheckbook(payload);
+      await loadCheckbooks();
       setCbModal(null);
       showToast('Checkbook saved.', 'success');
     } catch(e) { console.error(e); showToast('Save failed: ' + e.message, 'error'); }
@@ -1339,116 +1285,89 @@ export default function CheckRegistryPage() {
     const stale = checks.filter(c => { if (c.status !== 'Issued') return false; const d = new Date(c.issueDate); return !isNaN(d) && d < cutoff; });
     if (!stale.length) { showToast('No stale checks found.', 'info'); return; }
     askConfirm(`Mark ${stale.length} check(s) issued before ${cutoff.toLocaleDateString()} as Stale?`, async () => {
-      await Promise.all(stale.map(c => updateDoc(doc(db,'checkRegister',c.id), { status:'Stale', staleDate:today(), updatedAt:serverTimestamp(), updatedBy:user })));
+      await Promise.allSettled(stale.map(c => setCheckStatus(c.id, 'Stale', { date: today() })));
       showToast(`${stale.length} check(s) flagged as Stale.`, 'success');
+      await loadChecks();
     });
   };
 
   const deleteCheck = (id) => {
     askConfirm('Delete this check entry? This cannot be undone.', async () => {
-      const checkSnap = checks.find(c => c.id === id);
-      let voucherDocId = checkSnap?.voucherDocId || null;
-      const checkbookId = checkSnap?.checkbookId || null;
-      const bankCode    = checkSnap?.bankCode    || null;
+      try {
+        const checkSnap = checks.find(c => c.id === id);
+        const voucherDocId = checkSnap?.voucherDocId || null;
+        const bankCode = checkSnap?.bankCode || null;
 
-      // Fallback: find voucher by referenceId when voucherDocId wasn't stored (legacy data)
-      if (!voucherDocId && checkSnap?.referenceId) {
-        const vFallback = await getDocs(query(collection(db,'vouchers'), where('voucherId','==',checkSnap.referenceId), limit(1)));
-        if (!vFallback.empty) voucherDocId = vFallback.docs[0].id;
-      }
+        // Collect all sibling register entries for the same voucher
+        const siblingDocs = voucherDocId
+          ? checks.filter(c => c.voucherDocId === voucherDocId)
+          : (checkSnap ? [checkSnap] : []);
 
-      // Collect all sibling check register entries
-      let siblingDocs = [];
-      if (voucherDocId) {
-        const siblingSnap = await getDocs(query(collection(db,'checkRegister'), where('voucherDocId','==',voucherDocId)));
-        siblingDocs = siblingSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      } else {
-        siblingDocs = checkSnap ? [checkSnap] : [];
-      }
+        // 'Issued' checks → delete (return to inventory); consumed statuses are
+        // kept as unlinked records preserving the used check number.
+        const toDelete = siblingDocs.filter(c => c.status === 'Issued');
+        const toKeep   = siblingDocs.filter(c => c.status !== 'Issued');
 
-      // Separate: 'Issued' checks → delete (return to inventory)
-      //           cancelled/voided/stopped/stale/cleared → keep as unlinked consumed records
-      const toDelete = siblingDocs.filter(c => c.status === 'Issued');
-      const toKeep   = siblingDocs.filter(c => c.status !== 'Issued');
-
-      // Unlink kept entries from the voucher (preserve the consumed check number)
-      if (toKeep.length > 0) {
-        await Promise.all(toKeep.map(c =>
-          updateDoc(doc(db,'checkRegister',c.id), {
-            voucherDocId:  null,
-            referenceId:   null,
-            referenceType: 'Consumed (Voucher Deleted)',
-            updatedAt: serverTimestamp(), updatedBy: user,
-          })
+        await Promise.allSettled(toKeep.map(c =>
+          updateCheck(c.id, { voucherId: null, referenceId: null, referenceType: 'Consumed (Voucher Deleted)' })
         ));
-      }
 
-      if (voucherDocId) {
-        // 1. Delete all linked JEs
-        const jeSnap = await getDocs(query(collection(db,'journalEntries'), where('sourceDocId','==',voucherDocId)));
-        await Promise.all(jeSnap.docs.map(d => deleteDoc(d.ref)));
+        if (voucherDocId) {
+          // Under the new model no JE exists at preparation (settlement posts at
+          // clearing), so there are no preparation JEs to clean up. Draft/
+          // rejected vouchers delete; in-workflow ones are voided instead.
+          try { await apiDeleteVoucher(voucherDocId); }
+          catch { await apiVoidVoucher(voucherDocId).catch(()=>{}); }
+        }
 
-        // 2. Delete the voucher document itself
-        await deleteDoc(doc(db,'vouchers',voucherDocId));
-      }
+        if (toDelete.length > 0) {
+          await Promise.allSettled(toDelete.map(c => apiDeleteCheck(c.id)));
+        } else if (!voucherDocId) {
+          await apiDeleteCheck(id);
+        }
 
-      // 3. Delete only the 'Issued' check register entries
-      if (toDelete.length > 0) {
-        await Promise.all(toDelete.map(c => deleteDoc(doc(db,'checkRegister',c.id))));
-      } else if (!voucherDocId) {
-        // No voucher link and no entries to delete — delete this single entry
-        await deleteDoc(doc(db,'checkRegister',id));
-      }
+        // Roll back nextCheckNumber to reflect freed numbers
+        const cbId = checkSnap?.checkbookId || siblingDocs[0]?.checkbookId || null;
+        const cbRef = cbId ? checkbooks.find(b => b.id === cbId) : null;
+        const cbFallback = !cbRef && bankCode
+          ? checkbooks.find(b =>
+              b.bankCode === bankCode &&
+              toDelete.some(c => {
+                const n = parseInt(c.checkNumber);
+                return n >= parseInt(b.startingNumber) && n <= parseInt(b.endingNumber);
+              })
+            )
+          : null;
+        const cb = cbRef || cbFallback;
 
-      // 4. Roll back nextCheckNumber to reflect freed numbers
-      const cbId = checkbookId || siblingDocs[0]?.checkbookId || null;
-      const cbRef = cbId ? checkbooks.find(b => b.id === cbId) : null;
-      const cbFallback = !cbRef && bankCode
-        ? checkbooks.find(b =>
-            b.bankCode === bankCode &&
-            toDelete.some(c => {
-              const n = parseInt(c.checkNumber);
-              return n >= parseInt(b.startingNumber) && n <= parseInt(b.endingNumber);
-            })
-          )
-        : null;
-      const cb = cbRef || cbFallback;
-
-      if (cb && toDelete.length > 0) {
-        // Query all remaining checkRegister entries for this checkbook to find the new max
-        const remainingSnap = await getDocs(query(
-          collection(db,'checkRegister'),
-          where('checkbookId','==',cb.id),
-        ));
-        const remainingNos = remainingSnap.docs
-          .map(d => parseInt(d.data().checkNumber || '0') || 0)
-          .filter(n => n > 0);
-
-        const width   = String(cb.endingNumber || cb.startingNumber).length;
-        const startNo = parseInt(cb.startingNumber) || 0;
-        const endNo   = parseInt(cb.endingNumber) || 0;
-        let newNext;
-        if (remainingNos.length > 0) {
-          const maxUsed = Math.max(...remainingNos);
-          if (maxUsed >= startNo && maxUsed <= endNo) {
-            newNext = String(maxUsed + 1).padStart(width, '0');
+        if (cb && toDelete.length > 0) {
+          const remaining = await listChecks({ limit: 1000 }).catch(() => []);
+          const remainingNos = remaining
+            .filter(c => c.checkbookId === cb.id)
+            .map(c => parseInt(c.checkNumber || '0') || 0)
+            .filter(n => n > 0);
+          const width   = String(cb.endingNumber || cb.startingNumber).length;
+          const startNo = parseInt(cb.startingNumber) || 0;
+          const endNo   = parseInt(cb.endingNumber) || 0;
+          let newNext;
+          if (remainingNos.length > 0) {
+            const maxUsed = Math.max(...remainingNos);
+            newNext = (maxUsed >= startNo && maxUsed <= endNo)
+              ? String(maxUsed + 1).padStart(width, '0')
+              : cb.startingNumber;
           } else {
-            newNext = cb.startingNumber; // all remaining are outside range — reset
+            newNext = cb.startingNumber;
           }
-        } else {
-          newNext = cb.startingNumber; // no checks left — reset to start
+          if (parseInt(newNext) < parseInt(cb.nextCheckNumber)) {
+            await updateCheckbook(cb.id, { nextCheckNumber: newNext }).catch(()=>{});
+          }
         }
 
-        // Only update if we're actually rolling back (never advance forward here)
-        if (parseInt(newNext) < parseInt(cb.nextCheckNumber)) {
-          await updateDoc(doc(db,'checkbookMaster',cb.id), {
-            nextCheckNumber: newNext,
-            updatedAt: serverTimestamp(), updatedBy: user,
-          });
-        }
+        showToast('Check entry and linked records deleted.', 'success');
+        await loadChecks(); await loadVouchers(); await loadCheckbooks();
+      } catch (e) {
+        showToast(e instanceof ApiError ? e.detail : ('Delete failed: ' + e.message), 'error');
       }
-
-      showToast('Check entry and linked records deleted.', 'success');
     });
   };
 
@@ -1682,13 +1601,15 @@ export default function CheckRegistryPage() {
     const STEPS = ['Pending', 'For Verification', 'Verified', 'For Approval', 'Approved', 'Paid'];
     const stepIdx = STEPS.indexOf(voucher.status);
 
+    const LABEL_TO_ENUM = { 'Draft':'draft', 'Pending':'pending', 'For Verification':'for_verification', 'Verified':'verified', 'For Approval':'for_approval', 'Approved':'approved', 'Paid':'paid', 'Rejected':'rejected' };
     const doStatusChange = async (newStatus) => {
       setActioning(true);
       try {
-        await updateDoc(doc(db, 'vouchers', voucher.id), { status: newStatus, updatedAt: serverTimestamp(), updatedBy: user });
+        await transitionVoucher(voucher.id, LABEL_TO_ENUM[newStatus] || newStatus);
         onStatusChange?.(newStatus);
         showToast(`Voucher moved to "${newStatus}".`, 'success');
-      } catch (e) { showToast('Error: ' + e.message, 'error'); }
+        await loadVouchers();
+      } catch (e) { showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message), 'error'); }
       setActioning(false);
     };
 
@@ -2233,7 +2154,7 @@ export default function CheckRegistryPage() {
                       <td>
                         <div style={{ display:'flex', gap:4 }}>
                           <button className="btn btn-ghost btn-sm" onClick={() => setCbModal({ ...cb })}>Edit</button>
-                          <button onClick={() => askConfirm('Delete this checkbook?', async () => { try { await deleteDoc(doc(db,'checkbookMaster',cb.id)); showToast('Checkbook deleted.', 'success'); } catch(e) { showToast('Delete failed: ' + e.message, 'error'); } })} style={{ background:'none', border:'none', color:'#dc2626', cursor:'pointer', fontWeight:900, fontSize:13, padding:'3px 5px' }}>✕</button>
+                          <button onClick={() => askConfirm('Delete this checkbook?', async () => { try { await deleteCheckbook(cb.id); showToast('Checkbook deleted.', 'success'); await loadCheckbooks(); } catch(e) { showToast(e instanceof ApiError ? e.detail : ('Delete failed: ' + e.message), 'error'); } })} style={{ background:'none', border:'none', color:'#dc2626', cursor:'pointer', fontWeight:900, fontSize:13, padding:'3px 5px' }}>✕</button>
                         </div>
                       </td>
                     </tr>

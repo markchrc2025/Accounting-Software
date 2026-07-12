@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getDoc, doc, getDocs, collection, query, where } from 'firebase/firestore';
-import { db } from '../../../firebase.js';
+import { getSettings, listUsers, getJournalEntry } from '../../../lib/api.js';
 import jsPDF from 'jspdf';
 
 const TYPE_LABELS = {
@@ -71,37 +70,31 @@ export default function VoucherPdfModal({ voucher, onClose, autoDownload = false
     let cancelled = false;
     async function load() {
       const creatorEmail = voucher.createdBy || '__none__';
-      const [profSnap, jeSnap, userSnap, routingSnap] = await Promise.all([
-        getDoc(doc(db, 'settings', 'profile')),
-        voucher.linkedJeId
-          ? getDoc(doc(db, 'journalEntries', voucher.linkedJeId))
-          : Promise.resolve(null),
-        getDocs(query(collection(db, 'appUsers'), where('email', '==', creatorEmail))),
-        getDoc(doc(db, 'settings', 'approvalRouting')),
+      const [settings, jeDetail] = await Promise.all([
+        getSettings().catch(() => ({})),
+        voucher.linkedJeId ? getJournalEntry(voucher.linkedJeId).catch(() => null) : Promise.resolve(null),
       ]);
+      let usersByEmail = new Map();
+      try {
+        const users = await listUsers();
+        usersByEmail = new Map(users.map(u => [(u.email||'').toLowerCase(), u]));
+      } catch { /* non-admin — names fall back to emails */ }
       if (cancelled) return;
-      const profData = profSnap.exists() ? profSnap.data() : {};
-      setProfile(profData);
-      setJeLines(jeSnap?.exists() ? (jeSnap.data().lines || []) : []);
+      setProfile(settings?.profile || {});
+      setJeLines((jeDetail?.lines || []).map(l => ({
+        accountCode: l.accountCode || '', accountName: l.accountName || '',
+        description: l.description || '',
+        debit: (l.debitCents ?? 0) / 100, credit: (l.creditCents ?? 0) / 100,
+      })));
 
-      const appUser = userSnap?.docs?.[0]?.data();
-      setPreparedByName(appUser?.fullName || appUser?.displayName || voucher.createdBy || '');
+      const nameFor = (email) => usersByEmail.get((email||'').toLowerCase())?.fullName || email || '';
+      setPreparedByName(nameFor(voucher.createdBy) || voucher.createdBy || '');
 
       // Resolve verifier & approver from the routing rule for this maker
-      const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+      const routes = settings?.approvalRouting?.routes || [];
       const route  = routes.find(r => r.documentType === 'Vouchers' && r.makerEmail === creatorEmail);
-      const verifierEmail = route?.verifierEmail || '';
-      const approverEmail = route?.approverEmail || '';
-
-      const [verSnap, apprSnap] = await Promise.all([
-        verifierEmail ? getDocs(query(collection(db, 'appUsers'), where('email', '==', verifierEmail))) : Promise.resolve(null),
-        approverEmail ? getDocs(query(collection(db, 'appUsers'), where('email', '==', approverEmail))) : Promise.resolve(null),
-      ]);
-      if (cancelled) return;
-      const verUser  = verSnap?.docs?.[0]?.data();
-      const apprUser = apprSnap?.docs?.[0]?.data();
-      setReviewedByName(verUser?.fullName  || verUser?.displayName  || verifierEmail  || '');
-      setApprovedByName(apprUser?.fullName || apprUser?.displayName || approverEmail || '');
+      setReviewedByName(nameFor(route?.verifierEmail || ''));
+      setApprovedByName(nameFor(route?.approverEmail || ''));
       setLoading(false);
     }
     load();
