@@ -134,6 +134,9 @@ export const voidVoucher = (id) =>
   apiFetch(`/vouchers/${id}/void`, { method: 'POST', body: JSON.stringify({}) });
 export const getTrialBalance = (p) => apiFetch(`/reports/trial-balance${periodQuery(p)}`);
 export const getProfitAndLoss = (p) => apiFetch(`/reports/profit-and-loss${periodQuery(p)}`);
+// ── users (admin-only list; callers fall back to emails on 403) ──────────────
+export const listUsers = () => apiFetch('/users').then((r) => r.users);
+
 // ── settings / checkbooks / checks / disbursements ───────────────────────────
 export const getSettings = () => apiFetch('/settings');
 export const updateSettings = (payload) =>

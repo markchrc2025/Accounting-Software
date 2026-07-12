@@ -2,11 +2,10 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import jsPDF from 'jspdf';
 import {
-  collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc, doc,
-  serverTimestamp, getDocs, getDoc, where
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
-import { nextDisbursementReportId } from '../../../utils/documentIds.js';
+  listDisbursementReports, createDisbursementReport, updateDisbursementReport,
+  setDisbursementStatus, deleteDisbursementReport as apiDeleteReport,
+  listVouchers, getVoucher, listChecks, listAccounts, getSettings, listUsers, ApiError,
+} from '../../../lib/api.js';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
 const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
@@ -16,6 +15,47 @@ const today = () => new Date().toISOString().slice(0, 10);
 const fmtDate = (d) => { try { return d ? new Date(d+'T00:00:00').toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'}) : '—'; } catch { return d||'—'; } };
 
 const PAYROLL_TYPES = ['PAYROLL','FINAL_PAY'];
+
+// ── API <-> UI mapping ────────────────────────────────────────
+// Reports keep the portal's status labels verbatim server-side; typed money
+// columns are centavos while the jsonb line/balance snapshots stay in pesos
+// (the UI owns their shape and they round-trip untouched).
+const VTYPE_LABEL = { payment:'PAYMENT', receipt:'RECEIPT', payroll:'PAYROLL', final_pay:'FINAL_PAY', loan:'LOAN', check:'CHECK' };
+const VSTAT_LABEL = { approved:'Approved', for_disbursement:'For Disbursement', paid:'Paid', void:'Voided', rejected:'Rejected' };
+const reportFromApi = (r) => {
+  const m = r.meta || {};
+  return {
+    id: r.id,
+    reportId: r.reportNo,
+    date: r.reportDate,
+    totalAmount: (r.totalCents ?? 0) / 100,
+    expectedCollection: (r.expectedCollectionCents ?? 0) / 100,
+    notes: r.notes || '',
+    status: r.status || 'Pending',
+    bankBalances: r.bankBalances || {},
+    lines: Array.isArray(r.lines) ? r.lines : [],
+    createdBy: r.createdByEmail || '',
+    reviewedBy: m.reviewedBy || '', approvedBy: m.approvedBy || '',
+    rejectReason: m.rejectReason || '',
+  };
+};
+const voucherFromApi = (v) => {
+  const m = v.meta || {};
+  return {
+    id: v.id,
+    voucherId: v.voucherNo,
+    voucherType: VTYPE_LABEL[v.voucherType] || 'PAYMENT',
+    status: VSTAT_LABEL[v.status] || v.status,
+    contactSummary: m.contactSummary || v.contactName || '',
+    totalAmount: (v.totalCents ?? 0) / 100,
+    paymentFromAccountCode: v.paymentFromAccountCode || '',
+    preDisbursementStatus: VSTAT_LABEL[v.preDisbursementStatus] || v.preDisbursementStatus || '',
+    disbursementRef: v.disbursementRef || '',
+    loanId: m.loanId || '',
+    checkNumber: '', checkDate: '',
+    lines: null, // payroll per-line expansion loads lines on demand
+  };
+};
 
 const DR_STATUSES = ['Pending','For Verification','Verified','For Approval','Approved','Disbursed','Rejected','Voided'];
 
@@ -366,7 +406,7 @@ function StatusPill({ status }) {
 }
 
 export default function DisbursementsPage() {
-  const { globalRoles, isAdmin } = usePermissions();
+  const { globalRoles, isAdmin, userRecord } = usePermissions();
   const canReviewOrApprove = isAdmin || globalRoles.some(r => ['Verifier','Approver'].includes(r));
 
   const [reports,      setReports]      = useState([]);
@@ -412,7 +452,7 @@ export default function DisbursementsPage() {
 
   const showToast  = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
-  const user = auth.currentUser?.email || '';
+  const user = userRecord?.email || '';
 
   // Close kebab menu on outside click or scroll
   useEffect(() => {
@@ -431,21 +471,24 @@ export default function DisbursementsPage() {
       setViewRoute({ verifierEmail:'', approverEmail:'', hasVerifier:false, isVerifier:false, isApprover:false, isMaker:false });
       return;
     }
-    const lookupName = async (email) => {
+    // Names resolve via the admin users list when available; otherwise emails.
+    let usersByEmail = new Map();
+    const lookupName = (email) => {
       if (!email) return '';
-      const snap = await getDocs(query(collection(db,'appUsers'), where('email','==',email)));
-      const d = snap?.docs?.[0]?.data();
-      return d?.fullName || d?.displayName || email;
+      const u = usersByEmail.get(email.toLowerCase());
+      return u?.fullName || email;
     };
     (async () => {
-      const [preparedName, reviewedName, approvedName, routingSnap] = await Promise.all([
-        lookupName(viewModal.createdBy  || ''),
-        lookupName(viewModal.reviewedBy || ''),
-        lookupName(viewModal.approvedBy || ''),
-        getDoc(doc(db,'settings','approvalRouting')),
-      ]);
+      try {
+        const users = await listUsers();
+        usersByEmail = new Map(users.map(u => [(u.email||'').toLowerCase(), u]));
+      } catch { /* non-admin — fall back to emails */ }
+      const settings = await getSettings().catch(() => ({}));
+      const preparedName = lookupName(viewModal.createdBy  || '');
+      const reviewedName = lookupName(viewModal.reviewedBy || '');
+      const approvedName = lookupName(viewModal.approvedBy || '');
       setViewMeta({ preparedName, reviewedName, approvedName });
-      const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+      const routes = settings?.approvalRouting?.routes || [];
       const route = routes.find(rt => rt.documentType === 'Disbursements' && rt.makerEmail === viewModal.createdBy) || null;
       const verifierEmail = route?.verifierEmail || '';
       const approverEmail = route?.approverEmail || '';
@@ -460,46 +503,68 @@ export default function DisbursementsPage() {
   }, [viewModal?.id]);
 
   // ── Data loading ──────────────────────────────────────────────────────────────
+  const loadReports = async () => {
+    try {
+      const rows = await listDisbursementReports();
+      setReports(rows.map(reportFromApi));
+    } catch (e) {
+      showToast(`Couldn't load reports: ${e instanceof ApiError ? e.detail : e.message}`);
+    }
+  };
+  const loadVouchers = async () => {
+    try {
+      const rows = await listVouchers({ limit: 500 });
+      setVouchers(rows.filter(v => ['approved','for_disbursement'].includes(v.status)).map(voucherFromApi));
+    } catch { /* toast on reports covers connectivity */ }
+  };
+
   useEffect(() => {
-    // Live reports
-    const unsub = onSnapshot(
-      query(collection(db,'disbursementReports'), orderBy('createdAt','desc')),
-      snap => setReports(snap.docs.map(d => ({ id:d.id, ...d.data() })))
-    );
-    // COA bank accounts (one-time)
-    getDocs(query(collection(db,'accounts'), where('subType','==','Bank')))
-      .then(s => setBankAccounts(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.code||'').localeCompare(b.code||''))));
+    loadReports();
+    loadVouchers();
+    // COA bank accounts (subtype Bank)
+    listAccounts()
+      .then(rows => setBankAccounts(
+        rows.filter(a => (a.subtype||'') === 'Bank').map(a => ({ ...a, subType: a.subtype || '' }))
+            .sort((a,b)=>(a.code||'').localeCompare(b.code||''))))
+      .catch(()=>{});
     // Company profile (logo, notedBy, etc.)
-    getDoc(doc(db,'settings','profile')).then(s => { if (s.exists()) setProfile(s.data()); });
-    // Daily bank balances — live from Bank Management
-    const unsubBals = onSnapshot(
-      query(collection(db,'dailyBankBalances'), orderBy('date','desc')),
-      snap => setDailyBals(snap.docs.map(d=>({id:d.id,...d.data()})))
-    );
-    // Vouchers — only Approved or already-staged For Disbursement may be included in a DR
-    const unsubVouchers = onSnapshot(
-      query(collection(db,'vouchers'), where('status','in',
-        ['Approved','For Disbursement']
-      )),
-      s => setVouchers(s.docs.map(d => ({ id:d.id, ...d.data() })))
-    );
-    return () => { unsub(); unsubBals(); unsubVouchers(); };
+    getSettings().then(s => { if (s?.profile) setProfile(s.profile); }).catch(()=>{});
+    // Daily bank balances land with the Bank module (Phase 5); until then the
+    // report's bank-balance snapshot starts at zero and can be typed in.
+    setDailyBals([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Live subscriptions — active only while the create/edit modal is open
-  const checkUnsubRef   = useRef(null);
+  // Modal data: Issued checks (so CHECK vouchers expand per physical check) and
+  // per-line detail for payroll-type vouchers (their lines live server-side now).
   const refreshModalData = () => {
-    if (checkUnsubRef.current) checkUnsubRef.current();
-    // Load Issued check register entries so CHECK vouchers expand per physical check
-    checkUnsubRef.current = onSnapshot(
-      query(collection(db,'checkRegister'), where('status','==','Issued')),
-      s => setCheckEntries(s.docs.map(d => ({ id:d.id, ...d.data() })))
-    );
+    listChecks({ status: 'Issued' })
+      .then(rows => setCheckEntries(rows.map(c => ({
+        id: c.id, voucherDocId: c.voucherId || '', bankCode: c.bankCode || '',
+        checkNumber: c.checkNumber || '', checkDate: c.checkDate || '', issueDate: c.issueDate || '',
+        payeeName: c.payeeName || '', amount: (c.amountCents ?? 0) / 100, lineNo: c.lineNo ?? null,
+      }))))
+      .catch(()=>{});
+    // Hydrate payroll voucher lines for per-line expansion
+    setVouchers(prev => {
+      prev.filter(v => PAYROLL_TYPES.includes(v.voucherType) && v.lines === null).forEach(v => {
+        getVoucher(v.id).then(d => {
+          const lines = (d.lines || []).map(l => {
+            const m = l.meta || {};
+            return {
+              lineNo: l.lineNo, contact: m.contact || '', description: l.description || '',
+              amount: (l.amountCents ?? 0) / 100,
+              lineBankCode: m.lineBankCode || '', lineCheckNumber: m.lineCheckNumber || '',
+              lineCheckDate: m.lineCheckDate || '',
+            };
+          });
+          setVouchers(cur => cur.map(x => x.id === v.id ? { ...x, lines } : x));
+        }).catch(()=>{});
+      });
+      return prev;
+    });
   };
-  const closeModal = () => {
-    if (checkUnsubRef.current) { checkUnsubRef.current(); checkUnsubRef.current = null; }
-    setShowModal(false);
-  };
+  const closeModal = () => setShowModal(false);
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -699,14 +764,17 @@ export default function DisbursementsPage() {
   const bulkSubmit = () => {
     if (!selected.size) return;
     askConfirm(`Submit ${selected.size} report(s) for approval?`, async () => {
-      await Promise.all([...selected].map(id => updateDoc(doc(db,'disbursementReports',id), { status:'For Verification', updatedAt:serverTimestamp(), updatedBy:user })));
-      setSelected(new Set()); showToast('Submitted for review.');
+      const results = await Promise.allSettled([...selected].map(id => setDisbursementStatus(id, 'For Verification')));
+      const okCount = results.filter(r => r.status === 'fulfilled').length;
+      setSelected(new Set()); showToast(`${okCount}/${results.length} submitted for review.`);
+      await loadReports();
     });
   };
   const bulkDelete = () => {
     if (!selected.size) return;
-    askConfirm(`Delete ${selected.size} report(s)?`, async () => {
-      await Promise.all([...selected].map(id => deleteDoc(doc(db,'disbursementReports',id))));
+    askConfirm(`Delete ${selected.size} report(s)? Vouchers will be reverted.`, async () => {
+      await Promise.allSettled([...selected].map(id => apiDeleteReport(id)));
+      await loadReports(); await loadVouchers();
       setSelected(new Set()); showToast('Deleted.');
     });
   };
@@ -759,15 +827,15 @@ export default function DisbursementsPage() {
     setShowModal(true);
   };
 
-  // ── Save report ───────────────────────────────────────────────────────────────
+  // ── Save report (server assigns DR number and parks/reverts vouchers) ─────────
   const saveReport = async (status) => {
     if (drLines.length === 0) { showToast('Add at least one voucher line.'); return; }
     setSaving(true);
     try {
       const reportLines = drLines.map((l,i) => ({
         lineNo:        i+1,
-        voucherId:     l.voucherId,
-        voucherDocId:  l.voucherDocId || '',
+        voucherId:     l.voucherId,             // human number (display)
+        voucherDocId:  l.voucherDocId || '',    // Postgres id (server park/revert key)
         srcLineNo:     l.lineNo ?? null,
         voucherType:   l.voucherType || '',
         contact:       l.contact || '',
@@ -779,150 +847,50 @@ export default function DisbursementsPage() {
         isPayrollLine: l.isPayrollLine||false,
         status:        'In Disbursement',
       }));
-
       const payload = {
-        date:               form.date,
-        bankCode:           'MULTIPLE',
-        totalAmount:        lineTotal,
-        expectedCollection: Number(form.expectedCollection)||0,
-        notes:              form.notes||'',
-        bankBalances:       buildInitialBankBals(form.date),
-        status:             status || 'Pending',
-        lines:              reportLines,
-        updatedAt:          serverTimestamp(),
-        updatedBy:          user,
+        reportDate:              form.date,
+        bankCode:                'MULTIPLE',
+        totalCents:              Math.round(lineTotal * 100),
+        expectedCollectionCents: Math.round((Number(form.expectedCollection)||0) * 100),
+        notes:                   form.notes||'',
+        bankBalances:            buildInitialBankBals(form.date),
+        lines:                   reportLines,
       };
-
       if (editing) {
-        await updateDoc(doc(db,'disbursementReports',editing.id), payload);
-
-        // Diff vouchers: newly added vs removed
-        const prevIds = new Set((editing.lines||[]).map(l=>l.voucherId));
-        const newIds  = new Set(drLines.map(l=>l.voucherId));
-
-        // Newly added vouchers → mark For Disbursement + save preDisbursementStatus
-        const addedVids = [...newIds].filter(vid => !prevIds.has(vid));
-        await Promise.all(addedVids.map(vid => {
-          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
-          if (!v || v.status === 'For Disbursement') return null;
-          return updateDoc(doc(db,'vouchers',v.id), {
-            status: 'For Disbursement', preDisbursementStatus: v.status,
-            disbursementRef: editing.reportId||editing.id,
-            updatedAt: serverTimestamp(), updatedBy: user,
-          });
-        }).filter(Boolean));
-
-        // Removed vouchers → revert to preDisbursementStatus
-        const removedVids = [...prevIds].filter(vid => !newIds.has(vid));
-        await Promise.all(removedVids.map(vid => {
-          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
-          if (!v) return null;
-          return updateDoc(doc(db,'vouchers',v.id), {
-            status: v.preDisbursementStatus || 'Approved',
-            preDisbursementStatus: '', disbursementRef: '',
-            updatedAt: serverTimestamp(), updatedBy: user,
-          });
-        }).filter(Boolean));
-
+        await updateDisbursementReport(editing.id, payload);
         showToast('Report updated.');
       } else {
-        const reportId = await nextDisbursementReportId(form.date);
-        await addDoc(collection(db,'disbursementReports'), {
-          ...payload, reportId, createdAt:serverTimestamp(), createdBy:user
-        });
-        // Mark each unique voucher as For Disbursement (save preDisbursementStatus)
-        const uniqueVids = [...new Set(drLines.map(l=>l.voucherId))];
-        await Promise.all(uniqueVids.map(vid => {
-          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
-          if (!v) return null;
-          return updateDoc(doc(db,'vouchers',v.id), {
-            status: 'For Disbursement', preDisbursementStatus: v.status,
-            disbursementRef: reportId,
-            updatedAt: serverTimestamp(), updatedBy: user,
-          });
-        }).filter(Boolean));
-        showToast('Report created.');
+        const created = await createDisbursementReport(payload);
+        if (status && status !== 'Pending') await setDisbursementStatus(created.id, status).catch(()=>{});
+        showToast(`Report ${created.reportNo} created.`);
       }
       closeModal();
-    } catch(e) { showToast('Error: ' + e.message); }
+      await loadReports(); await loadVouchers();
+    } catch(e) { showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message)); }
     setSaving(false);
   };
 
   // ── Status update ─────────────────────────────────────────────────────────────
   const doStatusUpdate = async () => {
     if (!statusModal) return;
-    const { report, newStatus, reason, action } = statusModal;
+    const { report, newStatus, reason } = statusModal;
     setSaving(true);
     try {
-      const updateFields = {
-        status: newStatus,
-        ...(reason ? { rejectReason: reason } : {}),
-        ...(action === 'submit'  ? { rejectReason: '' }                  : {}),
-        ...(action === 'verify'  ? { reviewedBy: user, rejectReason: '' } : {}),
-        ...(action === 'approve' ? { approvedBy: user }                   : {}),
-        updatedAt: serverTimestamp(), updatedBy: user,
-      };
-      await updateDoc(doc(db,'disbursementReports',report.id), updateFields);
-
-      if (newStatus === 'Approved') {
-        // Mark all vouchers as Paid + auto-post loan payments
-        const lines = report.lines || [];
-        const uniqueVids = [...new Set(lines.map(l=>l.voucherId))];
-        await Promise.all(uniqueVids.map(async vid => {
-          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
-          if (!v) return;
-          await updateDoc(doc(db,'vouchers',v.id), {
-            status:'Paid', preDisbursementStatus:'', disbursementRef:'',
-            updatedAt:serverTimestamp(), updatedBy:user
-          });
-          if (v.loanId && !v.loanPaymentId) {
-            const vLines = Array.isArray(v.lines) ? v.lines : [];
-            const interestAmt  = vLines.filter(x=>(x.category||'').toLowerCase()==='finance cost').reduce((s,x)=>s+(Number(x.amount)||0),0);
-            const principalAmt = vLines.filter(x=>(x.category||'').toLowerCase()==='loans payable').reduce((s,x)=>s+(Number(x.amount)||0),0);
-            const total        = Number(v.totalAmount) || (interestAmt+principalAmt);
-            const penaltyAmt   = Math.max(0, total - interestAmt - principalAmt);
-            const line         = lines.find(l=>l.voucherId===vid)||{};
-            try {
-              const payRef = await addDoc(collection(db,'loanPayments'), {
-                loanId:v.loanId, loanName:v.contactSummary||'', date:report.date||v.preparationDate||today(),
-                interest:interestAmt, principal:principalAmt, penalty:penaltyAmt, total,
-                method:'Voucher', referenceNo:line.checkNo||line.refNo||'',
-                bank:line.bankCode||v.paymentFromAccountCode||'',
-                voucherId:v.voucherId||v.id, disbursementReportId:report.reportId||report.id,
-                allocations:[], notes:`Auto-posted from DR ${report.reportId||report.id}`,
-                source:'disbursement-auto', createdAt:serverTimestamp(), createdBy:user,
-              });
-              await updateDoc(doc(db,'vouchers',v.id), { loanPaymentId: payRef.id });
-            } catch(err) { console.error('Auto-post failed for', v.id, err); }
-          }
-        }));
-      }
-
-      if (newStatus === 'Rejected') {
-        // Revert all vouchers to preDisbursementStatus
-        const lines = report.lines || [];
-        const uniqueVids = [...new Set(lines.map(l=>l.voucherId))];
-        await Promise.all(uniqueVids.map(vid => {
-          const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
-          if (!v) return null;
-          return updateDoc(doc(db,'vouchers',v.id), {
-            status: v.preDisbursementStatus || 'Approved',
-            preDisbursementStatus: '', disbursementRef: '',
-            updatedAt: serverTimestamp(), updatedBy: user,
-          });
-        }).filter(Boolean));
-      }
-
+      // The server stamps reviewer/approver, pays vouchers on Approved, and
+      // reverts them on Rejected. (Loan-payment auto-posting returns with the
+      // loans domain in Phase 6.)
+      await setDisbursementStatus(report.id, newStatus, reason || undefined);
       showToast(`Status updated to ${newStatus}.`);
       setStatusModal(null);
-    } catch(e) { showToast('Error: ' + e.message); }
+      await loadReports(); await loadVouchers();
+    } catch(e) { showToast(e instanceof ApiError ? e.detail : ('Error: ' + e.message)); }
     setSaving(false);
   };
 
   // ── Routing-aware submit from row (kebab menu) ───────────────────────────────
   const submitFromRow = async (r) => {
-    const routingSnap = await getDoc(doc(db,'settings','approvalRouting'));
-    const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+    const settings = await getSettings().catch(() => ({}));
+    const routes = settings?.approvalRouting?.routes || [];
     const route = routes.find(rt => rt.documentType === 'Disbursements' && rt.makerEmail === r.createdBy) || null;
     const verifierEmail = route?.verifierEmail || '';
     const hasVerifier = !!verifierEmail && !route?.autoBypass && verifierEmail !== r.createdBy;
@@ -932,19 +900,13 @@ export default function DisbursementsPage() {
   // ── Delete report (reverts voucher statuses) ──────────────────────────────────
   const deleteReport = (r) => {
     askConfirm(`Delete report ${r.reportId||r.id}? Vouchers will be reverted.`, async () => {
-      const lines = r.lines || [];
-      const uniqueVids = [...new Set(lines.map(l=>l.voucherId))];
-      await Promise.all(uniqueVids.map(vid => {
-        const v = vouchers.find(v2 => (v2.voucherId||v2.id) === vid);
-        if (!v) return null;
-        return updateDoc(doc(db,'vouchers',v.id), {
-          status: v.preDisbursementStatus || 'Approved',
-          preDisbursementStatus: '', disbursementRef: '',
-          updatedAt:serverTimestamp(), updatedBy:user,
-        });
-      }).filter(Boolean));
-      await deleteDoc(doc(db,'disbursementReports',r.id));
-      showToast('Report deleted. Vouchers reverted.');
+      try {
+        await apiDeleteReport(r.id); // server reverts every queued voucher
+        showToast('Report deleted. Vouchers reverted.');
+        await loadReports(); await loadVouchers();
+      } catch (e) {
+        showToast(e instanceof ApiError ? e.detail : e.message);
+      }
     });
   };
 
@@ -959,24 +921,16 @@ export default function DisbursementsPage() {
         .filter((_,i) => i !== lineIndex)
         .map((l,i) => ({ ...l, lineNo: i+1 }));
       const newTotal = newLines.reduce((s,l) => s+(Number(l.amount)||0), 0);
-      await updateDoc(doc(db,'disbursementReports',report.id), {
-        lines: newLines, totalAmount: newTotal,
-        updatedAt:serverTimestamp(), updatedBy:user,
-      });
-      // Check if this voucher still has lines in the report
-      const stillHasLines = newLines.some(l => l.voucherId === line.voucherId);
-      if (!stillHasLines) {
-        const v = vouchers.find(v2 => (v2.voucherId||v2.id) === line.voucherId);
-        if (v) {
-          await updateDoc(doc(db,'vouchers',v.id), {
-            status: v.preDisbursementStatus || 'Approved',
-            preDisbursementStatus: '', disbursementRef: '',
-            updatedAt:serverTimestamp(), updatedBy:user,
-          });
-        }
+      try {
+        // The server diffs the voucher set and reverts any voucher that no
+        // longer appears in the report's lines.
+        await updateDisbursementReport(report.id, { lines: newLines, totalCents: Math.round(newTotal * 100) });
+        setViewModal(prev => prev ? { ...prev, lines:newLines, totalAmount:newTotal } : null);
+        showToast('Line removed and voucher reverted.');
+        await loadReports(); await loadVouchers();
+      } catch (e) {
+        showToast(e instanceof ApiError ? e.detail : e.message);
       }
-      setViewModal(prev => prev ? { ...prev, lines:newLines, totalAmount:newTotal } : null);
-      showToast('Line removed and voucher reverted.');
     });
   };
 
@@ -999,17 +953,21 @@ export default function DisbursementsPage() {
       const need = (h) => { if (y + h > PH - 14) { pdf.addPage(); y = MT; } };
 
       // ── HEADER ───────────────────────────────────────────────────────────────
-      // Resolve signatories via approval routing (same as VoucherPdfModal)
+      // Resolve signatories via approval routing (settings API); names come from
+      // the users list when the caller is an admin, else emails are shown.
+      let usersByEmail = new Map();
+      try {
+        const users = await listUsers();
+        usersByEmail = new Map(users.map(u => [(u.email||'').toLowerCase(), u]));
+      } catch { /* non-admin */ }
       const lookupName = async (email) => {
         if (!email) return '';
-        const snap = await getDocs(query(collection(db, 'appUsers'), where('email', '==', email)));
-        const data = snap?.docs?.[0]?.data();
-        return data?.fullName || data?.displayName || email;
+        return usersByEmail.get(email.toLowerCase())?.fullName || email;
       };
 
       const makerEmail = r.createdBy || '';
-      const routingSnap = await getDoc(doc(db, 'settings', 'approvalRouting'));
-      const routes = routingSnap.exists() ? (routingSnap.data().routes || []) : [];
+      const settings = await getSettings().catch(() => ({}));
+      const routes = settings?.approvalRouting?.routes || [];
       const route  = routes.find(rt => rt.documentType === 'Disbursements' && rt.makerEmail === makerEmail);
       const verifierEmail = route?.verifierEmail || '';
       const approverEmail = route?.approverEmail || '';

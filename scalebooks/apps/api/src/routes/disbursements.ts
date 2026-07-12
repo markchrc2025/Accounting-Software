@@ -7,19 +7,26 @@ import {
   zDisbursementStatusUpdate,
   type DisbursementReportUpdate,
 } from "@scalebooks/domain";
-import { withOrgContext, disbursementReports, vouchers, type Tx } from "@scalebooks/db";
+import { withOrgContext, disbursementReports, vouchers, appUsers, type Tx } from "@scalebooks/db";
 import { requireAuth } from "../auth";
 
 export const disbursementRoutes = new Hono();
 disbursementRoutes.use("*", requireAuth);
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const lineVoucherIds = (lines: unknown): string[] => {
   if (!Array.isArray(lines)) return [];
   return [
     ...new Set(
       lines
-        .map((l) => (l && typeof l === "object" ? (l as { voucherId?: string }).voucherId : undefined))
-        .filter((v): v is string => typeof v === "string" && v.length === 36),
+        .map((l) => {
+          if (!l || typeof l !== "object") return undefined;
+          const o = l as { voucherDocId?: string; voucherId?: string };
+          if (typeof o.voucherDocId === "string" && UUID_RE.test(o.voucherDocId)) return o.voucherDocId;
+          if (typeof o.voucherId === "string" && UUID_RE.test(o.voucherId)) return o.voucherId;
+          return undefined;
+        })
+        .filter((v): v is string => typeof v === "string"),
     ),
   ];
 };
@@ -96,13 +103,17 @@ disbursementRoutes.get("/", async (c) => {
     { userId: auth.userId, orgId: auth.orgId, role: auth.role },
     (tx) =>
       tx
-        .select()
+        .select({
+          report: disbursementReports,
+          createdByEmail: appUsers.email,
+        })
         .from(disbursementReports)
+        .leftJoin(appUsers, eq(appUsers.id, disbursementReports.createdBy))
         .where(eq(disbursementReports.orgId, auth.orgId))
         .orderBy(desc(disbursementReports.reportDate), desc(disbursementReports.createdAt))
         .limit(500),
   );
-  return c.json({ reports: rows });
+  return c.json({ reports: rows.map((r) => ({ ...r.report, createdByEmail: r.createdByEmail })) });
 });
 
 disbursementRoutes.get("/:id", async (c) => {
