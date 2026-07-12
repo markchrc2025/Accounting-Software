@@ -1,5 +1,5 @@
 // useTimeOfDayGreeting — returns { greeting, firstName } based on Asia/Manila time.
-// firstName comes from the Authenticize session (user.fullName, falling back to
+// firstName comes from the signed-in session (user.fullName, falling back to
 // the email prefix) so it shows the real person's name.
 import { useAuth } from '../auth/AuthProvider.jsx';
 

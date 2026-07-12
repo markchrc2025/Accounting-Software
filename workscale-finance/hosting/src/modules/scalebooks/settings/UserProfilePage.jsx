@@ -109,11 +109,11 @@ export default function UserProfilePage() {
           </div>
         </Card>
 
-        {/* ── Password — managed by workspace Admins ───────────────────── */}
+        {/* ── Password — set by a workspace admin ─────────────────────── */}
         <Card title="Password">
           <p className="text-sm text-[#6B7280] leading-relaxed">
-            Passwords are managed by your workspace Admin. If you need a new one, ask an Admin
-            to reset it in Settings → Users &amp; Roles.
+            Your sign-in password is managed by your workspace admin. If you need it reset, ask an
+            admin to set a new one for you from Settings → Users &amp; Roles.
           </p>
         </Card>
 

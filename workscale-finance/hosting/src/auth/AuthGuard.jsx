@@ -4,7 +4,7 @@ import { useAuth } from './AuthProvider.jsx';
 import WorkspacePicker from './WorkspacePicker.jsx';
 
 /**
- * Gate the app on an Authenticize session that resolves to a workspace. The
+ * Gate the app on a signed-in session that resolves to a workspace. The
  * allowlist check now happens server-side (GET /auth/me against app_users) — the
  * provider surfaces "not on the list" as an auth error on the login screen.
  */
