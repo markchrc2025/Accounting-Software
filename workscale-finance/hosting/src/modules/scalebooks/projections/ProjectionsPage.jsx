@@ -1,10 +1,5 @@
 import { useState, useEffect } from 'react';
-import {
-  collection, query, orderBy, onSnapshot,
-  addDoc, updateDoc, doc, serverTimestamp, deleteDoc
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
-import { nextWeeklyProjectionId } from '../../../utils/documentIds.js';
+import { weeklyProjectionsApi, ApiError } from '../../../lib/api.js';
 
 const PROJ_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Rejected'];
 const VOUCHER_TYPES = ['Check','Cash','Journal Voucher','Payroll','Final Pay','Government Remittance'];
@@ -77,6 +72,38 @@ const CSS = `
   @media(max-width:640px){.kpi-row{grid-template-columns:repeat(3,1fr);}}
 `;
 
+// API rows carry integer centavos; the UI thinks in pesos. projFromApi keeps the
+// original field names (projNo→projId, …) the render code expects. lines and
+// inflowLines are UI-owned jsonb (peso floats) and pass through untouched.
+const toPesos = (c) => Number(c || 0) / 100;
+const toCents = (p) => Math.round(Number(p || 0) * 100);
+const projFromApi = (r) => ({
+  id: r.id,
+  projId: r.projNo || '',
+  weekCoverage: r.weekCoverage || '',
+  startDate: r.startDate || '',
+  endDate: r.endDate || '',
+  status: r.status || 'Draft',
+  totalAmount: toPesos(r.totalOutCents),
+  totalInflow: toPesos(r.totalInCents),
+  notes: r.notes || '',
+  lines: r.lines || [],
+  inflowLines: r.inflowLines || [],
+  createdBy: r.createdBy || '',
+});
+// The server assigns projNo (WP{YYYYMM}-####) on create and stamps createdBy itself.
+const projToApi = (m) => ({
+  weekCoverage: m.weekCoverage || '',
+  startDate: m.startDate || null,
+  endDate: m.endDate || null,
+  status: m.status || 'Draft',
+  totalOutCents: toCents(m.totalAmount),
+  totalInCents: toCents(m.totalInflow),
+  notes: m.notes || '',
+  lines: (m.lines || []).map(l => ({ type:l.type||'', purpose:l.purpose||'', contact:l.contact||'', description:l.description||'', dueDate:l.dueDate||'', bankCode:l.bankCode||'', amount:parseFloat(l.amount)||0, status:l.status||'Pending', linkedId:l.linkedId||'' })),
+  inflowLines: (m.inflowLines || []).map(l => ({ source:l.source||'', description:l.description||'', expectedDate:l.expectedDate||'', bankCode:l.bankCode||'', amount:parseFloat(l.amount)||0 })),
+});
+
 export default function ProjectionsPage() {
   const [projections, setProjections] = useState([]);
   const [filterStatus, setFilterStatus] = useState('');
@@ -91,10 +118,15 @@ export default function ProjectionsPage() {
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
-  useEffect(() => {
-    const q = query(collection(db,'weeklyProjections'), orderBy('createdAt','desc'));
-    return onSnapshot(q, snap => setProjections(snap.docs.map(d=>({id:d.id,...d.data()}))));
-  }, []);
+  const loadAll = async () => {
+    try {
+      const rows = await weeklyProjectionsApi.list();
+      setProjections(rows.map(projFromApi));
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
+  };
+  useEffect(() => { loadAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── KPIs ──────────────────────────────────────────────────── */
   const countsByStatus = {};
@@ -125,50 +157,47 @@ export default function ProjectionsPage() {
     try {
       const totalOut = (form.lines||[]).reduce((s,l)=>s+(parseFloat(l.amount)||0),0);
       const totalIn = (form.inflowLines||[]).reduce((s,l)=>s+(parseFloat(l.amount)||0),0);
-      const isNew = !form.id;
-      const projId = isNew
-        ? await nextWeeklyProjectionId(form.startDate || form.endDate || new Date().toISOString().slice(0,10))
-        : (form.projId || '');
-      const payload = {
-        projId, weekCoverage: form.weekCoverage||'',
-        startDate: form.startDate||'', endDate: form.endDate||'',
-        status: form.status||'Draft',
-        totalAmount: totalOut, totalInflow: totalIn,
-        lines: (form.lines||[]).map(l=>({type:l.type||'',purpose:l.purpose||'',contact:l.contact||'',description:l.description||'',dueDate:l.dueDate||'',bankCode:l.bankCode||'',amount:parseFloat(l.amount)||0,status:l.status||'Pending',linkedId:l.linkedId||''})),
-        inflowLines: (form.inflowLines||[]).map(l=>({source:l.source||'',description:l.description||'',expectedDate:l.expectedDate||'',bankCode:l.bankCode||'',amount:parseFloat(l.amount)||0})),
-        notes: form.notes||'',
-        updatedAt: serverTimestamp(), updatedBy: auth.currentUser?.email||'',
-      };
+      const payload = projToApi({ ...form, totalAmount: totalOut, totalInflow: totalIn });
       if (form.id) {
-        await updateDoc(doc(db,'weeklyProjections',form.id), payload);
+        await weeklyProjectionsApi.update(form.id, payload);
         showToast('Projection updated.');
       } else {
-        await addDoc(collection(db,'weeklyProjections'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
+        await weeklyProjectionsApi.create(payload); // server assigns the WP number
         showToast('Projection created.');
       }
       setModal(null);
-    } catch(e) { console.error(e); alert('Save failed.'); }
+      await loadAll();
+    } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     setSaving(false);
   }
 
   function deleteProjection(id) {
     askConfirm('Delete this projection?', async () => {
-      await deleteDoc(doc(db,'weeklyProjections',id));
-      showToast('Deleted.');
+      try {
+        await weeklyProjectionsApi.remove(id);
+        showToast('Deleted.');
+        await loadAll();
+      } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     });
   }
 
   async function submitForApproval(id) {
-    await updateDoc(doc(db,'weeklyProjections',id), {status:'Pending Review', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||''});
-    showToast('Submitted for review.');
+    try {
+      await weeklyProjectionsApi.update(id, { status:'Pending Review' });
+      showToast('Submitted for review.');
+      await loadAll();
+    } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
   }
 
   function bulkDelete() {
     if (!selected.size) return;
     const count = selected.size;
     askConfirm(`Delete ${count} projection(s)? This cannot be undone.`, async () => {
-      await Promise.all([...selected].map(id=>deleteDoc(doc(db,'weeklyProjections',id))));
-      setSelected(new Set()); showToast(`${count} projection(s) deleted.`);
+      try {
+        await Promise.all([...selected].map(id=>weeklyProjectionsApi.remove(id)));
+        setSelected(new Set()); showToast(`${count} projection(s) deleted.`);
+        await loadAll();
+      } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     });
   }
 
@@ -176,8 +205,11 @@ export default function ProjectionsPage() {
     if (!selected.size) return;
     const count = selected.size;
     askConfirm(`Submit ${count} projection(s) for review?`, async () => {
-      await Promise.all([...selected].map(id=>updateDoc(doc(db,'weeklyProjections',id),{status:'Pending Review',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''})));
-      setSelected(new Set()); showToast('Submitted for review.');
+      try {
+        await Promise.all([...selected].map(id=>weeklyProjectionsApi.update(id,{status:'Pending Review'})));
+        setSelected(new Set()); showToast('Submitted for review.');
+        await loadAll();
+      } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     });
   }
 

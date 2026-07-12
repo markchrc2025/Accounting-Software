@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, getDocs, onSnapshot, query, orderBy, where, deleteDoc } from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
-import { nextVoucherId } from '../../../utils/documentIds.js';
 import { recomputeLoanState, daysBetween, buildScheduleWithDueDates } from './loanMonitoring.js';
 import RecordPaymentModal from './RecordPaymentModal.jsx';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
+import {
+  loansApi, loanPaymentsApi, listAccounts, listVouchers, listCheckbooks, listChecks,
+  createVoucherDraft, transitionVoucher, ApiError,
+} from '../../../lib/api.js';
 
 /* ─── Constants ─────────────────────────────────────────────────── */
 const LOAN_TYPES = [
@@ -20,6 +21,93 @@ const MONTH_NAMES   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oc
 
 const fmtPHP = (n) => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtCur = (n) => '₱' + fmtPHP(n);
+
+/* ─── API <-> UI mapping ─────────────────────────────────────────── */
+// API rows carry integer centavos + a pm_config blob; the amortization engine
+// and every tab keep the original pesos/flattened shape, so the mapping
+// restores it. Loan ids are now uuids (were client-side integers).
+const toPesos = (c) => Number(c || 0) / 100;
+const toCents = (p) => Math.round(Number(p || 0) * 100);
+const loanFromApi = (r) => ({
+  id: r.id,
+  name: r.name || '',
+  loanType: r.loanType || 'Term Loan',
+  disbursementDate: r.disbursementDate || '',
+  proceedsDate: r.proceedsDate || '',
+  termMonths: r.termMonths ?? 60,
+  annualRate: Number(r.annualRate) || 0,
+  principal: toPesos(r.principalCents),
+  interestMethod: r.interestMethod || 'Reducing Balance',
+  processingFee: toPesos(r.processingFeeCents),
+  status: r.status || 'Active',
+  paymentFrequency: r.paymentFrequency || 'Monthly',
+  payDayMode: r.payDayMode || 'Fixed',
+  payDays: '',
+  payDay1: r.payDay1 ?? '',
+  payDay2: r.payDay2 ?? '',
+  payDaysPerMonth: (r.payDaysPerMonth && typeof r.payDaysPerMonth === 'object') ? r.payDaysPerMonth : {},
+  intervalDays: r.intervalDays ?? 15,
+  paymentMethod: r.paymentMethod || 'Check',
+  pmChecks: [], pmAdaDay: '', pmAdaBank: '', pmBtBank: '', cycleCount: 1,
+  ...(r.pmConfig && typeof r.pmConfig === 'object' ? r.pmConfig : {}),
+});
+const loanToApi = (l) => ({
+  name: (l.name || '').trim(),
+  loanType: l.loanType || 'Term Loan',
+  disbursementDate: l.disbursementDate || null,
+  proceedsDate: l.proceedsDate || null,
+  termMonths: parseInt(l.termMonths) || 60,
+  annualRate: Number(l.annualRate) || 0,
+  principalCents: toCents(l.principal),
+  interestMethod: l.interestMethod || 'Reducing Balance',
+  processingFeeCents: toCents(l.processingFee),
+  status: l.status || 'Active',
+  paymentFrequency: l.paymentFrequency || 'Monthly',
+  payDayMode: l.payDayMode || 'Fixed',
+  payDay1: parseInt(l.payDay1) || null,
+  payDay2: parseInt(l.payDay2) || null,
+  payDaysPerMonth: l.payDaysPerMonth || {},
+  intervalDays: parseInt(l.intervalDays) || 15,
+  paymentMethod: l.paymentMethod || null,
+});
+const paymentFromApi = (p) => ({
+  id: p.id,
+  loanId: p.loanId || '',
+  loanName: p.loanName || '',
+  date: p.payDate || '',
+  interest: toPesos(p.interestCents),
+  principal: toPesos(p.principalCents),
+  penalty: toPesos(p.penaltyCents),
+  total: toPesos(p.totalCents),
+  method: p.method || '',
+  referenceNo: p.referenceNo || '',
+  bank: p.bank || '',
+  voucherId: p.voucherNo || '',
+  voucherDocId: p.voucherDocId || '',
+  checkVoucherId: p.checkVoucherNo || '',
+  notes: p.notes || '',
+  allocations: Array.isArray(p.allocations) ? p.allocations : [],
+});
+// Voucher rows for the Payment History status badges + Record Payment modal;
+// loan linkage rides in the voucher's meta jsonb.
+const FIN_VSTATUS = {
+  draft:'Draft', pending:'Pending', for_verification:'Pending Review', verified:'Pending Review',
+  for_approval:'Pending Approval', approved:'Approved', for_disbursement:'For Disbursement',
+  paid:'Paid', rejected:'Rejected', posted:'Approved', void:'Voided',
+};
+const finVoucherFromApi = (v) => {
+  const m = v.meta || {};
+  return {
+    id: v.id, docId: v.id,
+    voucherId: v.voucherNo,
+    voucherType: (v.voucherType || '').toUpperCase(),
+    preparationDate: v.voucherDate,
+    totalAmount: toPesos(v.totalCents),
+    status: FIN_VSTATUS[v.status] || v.status,
+    loanId: m.loanId || '',
+    checkVoucherId: m.checkVoucherId || '',
+  };
+};
 
 /* ─── Amortization Engine (matches GAS fincMonthData) ────────────── */
 function calcMonthData(loan, elapsed) {
@@ -264,7 +352,6 @@ export default function FinancialPage() {
   const [payDaysModal, setPayDaysModal] = useState(null); // loan.id
   const [calMonth, setCalMonth]     = useState(new Date().getMonth());
   const [calYear, setCalYear]       = useState(new Date().getFullYear());
-  const [nextId, setNextId]         = useState(1);
   const [saveStatus, setSaveStatus] = useState('');
   const [toast, setToast]           = useState('');
   const [confirmModal, setConfirmModal] = useState(null);
@@ -276,7 +363,6 @@ export default function FinancialPage() {
   const [vForm,        setVForm]          = useState({});
   const [vLines,       setVLines]         = useState([]);
   const [vSaving,      setVSaving]        = useState(false);
-  const saveTimerRef = useRef(null);
 
   // Phase 2/3: actual payments + monitoring
   const [payments,      setPayments]      = useState([]);
@@ -302,43 +388,46 @@ export default function FinancialPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
-  /* ── Firestore ─────────────────────────────────────────────────── */
-  useEffect(() => {
-    getDoc(doc(db, 'finc', 'profile')).then(snap => {
-      const data = snap.data() || {};
-      const ls = Array.isArray(data.loans) ? data.loans : [];
-      setLoans(ls);
-      setNextId(ls.reduce((m, l) => Math.max(m, l.id || 0), 0) + 1);
-    });
-    getDocs(collection(db, 'accounts')).then(s =>
-      setCalAccounts(s.docs.map(d => ({ id: d.id, ...d.data() })))
-    );
-    // Live subscription to loan payments
-    const unsub = onSnapshot(
-      query(collection(db, 'loanPayments'), orderBy('date', 'desc')),
-      snap => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
-      err  => console.error('loanPayments subscription error:', err)
-    );
-    // Live subscription to vouchers (for status badge in Payment History)
-    const unsubV = onSnapshot(
-      query(collection(db, 'vouchers'), orderBy('createdAt', 'desc')),
-      snap => setVoucherDocs(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
-      err  => console.error('vouchers subscription error:', err)
-    );
-    // Live subscription to checkbooks (for PM modal)
-    const unsubCb = onSnapshot(
-      query(collection(db, 'checkbookMaster'), orderBy('bankCode')),
-      snap => setCheckbooks(snap.docs.map(d => ({ id: d.id, ...d.data() })))
-    );
-    return () => { unsub(); unsubV(); unsubCb(); };
+  /* ── Data loading (REST API) ───────────────────────────────────── */
+  const loadLoans = useCallback(async () => {
+    try {
+      const rows = (await loansApi.list()).map(loanFromApi);
+      // cycleCount = Nth loan sharing the same lender name (display only)
+      const byName = {};
+      rows.forEach(l => {
+        const k = (l.name || '').trim().toLowerCase();
+        byName[k] = (byName[k] || 0) + 1;
+        l.cycleCount = byName[k];
+      });
+      setLoans(rows);
+    } catch (e) {
+      console.error('loans load failed:', e);
+    }
   }, []);
+  const loadPayments = useCallback(
+    () => loanPaymentsApi.list().then(rs => setPayments(rs.map(paymentFromApi))).catch(e => console.error('loanPayments load failed:', e)),
+    [],
+  );
+  const loadVoucherDocs = useCallback(
+    () => listVouchers().then(rs => setVoucherDocs(rs.map(finVoucherFromApi))).catch(e => console.error('vouchers load failed:', e)),
+    [],
+  );
+  useEffect(() => {
+    loadLoans();
+    listAccounts()
+      .then(rows => setCalAccounts(rows.map(a => ({ ...a, subType: a.subtype || a.subType || '' }))))
+      .catch(() => {});
+    loadPayments();
+    loadVoucherDocs();
+    listCheckbooks().then(setCheckbooks).catch(() => {});
+  }, [loadLoans, loadPayments, loadVoucherDocs]);
 
   // Load already-issued check numbers when selected checkbook changes
   const [issuedNums, setIssuedNums] = useState(new Set());
   useEffect(() => {
     if (!pmForm.checkbookId) { setIssuedNums(new Set()); return; }
-    getDocs(query(collection(db,'checkRegister'), where('checkbookId','==',pmForm.checkbookId)))
-      .then(snap => setIssuedNums(new Set(snap.docs.map(d => d.data().checkNumber).filter(Boolean))))
+    listChecks()
+      .then(rows => setIssuedNums(new Set(rows.filter(ch => ch.checkbookId === pmForm.checkbookId).map(ch => ch.checkNumber).filter(Boolean))))
       .catch(() => setIssuedNums(new Set()));
   }, [pmForm.checkbookId]);
 
@@ -375,14 +464,11 @@ export default function FinancialPage() {
     return map;
   }, [loans, paymentsByLoan]);
 
-  const saveToFirestore = useCallback(async (ls) => {
+  // Persist one loan's fields (was a debounced whole-document overwrite).
+  const saveLoanFields = useCallback(async (id, fields) => {
     setSaveStatus('saving');
     try {
-      await setDoc(doc(db, 'finc', 'profile'), {
-        loans: ls,
-        updatedAt: serverTimestamp(),
-        updatedBy: auth.currentUser?.email || '',
-      });
+      await loansApi.update(id, fields);
       setSaveStatus('saved');
       setTimeout(() => setSaveStatus(''), 2000);
     } catch (e) {
@@ -390,11 +476,6 @@ export default function FinancialPage() {
       console.error(e);
     }
   }, []);
-
-  const debounceSave = useCallback((ls) => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => saveToFirestore(ls), 1400);
-  }, [saveToFirestore]);
 
   const updateLoan = useCallback((id, field, value) => {
     setLoans(prev => prev.map(l => l.id === id ? { ...l, [field]: value } : l));
@@ -419,29 +500,22 @@ export default function FinancialPage() {
   }, [])
 
   const deleteLoan = useCallback((id) => {
-    askConfirm('Delete this loan?', () => {
-      setLoans(prev => {
-        const next = prev.filter(l => l.id !== id);
-        debounceSave(next);
-        return next;
-      });
+    askConfirm('Delete this loan?', async () => {
+      try {
+        await loansApi.remove(id);
+        await loadLoans();
+      } catch (e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
     });
-  }, [debounceSave, setConfirmModal]);
+  }, [loadLoans, setConfirmModal]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const saveLoanFromModal = useCallback((data) => {
-    setLoans(prev => {
-      let next;
-      if (data.id == null) {
-        const id = prev.reduce((m, l) => Math.max(m, l.id || 0), 0) + 1;
-        next = [...prev, { ...data, id }];
-      } else {
-        next = prev.map(l => l.id === data.id ? { ...l, ...data } : l);
-      }
-      debounceSave(next);
-      return next;
-    });
-    setLoanFormModal(null);
-  }, [debounceSave]);
+  const saveLoanFromModal = useCallback(async (data) => {
+    try {
+      if (data.id == null) await loansApi.create(loanToApi(data));
+      else                 await loansApi.update(data.id, loanToApi(data));
+      setLoanFormModal(null);
+      await loadLoans();
+    } catch (e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
+  }, [loadLoans]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeLoans    = loans.filter(l => l.status === 'Active');
   const totalPrincipal = activeLoans.reduce((s, l) => s + (parseFloat(l.principal) || 0), 0);
@@ -492,38 +566,46 @@ export default function FinancialPage() {
   const saveCalVoucher = useCallback(async (status) => {
     setVSaving(true);
     try {
-      const user = auth.currentUser?.email || '';
-      const totalAmount = vLines.reduce((s,l) => s + (Number(l.amount)||0), 0);
-      const contactSummary = [...new Set(vLines.map(l=>l.contact).filter(Boolean))].join(', ');
-      const voucherType = vForm.voucherType || 'LOAN';
-      const voucherId = await nextVoucherId(voucherType, vForm.preparationDate);
-      await addDoc(collection(db,'vouchers'), {
-        voucherId,
-        voucherType,
-        preparationDate: vForm.preparationDate,
-        purposeCategory: vForm.purposeCategory,
-        paymentFromAccountCode: vForm.paymentFrom,
-        contactSummary,
-        totalAmount,
-        status,
-        notes: vForm.notes || '',
-        lines: vLines.map((l,i) => ({
-          lineNo: i+1,
-          contact: l.contact,
-          expenseAccountCode: l.expenseAccount,
-          description: l.description,
-          amount: Number(l.amount)||0,
-          category: l._type === 'interest' ? 'Finance Cost' : l._type === 'principal' ? 'Loans Payable' : '',
-          taxType: 'N/A', taxRate: 0, taxAmt: 0, inclusive: false,
-        })),
-        createdAt: serverTimestamp(), createdBy: user,
-        updatedAt: serverTimestamp(), updatedBy: user,
+      const validLines = vLines.filter(l => (Number(l.amount)||0) > 0);
+      const resolve = (codeOrId) => calAccounts.find(a => a.code === codeOrId || a.id === codeOrId);
+      const apiLines = validLines.map(l => {
+        const acct = resolve(l.expenseAccount);
+        return acct && {
+          accountId: acct.id,
+          description: l.description || undefined,
+          amountCents: Math.round((Number(l.amount)||0) * 100),
+          meta: {
+            contact: l.contact || '',
+            category: l._type === 'interest' ? 'Finance Cost' : l._type === 'principal' ? 'Loans Payable' : '',
+          },
+        };
       });
-      showToast(`Voucher ${voucherId} ${status === 'Pending' ? 'saved as draft' : 'submitted for approval'}.`);
+      if (!apiLines.length || apiLines.some(l => !l)) {
+        showToast('Could not resolve an account for one of the lines — check the Finance Cost / Loans Payable accounts.');
+        setVSaving(false);
+        return;
+      }
+      const bank = resolve(vForm.paymentFrom);
+      const loanIds = [...new Set((calVoucherModal?.events || []).map(e => e.loan?.id).filter(Boolean))];
+      const created = await createVoucherDraft({
+        type: (vForm.voucherType || 'LOAN') === 'LOAN' ? 'loan' : 'payment',
+        voucherDate: vForm.preparationDate,
+        purposeCategory: vForm.purposeCategory || null,
+        paymentFromAccountId: bank?.id || null,
+        notes: vForm.notes || null,
+        meta: {
+          contactSummary: [...new Set(validLines.map(l=>l.contact).filter(Boolean))].join(', '),
+          ...(loanIds.length === 1 ? { loanId: loanIds[0] } : {}),
+        },
+        lines: apiLines,
+      });
+      if (status !== 'Pending') await transitionVoucher(created.id, 'pending').catch(()=>{});
+      showToast(`Voucher ${created.voucherNo} ${status === 'Pending' ? 'saved as draft' : 'submitted for approval'}.`);
       setCalVoucherModal(null);
-    } catch(e) { showToast('Error: ' + e.message); }
+      await loadVoucherDocs();
+    } catch(e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
     setVSaving(false);
-  }, [vForm, vLines]);
+  }, [vForm, vLines, calAccounts, calVoucherModal, loadVoucherDocs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const TABS = [
     { key: 'dashboard',  label: 'Dashboard' },
@@ -537,10 +619,10 @@ export default function FinancialPage() {
 
   const deletePayment = useCallback((paymentId) => {
     askConfirm('Delete this payment record? This cannot be undone.', async () => {
-      try { await deleteDoc(doc(db, 'loanPayments', paymentId)); showToast('Payment deleted.'); }
-      catch (e) { showToast('Error: ' + e.message); }
+      try { await loanPaymentsApi.remove(paymentId); showToast('Payment deleted.'); await loadPayments(); }
+      catch (e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
     });
-  }, []);
+  }, [loadPayments]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Tab: Loan Registry ────────────────────────────────────────── */
   const LOAN_TYPE_COLORS = {
@@ -657,7 +739,7 @@ export default function FinancialPage() {
                 {saveStatus==='saving' ? '⟳ Saving…' : saveStatus==='saved' ? '✓ Saved' : '✕ Error'}
               </span>
             )}
-            <button className="btn btn-ghost btn-sm" onClick={() => saveToFirestore(loans)}>Save</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => loadLoans()}>Refresh</button>
           </div>
         </div>
 
@@ -3050,7 +3132,7 @@ export default function FinancialPage() {
             loan={l}
             loanState={st}
             onClose={() => setPayModal(null)}
-            onSaved={() => showToast('Payment recorded.')}
+            onSaved={() => { showToast('Payment recorded.'); loadPayments(); loadVoucherDocs(); }}
           />
         );
       })()}
@@ -3217,9 +3299,7 @@ export default function FinancialPage() {
               <div className="modal-f">
                 <button className="btn btn-ghost" onClick={closeModal}>Close</button>
                 <button className="btn btn-primary" disabled={hasCheckErrors} onClick={()=>{
-                  const updatedLoans = loans.map(l => l.id !== pmLoan.id ? l : {
-                    ...l,
-                    paymentMethod:     pmForm.paymentMethod,
+                  const pm = {
                     pmCheckbookId:     pmForm.checkbookId,
                     pmCheckbookCode:   checkbooks.find(c=>c.id===pmForm.checkbookId)?.bankCode || '',
                     pmChecks:          pmForm.checks,
@@ -3228,9 +3308,9 @@ export default function FinancialPage() {
                     pmBtAccountNumber: pmForm.pmBtAccountNumber,
                     pmAdaAccountCode:  pmForm.pmAdaAccountCode,
                     pmAdaDay:          pmForm.pmAdaDay,
-                  });
-                  setLoans(updatedLoans);
-                  saveToFirestore(updatedLoans);
+                  };
+                  setLoans(prev => prev.map(l => l.id !== pmLoan.id ? l : { ...l, paymentMethod: pmForm.paymentMethod, ...pm }));
+                  saveLoanFields(pmLoan.id, { paymentMethod: pmForm.paymentMethod || null, pmConfig: pm });
                   closeModal();
                   showToast('Payment method saved.');
                 }}>{hasCheckErrors ? '⚠ Fix check errors' : 'Save'}</button>
@@ -3381,7 +3461,17 @@ export default function FinancialPage() {
               </div>
 
               <div className="modal-f">
-                <button className="btn btn-primary" onClick={()=>{ saveToFirestore(loans); closePd(); showToast('Pay days saved.'); }}>Done</button>
+                <button className="btn btn-primary" onClick={()=>{
+                  const cur = loans.find(l => l.id === payDaysLoan.id);
+                  if (cur) saveLoanFields(cur.id, {
+                    payDayMode: cur.payDayMode || 'Fixed',
+                    payDay1: parseInt(cur.payDay1) || null,
+                    payDay2: parseInt(cur.payDay2) || null,
+                    payDaysPerMonth: cur.payDaysPerMonth || {},
+                    intervalDays: parseInt(cur.intervalDays) || 15,
+                  });
+                  closePd(); showToast('Pay days saved.');
+                }}>Done</button>
               </div>
             </div>
           </div>

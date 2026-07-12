@@ -7,7 +7,7 @@ import { setSchedulePrefill } from '../../../utils/schedulePrefill.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
 import {
-  paymentSchedulesApi, schedulePaymentsApi, listAccounts, listContacts,
+  paymentSchedulesApi, schedulePaymentsApi, loansApi, listAccounts, listContacts,
   taxRatesApi, taxGroupsApi, purposeCategoriesApi, listVouchers, listCheckbooks,
   listChecks, createVoucherDraft, transitionVoucher, ApiError,
 } from '../../../lib/api.js';
@@ -290,9 +290,28 @@ export default function PaymentSchedulePage() {
   };
   useEffect(() => { loadLinkedVouchers(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Loan obligations come from the loans domain (Financial Management), which
-  // moves to the API in Phase 6 — until then the loan sections stay empty.
-  useEffect(() => { setLoans([]); }, []);
+  // Loan obligations from the loans domain (Financial Management). The
+  // schedule expansion expects the legacy pesos/flattened shape.
+  useEffect(() => {
+    loansApi.list()
+      .then(rows => setLoans(rows.map(r => ({
+        id: r.id,
+        name: r.name || '',
+        loanType: r.loanType || 'Term Loan',
+        disbursementDate: r.disbursementDate || '',
+        termMonths: r.termMonths ?? 0,
+        principal: (r.principalCents ?? 0) / 100,
+        annualRate: Number(r.annualRate) || 0,
+        interestMethod: r.interestMethod || 'Reducing Balance',
+        status: r.status || 'Active',
+        paymentFrequency: r.paymentFrequency || 'Monthly',
+        payDayMode: r.payDayMode || 'Fixed',
+        payDaysPerMonth: (r.payDaysPerMonth && typeof r.payDaysPerMonth === 'object') ? r.payDaysPerMonth : {},
+        payDay1: r.payDay1 ?? '',
+        payDay2: r.payDay2 ?? '',
+      }))))
+      .catch(e => console.error('loans load failed', e));
+  }, []);
 
   // Close the row action menu on outside click / Escape.
   useEffect(() => {

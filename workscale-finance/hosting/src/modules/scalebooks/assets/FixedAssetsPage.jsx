@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
-import { collection, doc, onSnapshot, setDoc, addDoc, getDocs, serverTimestamp, query, orderBy, writeBatch } from 'firebase/firestore';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
-import { db, auth } from '../../../firebase.js';
 import { issueCheck, getActiveCheckbook } from '../../../utils/issueCheck.js';
-import { nextVoucherId } from '../../../utils/documentIds.js';
+import {
+  fixedAssetsApi, assetTypesApi, assetInstallmentPaymentsApi, assetDeprPostingsApi,
+  listAccounts, createJournalEntry, createVoucherDraft, transitionVoucher, ApiError,
+} from '../../../lib/api.js';
 
 const DEP_METHODS  = ['Straight Line','Declining Balance','150 Declining Balance','200 Declining Balance'];
 const COMP_TYPES   = ['Non Pro Rata','Pro Rata'];
@@ -15,6 +16,121 @@ const MONTH_NAMES  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct
 
 const fmtPHP = n => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtCur = n => '₱' + fmtPHP(n);
+
+// ── API <-> UI mapping ──────────────────────────────────────────────────────
+// API rows carry integer centavos, booleans, uuids and a pm_config blob; the
+// UI keeps the portal's original shapes — "FA-001" display ids, pesos,
+// 'Yes'/'No' installment flags and flattened pm* fields — so all existing
+// render/compute/join logic stays untouched. The Postgres uuid rides along as
+// `_rowId` for update/remove calls.
+const toPesos = (c) => Number(c || 0) / 100;
+const toCents = (p) => Math.round(Number(p || 0) * 100);
+const assetFromApi = (r) => ({
+  _rowId: r.id,
+  id: r.assetNo || '',
+  name: r.name || '',
+  assetType: r.assetType || '',
+  purchaseDate: r.purchaseDate || '',
+  deprecStartDate: r.deprecStartDate || '',
+  cost: toPesos(r.costCents),
+  residualValue: toPesos(r.residualCents),
+  usefulLifeMonths: r.usefulLifeMonths || 0,
+  depreciationMethod: r.depreciationMethod || 'Straight Line',
+  computationType: r.computationType || 'Non Pro Rata',
+  fixedAssetAccount: r.fixedAssetAccount || '',
+  accumDeprecAccount: r.accumDeprecAccount || '',
+  deprecExpenseAccount: r.deprecExpenseAccount || '',
+  status: r.status || 'Active',
+  disposalDate: r.disposalDate || '',
+  notes: r.notes || '',
+  isInstallment: r.isInstallment ? 'Yes' : 'No',
+  installmentPrincipal: toPesos(r.installmentPrincipalCents),
+  installmentStartDate: r.installmentStartDate || '',
+  installmentTermMonths: r.installmentTermMonths || 0,
+  installmentAnnualRate: Number(r.installmentAnnualRate) || 0,
+  installmentMethod: r.installmentMethod || 'Reducing Balance',
+  installmentPayableAccount: r.installmentPayableAccount || '',
+  installmentAmortizationAccount: r.installmentAmortizationAccount || '',
+  paymentMethod: r.paymentMethod || 'Check',
+  pmChecks: [], pmAdaDay: '', pmAdaBank: '', pmBtBank: '', pmAutoVoucher: false,
+  ...(r.pmConfig && typeof r.pmConfig === 'object' ? r.pmConfig : {}),
+});
+const assetPmConfig = (a) => ({
+  pmChecks:      a.pmChecks || [],
+  pmAdaDay:      a.pmAdaDay || '',
+  pmAdaBank:     a.pmAdaBank || '',
+  pmBtBank:      a.pmBtBank || '',
+  pmAutoVoucher: !!a.pmAutoVoucher,
+});
+const assetToApi = (a) => ({
+  assetNo: a.id,
+  name: a.name || '',
+  assetType: a.assetType || null,
+  purchaseDate: a.purchaseDate || null,
+  deprecStartDate: a.deprecStartDate || null,
+  costCents: toCents(a.cost),
+  residualCents: toCents(a.residualValue),
+  usefulLifeMonths: parseInt(a.usefulLifeMonths) || 0,
+  depreciationMethod: a.depreciationMethod || 'Straight Line',
+  computationType: a.computationType || 'Non Pro Rata',
+  fixedAssetAccount: a.fixedAssetAccount || null,
+  accumDeprecAccount: a.accumDeprecAccount || null,
+  deprecExpenseAccount: a.deprecExpenseAccount || null,
+  status: a.status || 'Active',
+  disposalDate: a.disposalDate || null,
+  notes: a.notes || null,
+  isInstallment: a.isInstallment === 'Yes',
+  installmentPrincipalCents: toCents(a.installmentPrincipal),
+  installmentStartDate: a.installmentStartDate || null,
+  installmentTermMonths: parseInt(a.installmentTermMonths) || 0,
+  installmentAnnualRate: parseFloat(a.installmentAnnualRate) || 0,
+  installmentMethod: a.installmentMethod || null,
+  installmentPayableAccount: a.installmentPayableAccount || null,
+  installmentAmortizationAccount: a.installmentAmortizationAccount || null,
+  paymentMethod: a.paymentMethod || null,
+  pmConfig: assetPmConfig(a),
+});
+// Asset types: UI id is the human "FAT-001" number; uuid stays as _rowId.
+const typeFromApi = (r) => ({
+  _rowId: r.id,
+  id: r.typeNo || r.id,
+  name: r.name || '',
+  depreciationMethod: r.depreciationMethod || 'Straight Line',
+  usefulLifeMonths: r.usefulLifeMonths || 0,
+  fixedAssetAccount: r.fixedAssetAccount || '',
+  accumDeprecAccount: r.accumDeprecAccount || '',
+  deprecExpenseAccount: r.deprecExpenseAccount || '',
+});
+const typeToApi = (t) => ({
+  typeNo: t.id,
+  name: t.name || '',
+  depreciationMethod: t.depreciationMethod || 'Straight Line',
+  usefulLifeMonths: parseInt(t.usefulLifeMonths) || 0,
+  fixedAssetAccount: t.fixedAssetAccount || null,
+  accumDeprecAccount: t.accumDeprecAccount || null,
+  deprecExpenseAccount: t.deprecExpenseAccount || null,
+});
+// Installment payments: the API stores the asset's uuid; the UI joins
+// payments to assets via the "FA-001" number, so translate through the
+// uuid→assetNo lookup built from the loaded assets.
+const paymentFromApi = (r, assetNoById) => ({
+  id: r.id,
+  assetId: assetNoById[r.assetId] || r.assetId || '',
+  assetName: r.assetName || '',
+  period: r.period,
+  label: r.label || '',
+  date: r.payDate || '',
+  principal: toPesos(r.principalCents),
+  interest: toPesos(r.interestCents),
+  total: toPesos(r.totalCents),
+  method: r.method || '',
+  bank: r.bank || '',
+  checkId: r.checkId || '',
+  checkNumber: r.checkNumber || '',
+  checkRegisterId: r.checkRegisterId || '',
+  voucherId: r.voucherNo || '',
+  voucherDocId: r.voucherDocId || '',
+});
 
 function computeMonthlyDepr(asset, yyyyMM) {
   if (!asset||!yyyyMM||(asset.status||'Active')==='Disposed') return 0;
@@ -172,7 +288,6 @@ export default function FixedAssetsPage() {
   const [assets, setAssets]         = useState([]);
   const [types, setTypes]           = useState([]);
   const [activeTab, setActiveTab]   = useState('assets');
-  const [saveStatus, setSaveStatus] = useState('');
   const [toast, setToast]           = useState('');
   const [confirmModal, setConfirmModal] = useState(null);
   const [assetModal, setAssetModal] = useState(null);
@@ -181,13 +296,12 @@ export default function FixedAssetsPage() {
   const [instPayModal, setInstPayModal] = useState(null); // { asset, period, label, principal, interest }
   const [bankAccounts, setBankAccounts] = useState([]);
   const [coaAccounts, setCoaAccounts]   = useState([]);
-  const [installmentPayments, setInstallmentPayments] = useState([]);
+  const [paymentRows, setPaymentRows]   = useState([]);  // raw API rows; joined to assets below
   const [schedYear, setSchedYear]   = useState('all');
   const [instYear, setInstYear]     = useState('all');
   const [calMonth, setCalMonth]     = useState(new Date().getMonth());
   const [calYear, setCalYear]       = useState(new Date().getFullYear());
-  const [postedMonths, setPostedMonths] = useState({});  // { 'YYYY-MM': { postedAt, postedBy } }
-  const saveTimerRef = useRef(null);
+  const [postedMonths, setPostedMonths] = useState({});  // { 'YYYY-MM': { journalEntryId, postedAt, postedBy } }
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
@@ -197,79 +311,129 @@ export default function FixedAssetsPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); setAssetModal({}); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    const unsub = onSnapshot(doc(db,'fixedAssets','profile'), snap => {
-      const d = snap.data() || {};
-      setAssets(Array.isArray(d.assets)?d.assets:[]);
-      setTypes(Array.isArray(d.types)?d.types:[]);
-    });
-    return unsub;
-  }, []);
-
-  // Load installment payments, COA accounts, bank accounts, and posted-months log
-  useEffect(() => {
-    const u = onSnapshot(collection(db,'assetInstallmentPayments'), snap => {
-      setInstallmentPayments(snap.docs.map(d => ({ id:d.id, ...d.data() })));
-    });
-    const uCoa = onSnapshot(query(collection(db,'accounts'), orderBy('code')), snap => {
-      const all = snap.docs.map(d => ({ id:d.id, ...d.data() }));
-      setCoaAccounts(all);
-      setBankAccounts(all.filter(a => ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) || /cash|bank/i.test(a.name||'')));
-    });
-    const uPosted = onSnapshot(collection(db,'assetDeprPostings'), snap => {
-      const map = {};
-      snap.docs.forEach(d => { map[d.id] = d.data(); });
-      setPostedMonths(map);
-    });
-    return () => { u(); uCoa(); uPosted(); };
-  }, []);
-
-  const saveToFirestore = useCallback(async (a, t) => {
-    setSaveStatus('saving');
+  const loadAssets = async () => {
     try {
-      await setDoc(doc(db,'fixedAssets','profile'),{assets:a,types:t,updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
-      setSaveStatus('saved'); setTimeout(()=>setSaveStatus(''),2000);
-    } catch(e) { setSaveStatus('error'); console.error(e); }
+      setAssets((await fixedAssetsApi.list()).map(assetFromApi));
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
+  };
+  const loadTypes = async () => {
+    try {
+      setTypes((await assetTypesApi.list()).map(typeFromApi));
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
+  };
+  const loadPayments = async () => {
+    try {
+      setPaymentRows(await assetInstallmentPaymentsApi.list());
+    } catch (e) {
+      console.error('installment payments load failed', e);
+    }
+  };
+  const loadPostings = async () => {
+    try {
+      const map = {};
+      (await assetDeprPostingsApi.list()).forEach(r => {
+        map[r.period] = { ...r, postedBy: r.createdBy || '', postedAt: r.createdAt || '' };
+      });
+      setPostedMonths(map);
+    } catch (e) {
+      console.error('depreciation postings load failed', e);
+    }
+  };
+  useEffect(() => { loadAssets(); loadTypes(); loadPayments(); loadPostings(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // COA reference data (bank list + account pickers)
+  useEffect(() => {
+    (async () => {
+      try {
+        const all = (await listAccounts()).map(a => ({ ...a, subType: a.subtype || '' }));
+        setCoaAccounts(all);
+        setBankAccounts(all.filter(a => ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) || /cash|bank/i.test(a.name||'')));
+      } catch (e) {
+        console.error('accounts load failed', e);
+      }
+    })();
   }, []);
 
-  const debounceSave = useCallback((a,t) => {
-    if(saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(()=>saveToFirestore(a,t),1400);
-  }, [saveToFirestore]);
+  // Payments in UI space: assetId translated from row uuid to "FA-001".
+  const installmentPayments = useMemo(() => {
+    const assetNoById = {};
+    assets.forEach(a => { assetNoById[a._rowId] = a.id; });
+    return paymentRows.map(r => paymentFromApi(r, assetNoById));
+  }, [paymentRows, assets]);
 
-  const saveAsset = useCallback(asset => {
-    setAssets(prev => {
-      const next = prev.find(a=>a.id===asset.id) ? prev.map(a=>a.id===asset.id?asset:a) : [...prev,asset];
-      debounceSave(next, types);
-      return next;
-    });
-    setAssetModal(null); showToast('Asset saved.');
-  }, [types, debounceSave]);
+  const saveAsset = useCallback(async asset => {
+    try {
+      if (asset._rowId) await fixedAssetsApi.update(asset._rowId, assetToApi(asset));
+      else await fixedAssetsApi.create(assetToApi(asset));
+      setAssetModal(null); showToast('Asset saved.');
+      await loadAssets();
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof ApiError
+        ? (e.status === 409 ? `Asset number ${asset.id} is already taken — close and reopen the form to get a fresh number.` : e.detail)
+        : e.message;
+      alert('Save failed: ' + msg);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deleteAsset = useCallback(id => {
-    askConfirm('Delete this asset?', () => {
-      setAssets(prev=>{const next=prev.filter(a=>a.id!==id);debounceSave(next,types);return next;});
+    askConfirm('Delete this asset?', async () => {
+      const a = assets.find(x => x.id === id);
+      if (!a?._rowId) return;
+      try {
+        await fixedAssetsApi.remove(a._rowId);
+        await loadAssets();
+      } catch (e) { alert('Delete failed: ' + (e?.detail || e?.message || e)); }
     });
-  }, [types, debounceSave, setConfirmModal]);
+  }, [assets]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const saveType = useCallback(t => {
-    setTypes(prev => {
-      const next = prev.find(x=>x.id===t.id) ? prev.map(x=>x.id===t.id?t:x) : [...prev,t];
-      debounceSave(assets,next);
-      return next;
-    });
-    setTypeModal(null); showToast('Asset type saved.');
-  }, [assets, debounceSave]);
+  const saveType = useCallback(async t => {
+    try {
+      if (t._rowId) await assetTypesApi.update(t._rowId, typeToApi(t));
+      else await assetTypesApi.create(typeToApi(t));
+      setTypeModal(null); showToast('Asset type saved.');
+      await loadTypes();
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof ApiError
+        ? (e.status === 409 ? `Type number ${t.id} is already taken — close and reopen the form to get a fresh number.` : e.detail)
+        : e.message;
+      alert('Save failed: ' + msg);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deleteType = useCallback(id => {
-    askConfirm('Delete this asset type?', () => {
-      setTypes(prev=>{const next=prev.filter(t=>t.id!==id);debounceSave(assets,next);return next;});
+    askConfirm('Delete this asset type?', async () => {
+      const t = types.find(x => x.id === id);
+      if (!t?._rowId) return;
+      try {
+        await assetTypesApi.remove(t._rowId);
+        await loadTypes();
+      } catch (e) { alert('Delete failed: ' + (e?.detail || e?.message || e)); }
     });
-  }, [assets, debounceSave, setConfirmModal]);
+  }, [types]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Local-only edit (PmModal fields); persisted by savePm on Save.
   const updateAssetField = useCallback((id, field, value) => {
-    setAssets(prev=>{const next=prev.map(a=>a.id===id?{...a,[field]:value}:a);debounceSave(next,types);return next;});
-  }, [types, debounceSave]);
+    setAssets(prev=>prev.map(a=>a.id===id?{...a,[field]:value}:a));
+  }, []);
+
+  // Persist only the payment-method fields the PmModal owns.
+  const savePm = useCallback(async a => {
+    if (!a?._rowId) return;
+    try {
+      await fixedAssetsApi.update(a._rowId, {
+        paymentMethod: a.paymentMethod || null,
+        pmConfig: assetPmConfig(a),
+      });
+      setPmModal(null); showToast('Payment method saved.');
+      await loadAssets();
+    } catch (e) { console.error(e); alert('Save failed: ' + (e?.detail || e?.message || e)); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeAssets = assets.filter(a=>a.status!=='Disposed');
   const instAssets   = assets.filter(a=>a.isInstallment==='Yes'&&a.status!=='Disposed');
@@ -714,44 +878,55 @@ export default function FixedAssetsPage() {
       if(postInfo) { setPostErr('Already posted for '+postMonth+'. Reverse the entry first.'); return; }
       setPosting(true); setPostErr('');
       try {
-        const user = auth.currentUser?.email||'';
-        const total = preview.reduce((s,r)=>s+r.depr,0);
-        const description = `Depreciation — ${postMonth}`;
-        // Build journal lines: one DR (depreciation expense) and one CR (accum. depr.) per asset
+        // The API posts by account uuid — resolve each asset's account CODES
+        // against the loaded COA and abort if any are unresolvable.
+        const findAcct = code => coaAccounts.find(x => x.code === code || x.id === code);
         const lines = [];
-        let n = 1;
+        const missing = [];
         preview.forEach(({asset,depr})=>{
-          lines.push({ lineNo:n++, type:'DR', accountCode:asset.deprecExpenseAccount||'', description:`${asset.id} – ${asset.name}`, amount:depr });
-          lines.push({ lineNo:n++, type:'CR', accountCode:asset.accumDeprecAccount||'', description:`${asset.id} – ${asset.name}`, amount:depr });
+          const dr = findAcct(asset.deprecExpenseAccount||'');
+          const cr = findAcct(asset.accumDeprecAccount||'');
+          if (!dr || !cr) { missing.push(asset.id); return; }
+          const cents = Math.round(depr*100);
+          lines.push({ accountId: dr.id, description:`${asset.id} – ${asset.name}`, debitCents: cents });
+          lines.push({ accountId: cr.id, description:`${asset.id} – ${asset.name}`, creditCents: cents });
         });
-        const batch = writeBatch(db);
-        // Write journal entry
-        const jeRef = doc(collection(db,'journalEntries'));
-        batch.set(jeRef, {
-          entryType: 'Depreciation',
-          description,
-          period: postMonth,
-          totalAmount: total,
+        if (missing.length) {
+          setPostErr('Cannot resolve the Depr. Expense / Accum. Depr. accounts for: '+missing.join(', ')+'. Set valid COA accounts on these assets first.');
+          setPosting(false);
+          return;
+        }
+        // Entry is dated on the last day of the period month.
+        const [yy,mm] = postMonth.split('-').map(Number);
+        const entryDate = postMonth + '-' + String(new Date(yy,mm,0).getDate()).padStart(2,'0');
+        const je = await createJournalEntry({
+          entryDate,
+          description: `Depreciation — ${postMonth}`,
+          entryType: 'Adjusting',
           lines,
-          status: 'Posted',
-          createdAt: serverTimestamp(), createdBy: user,
-          updatedAt: serverTimestamp(), updatedBy: user,
         });
-        // Write posted-month lock
-        const lockRef = doc(db,'assetDeprPostings',postMonth);
-        batch.set(lockRef, {
-          period: postMonth,
-          journalEntryId: jeRef.id,
-          totalAmount: total,
-          assetCount: preview.length,
-          postedAt: serverTimestamp(), postedBy: user,
-        });
-        await batch.commit();
+        // Posted-month lock; the server rejects duplicates per period with 409.
+        try {
+          await assetDeprPostingsApi.create({
+            period: postMonth,
+            journalEntryId: je.id,
+            totalCents: preview.reduce((s,r)=>s+Math.round(r.depr*100),0),
+            assetCount: preview.length,
+          });
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409) {
+            setPostErr('Already posted for '+postMonth+'.');
+            await loadPostings();
+            return;
+          }
+          throw e;
+        }
         showToast('Depreciation posted for '+postMonth);
         setPreview([]);
+        await loadPostings();
       } catch(e) {
         console.error(e);
-        setPostErr(e.message||'Failed to post.');
+        setPostErr((e instanceof ApiError ? e.detail : e.message)||'Failed to post.');
       } finally {
         setPosting(false);
       }
@@ -1107,7 +1282,7 @@ export default function FixedAssetsPage() {
           </div>
           <div className="modal-f">
             <button className="btn btn-ghost" onClick={()=>setPmModal(null)}>Close</button>
-            <button className="btn btn-primary" onClick={()=>{saveToFirestore(assets,types);setPmModal(null);showToast('Payment method saved.');}}>Save</button>
+            <button className="btn btn-primary" onClick={()=>savePm(a)}>Save</button>
           </div>
         </div>
       </div>
@@ -1138,7 +1313,7 @@ export default function FixedAssetsPage() {
       {assetModal!==null&&<AssetModal />}
       {typeModal!==null&&<TypeModal />}
       {pmModal!==null&&<PmModal />}
-      {instPayModal&&<RecordInstallmentModal info={instPayModal} onClose={()=>setInstPayModal(null)} bankAccounts={bankAccounts} onSaved={()=>{setInstPayModal(null);showToast('Installment payment recorded.');}} />}
+      {instPayModal&&<RecordInstallmentModal info={instPayModal} onClose={()=>setInstPayModal(null)} bankAccounts={bankAccounts} accounts={coaAccounts} onSaved={()=>{setInstPayModal(null);showToast('Installment payment recorded.');loadPayments();}} />}
       {confirmModal && (
         <div className="backdrop" onClick={() => setConfirmModal(null)}>
           <div style={{width:'min(400px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e=>e.stopPropagation()}>
@@ -1164,9 +1339,11 @@ export default function FixedAssetsPage() {
 // ──────────────────────────────────────────────────────────────────────────
 // Modal: record an installment payment for a fixed asset.
 // Uses the shared issueCheck helper so the check register & checkbook
-// inventory stay in sync with what's reflected here.
+// inventory stay in sync with what's reflected here. The optional CV voucher
+// goes through the voucher API (server assigns the CHK number) and the
+// payment row is written via assetInstallmentPaymentsApi.
 // ──────────────────────────────────────────────────────────────────────────
-function RecordInstallmentModal({ info, onClose, bankAccounts, onSaved }) {
+function RecordInstallmentModal({ info, onClose, bankAccounts, accounts, onSaved }) {
   const a = info.asset;
   const today = new Date().toISOString().slice(0,10);
   const [form, setForm] = useState({
@@ -1205,34 +1382,49 @@ function RecordInstallmentModal({ info, onClose, bankAccounts, onSaved }) {
     if (form.method === 'Check' && !activeCb)    { setErr('No active checkbook for this bank.'); return; }
     setBusy(true); setErr('');
     try {
-      const user = auth.currentUser?.email || '';
-      const lbl  = `${a.id} — ${a.name||''}`.trim();
+      const lbl = `${a.id} — ${a.name||''}`.trim();
 
-      // Voucher (if auto)
+      // Voucher (if auto) — the server assigns the CV number and requires a
+      // resolvable account uuid per line: interest posts to the amortization
+      // expense account (payable as fallback), principal to the payable.
       let voucherDocId = '', voucherIdStr = '';
       if (form.autoVoucher) {
-        const lines = [];
-        let n = 1;
-        if (Number(form.interest) > 0) lines.push({ lineNo:n++, description:`Interest — ${lbl}`, amount:Number(form.interest), category:'Finance Cost', expenseAccountCode:'', contactId:'', contact:lbl, taxType:'N/A', taxRate:0, taxAmt:0 });
-        if (Number(form.principal) > 0) lines.push({ lineNo:n++, description:`Principal — ${lbl}`, amount:Number(form.principal), category:a.installmentPayableAccount||'Installment Payable', expenseAccountCode:a.installmentPayableAccount||'', contactId:'', contact:lbl, taxType:'N/A', taxRate:0, taxAmt:0 });
-        voucherIdStr = await nextVoucherId('CV', form.date);
-        const ref = await addDoc(collection(db,'vouchers'), {
-          voucherId: voucherIdStr,
-          voucherType: 'CV',
-          preparationDate: form.date,
-          purposeCategory: 'Asset Installment',
-          paymentFromAccountCode: form.bank || '',
-          contactSummary: lbl,
-          totalAmount: total,
-          status: 'Pending',
-          notes: form.notes || '',
-          assetId: a.id,
-          installmentPeriod: info.period,
-          lines,
-          createdAt: serverTimestamp(), createdBy: user,
-          updatedAt: serverTimestamp(), updatedBy: user,
-        });
-        voucherDocId = ref.id;
+        const findAcct = code => (accounts||[]).find(x => x.code === code || x.id === code);
+        const payableAcct  = findAcct(a.installmentPayableAccount||'');
+        const interestAcct = findAcct(a.installmentAmortizationAccount||'') || payableAcct;
+        const needsPrincipal = Number(form.principal) > 0;
+        const needsInterest  = Number(form.interest) > 0;
+        if ((needsPrincipal && !payableAcct) || (needsInterest && !interestAcct)) {
+          alert('Set the Installment Payable/Amortization accounts on the asset first — recording this payment without a voucher.');
+        } else {
+          const lines = [];
+          if (needsInterest) lines.push({
+            accountId: interestAcct.id,
+            description: `Interest — ${lbl}`,
+            amountCents: Math.round(Number(form.interest)*100),
+            meta: { category:'Finance Cost', contact:lbl, taxType:'N/A', taxRate:0, taxAmt:0 },
+          });
+          if (needsPrincipal) lines.push({
+            accountId: payableAcct.id,
+            description: `Principal — ${lbl}`,
+            amountCents: Math.round(Number(form.principal)*100),
+            meta: { category:a.installmentPayableAccount||'Installment Payable', contact:lbl, taxType:'N/A', taxRate:0, taxAmt:0 },
+          });
+          const bankAcct = findAcct(form.bank||'');
+          const created = await createVoucherDraft({
+            type: 'check',
+            voucherDate: form.date,
+            purposeCategory: 'Asset Installment',
+            paymentFromAccountId: bankAcct?.id || null,
+            contactId: null,
+            notes: form.notes || null,
+            meta: { assetId: a.id, installmentPeriod: info.period, contactSummary: lbl },
+            lines,
+          });
+          voucherDocId = created.id;
+          voucherIdStr = created.voucherNo;
+          await transitionVoucher(created.id, 'pending').catch(()=>{});
+        }
       }
 
       // Issue check (if applicable)
@@ -1249,35 +1441,32 @@ function RecordInstallmentModal({ info, onClose, bankAccounts, onSaved }) {
           referenceId:   a.id,
           voucherDocId,
           notes:         form.notes,
-          user,
         });
       }
 
-      // Record installment payment
-      await addDoc(collection(db,'assetInstallmentPayments'), {
-        assetId: a.id,
+      // Record installment payment (assetId is the asset's row uuid)
+      await assetInstallmentPaymentsApi.create({
+        assetId: a._rowId || null,
         assetName: a.name||'',
         period: info.period,
-        label:  info.label,
-        date: form.date,
-        principal: Number(form.principal)||0,
-        interest:  Number(form.interest)||0,
-        total,
-        method: form.method,
-        bank:   form.bank||'',
-        checkId:         checkInfo?.checkId || '',
-        checkNumber:     checkInfo?.checkNumber || form.checkNo || '',
-        checkRegisterId: checkInfo?.checkRegisterId || '',
-        voucherId:    voucherIdStr,
-        voucherDocId,
-        notes: form.notes || '',
-        createdAt: serverTimestamp(), createdBy: user,
+        label:  info.label || '',
+        payDate: form.date,
+        principalCents: Math.round((Number(form.principal)||0)*100),
+        interestCents:  Math.round((Number(form.interest)||0)*100),
+        totalCents:     Math.round(total*100),
+        method: form.method || null,
+        bank:   form.bank || null,
+        checkId:         checkInfo?.checkId || null,
+        checkNumber:     checkInfo?.checkNumber || form.checkNo || null,
+        checkRegisterId: checkInfo?.checkRegisterId || null,
+        voucherNo:    voucherIdStr || null,
+        voucherDocId: voucherDocId || null,
       });
 
       onSaved && onSaved();
     } catch (e) {
       console.error(e);
-      setErr(e.message || 'Failed to save.');
+      setErr((e instanceof ApiError ? e.detail : e.message) || 'Failed to save.');
     } finally {
       setBusy(false);
     }

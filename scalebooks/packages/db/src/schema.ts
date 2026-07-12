@@ -692,6 +692,213 @@ export const schedulePayments = pgTable(
   (t) => [index("schedule_payments_org_schedule_idx").on(t.orgId, t.scheduleId)],
 );
 
+// ── Loans (0016) ──
+export const loans = pgTable("loans", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: uuid("org_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  loanType: text("loan_type").notNull().default("Term Loan"),
+  disbursementDate: date("disbursement_date"),
+  proceedsDate: date("proceeds_date"),
+  termMonths: integer("term_months").notNull().default(60),
+  annualRate: numeric("annual_rate", { precision: 9, scale: 4 }).notNull().default("0"),
+  principalCents: bigint("principal_cents", { mode: "number" }).notNull().default(0),
+  interestMethod: text("interest_method").notNull().default("Reducing Balance"),
+  processingFeeCents: bigint("processing_fee_cents", { mode: "number" }).notNull().default(0),
+  status: text("status").notNull().default("Active"),
+  paymentFrequency: text("payment_frequency").notNull().default("Monthly"),
+  payDayMode: text("pay_day_mode").notNull().default("Fixed"),
+  payDay1: integer("pay_day1"),
+  payDay2: integer("pay_day2"),
+  payDaysPerMonth: jsonb("pay_days_per_month"),
+  intervalDays: integer("interval_days").notNull().default(15),
+  paymentMethod: text("payment_method"),
+  pmConfig: jsonb("pm_config"),
+  createdBy: text("created_by").references(() => appUsers.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const loanPayments = pgTable(
+  "loan_payments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    loanId: uuid("loan_id").references(() => loans.id, { onDelete: "set null" }),
+    loanName: text("loan_name"),
+    payDate: date("pay_date").notNull(),
+    interestCents: bigint("interest_cents", { mode: "number" }).notNull().default(0),
+    principalCents: bigint("principal_cents", { mode: "number" }).notNull().default(0),
+    penaltyCents: bigint("penalty_cents", { mode: "number" }).notNull().default(0),
+    totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
+    method: text("method"),
+    referenceNo: text("reference_no"),
+    bank: text("bank"),
+    voucherNo: text("voucher_no"),
+    voucherDocId: uuid("voucher_doc_id"),
+    checkVoucherNo: text("check_voucher_no"),
+    notes: text("notes"),
+    allocations: jsonb("allocations"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("loan_payments_org_loan_idx").on(t.orgId, t.loanId)],
+);
+
+// ── Fixed assets (0016) ──
+export const assetTypes = pgTable(
+  "asset_types",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    typeNo: text("type_no"),
+    name: text("name").notNull(),
+    depreciationMethod: text("depreciation_method").notNull().default("Straight Line"),
+    usefulLifeMonths: integer("useful_life_months"),
+    fixedAssetAccount: text("fixed_asset_account"),
+    accumDeprecAccount: text("accum_deprec_account"),
+    deprecExpenseAccount: text("deprec_expense_account"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("asset_types_org_name_key").on(t.orgId, t.name)],
+);
+
+export const fixedAssets = pgTable(
+  "fixed_assets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    assetNo: text("asset_no").notNull(),
+    name: text("name").notNull(),
+    assetType: text("asset_type"),
+    purchaseDate: date("purchase_date"),
+    deprecStartDate: date("deprec_start_date"),
+    costCents: bigint("cost_cents", { mode: "number" }).notNull().default(0),
+    residualCents: bigint("residual_cents", { mode: "number" }).notNull().default(0),
+    usefulLifeMonths: integer("useful_life_months").notNull().default(0),
+    depreciationMethod: text("depreciation_method").notNull().default("Straight Line"),
+    computationType: text("computation_type").notNull().default("Non Pro Rata"),
+    fixedAssetAccount: text("fixed_asset_account"),
+    accumDeprecAccount: text("accum_deprec_account"),
+    deprecExpenseAccount: text("deprec_expense_account"),
+    status: text("status").notNull().default("Active"),
+    disposalDate: date("disposal_date"),
+    notes: text("notes"),
+    isInstallment: boolean("is_installment").notNull().default(false),
+    installmentPrincipalCents: bigint("installment_principal_cents", { mode: "number" })
+      .notNull()
+      .default(0),
+    installmentStartDate: date("installment_start_date"),
+    installmentTermMonths: integer("installment_term_months").notNull().default(0),
+    installmentAnnualRate: numeric("installment_annual_rate", { precision: 9, scale: 4 })
+      .notNull()
+      .default("0"),
+    installmentMethod: text("installment_method").notNull().default("Reducing Balance"),
+    installmentPayableAccount: text("installment_payable_account"),
+    installmentAmortizationAccount: text("installment_amortization_account"),
+    paymentMethod: text("payment_method"),
+    pmConfig: jsonb("pm_config"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("fixed_assets_org_asset_no_key").on(t.orgId, t.assetNo)],
+);
+
+export const assetInstallmentPayments = pgTable(
+  "asset_installment_payments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    assetId: uuid("asset_id").references(() => fixedAssets.id, { onDelete: "set null" }),
+    assetName: text("asset_name"),
+    period: integer("period").notNull(),
+    label: text("label"),
+    payDate: date("pay_date").notNull(),
+    principalCents: bigint("principal_cents", { mode: "number" }).notNull().default(0),
+    interestCents: bigint("interest_cents", { mode: "number" }).notNull().default(0),
+    totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
+    method: text("method"),
+    bank: text("bank"),
+    checkId: text("check_id"),
+    checkNumber: text("check_number"),
+    checkRegisterId: text("check_register_id"),
+    voucherNo: text("voucher_no"),
+    voucherDocId: uuid("voucher_doc_id"),
+    notes: text("notes"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("asset_installment_payments_org_asset_idx").on(t.orgId, t.assetId)],
+);
+
+export const assetDeprPostings = pgTable(
+  "asset_depr_postings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    period: text("period").notNull(),
+    journalEntryId: uuid("journal_entry_id"),
+    totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
+    assetCount: integer("asset_count").notNull().default(0),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("asset_depr_postings_org_period_key").on(t.orgId, t.period)],
+);
+
+// ── Weekly projections + credit lines (0016) ──
+export const weeklyProjections = pgTable(
+  "weekly_projections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    projNo: text("proj_no").notNull(),
+    weekCoverage: text("week_coverage"),
+    startDate: date("start_date"),
+    endDate: date("end_date"),
+    status: text("status").notNull().default("Draft"),
+    totalOutCents: bigint("total_out_cents", { mode: "number" }).notNull().default(0),
+    totalInCents: bigint("total_in_cents", { mode: "number" }).notNull().default(0),
+    notes: text("notes"),
+    lines: jsonb("lines"),
+    inflowLines: jsonb("inflow_lines"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("weekly_projections_org_proj_no_key").on(t.orgId, t.projNo)],
+);
+
+export const creditLines = pgTable("credit_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: uuid("org_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  bankCode: text("bank_code"),
+  displayName: text("display_name").notNull(),
+  creditLimitCents: bigint("credit_limit_cents", { mode: "number" }).notNull().default(0),
+  interestRate: numeric("interest_rate", { precision: 9, scale: 4 }).notNull().default("0"),
+  availableBalanceCents: bigint("available_balance_cents", { mode: "number" })
+    .notNull()
+    .default(0),
+  asOfDate: date("as_of_date"),
+  notes: text("notes"),
+  createdBy: text("created_by").references(() => appUsers.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type Organization = typeof organizations.$inferSelect;
 export type Account = typeof accounts.$inferSelect;
 export type JournalEntry = typeof journalEntries.$inferSelect;
