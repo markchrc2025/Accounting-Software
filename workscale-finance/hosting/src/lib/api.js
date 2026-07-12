@@ -141,6 +141,8 @@ export const inviteUser = (p) =>
 export const updateUser = (id, p) =>
   apiFetch(`/users/${id}`, { method: 'PUT', body: JSON.stringify(p) }).then((r) => r.user);
 export const deleteUser = (id) => apiFetch(`/users/${id}`, { method: 'DELETE' });
+export const setUserPassword = (id, password) =>
+  apiFetch(`/users/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) });
 
 // ── document counters (admin inspection/override) ────────────────────────────
 export const listCounters = () => apiFetch('/settings/counters').then((r) => r.counters);
