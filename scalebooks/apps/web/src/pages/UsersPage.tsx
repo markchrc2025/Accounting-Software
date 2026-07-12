@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { USER_ROLES, type UserRoleName } from "@scalebooks/domain";
-import { ApiError, inviteUser, listUsers } from "../lib/api";
+import { ApiError, inviteUser, listUsers, setUserPassword } from "../lib/api";
 import { useAuth } from "../auth/AuthProvider";
 
 export function UsersPage() {
@@ -12,6 +12,8 @@ export function UsersPage() {
   const [email, setEmail] = useState("");
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<UserRoleName>("maker");
+  // Which user's password is being set inline, and the value being typed.
+  const [pwEdit, setPwEdit] = useState<{ id: string; value: string } | null>(null);
 
   const usersQ = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: isAdmin });
 
@@ -24,6 +26,12 @@ export function UsersPage() {
       setFullName("");
       setRole("maker");
     },
+  });
+
+  const pwMutation = useMutation({
+    mutationFn: (vars: { id: string; password: string }) =>
+      setUserPassword(vars.id, vars.password),
+    onSuccess: () => setPwEdit(null),
   });
 
   const inputCls =
@@ -43,8 +51,8 @@ export function UsersPage() {
     <div className="mx-auto max-w-5xl p-8">
       <h1 className="text-2xl font-semibold tracking-tight">Users</h1>
       <p className="mt-1 text-sm text-[#6B7280]">
-        Add people by email and role. They sign in with your identity provider — only emails on this
-        list are admitted to the workspace.
+        Add people by email and role, then set each person a password. Only emails on this list are
+        admitted to the workspace.
       </p>
 
       {/* Invite */}
@@ -99,6 +107,11 @@ export function UsersPage() {
         <h2 className="text-sm font-semibold uppercase tracking-wide text-[#6B7280]">
           Allowlist {usersQ.data ? `(${usersQ.data.length})` : ""}
         </h2>
+        {pwMutation.isError && (
+          <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-[#DC2626]">
+            {pwMutation.error instanceof ApiError ? pwMutation.error.detail : "Failed to set password."}
+          </p>
+        )}
         <div className="mt-3 overflow-hidden rounded-xl border border-[#E5E7EB] bg-white shadow-sm">
           {usersQ.isLoading ? (
             <p className="p-4 text-sm text-[#9CA3AF]">Loading…</p>
@@ -111,6 +124,7 @@ export function UsersPage() {
                   <th className="px-4 py-2 font-medium">Email</th>
                   <th className="px-4 py-2 font-medium">Name</th>
                   <th className="px-4 py-2 font-medium">Role</th>
+                  <th className="px-4 py-2 font-medium">Password</th>
                 </tr>
               </thead>
               <tbody>
@@ -119,6 +133,40 @@ export function UsersPage() {
                     <td className="px-4 py-2 font-medium">{u.email}</td>
                     <td className="px-4 py-2 text-[#6B7280]">{u.fullName ?? "—"}</td>
                     <td className="px-4 py-2 capitalize text-[#6B7280]">{u.role}</td>
+                    <td className="px-4 py-2">
+                      {pwEdit?.id === u.id ? (
+                        <span className="flex items-center gap-2">
+                          <input
+                            type="password"
+                            autoFocus
+                            className={inputCls + " h-8"}
+                            placeholder="New password (min 8)"
+                            value={pwEdit.value}
+                            onChange={(e) => setPwEdit({ id: u.id, value: e.target.value })}
+                          />
+                          <button
+                            className="h-8 rounded-lg bg-primary px-3 text-xs font-semibold text-white disabled:opacity-50"
+                            disabled={pwEdit.value.length < 8 || pwMutation.isPending}
+                            onClick={() => pwMutation.mutate({ id: u.id, password: pwEdit.value })}
+                          >
+                            {pwMutation.isPending ? "Saving…" : "Save"}
+                          </button>
+                          <button
+                            className="h-8 rounded-lg px-2 text-xs text-[#6B7280]"
+                            onClick={() => setPwEdit(null)}
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          className="h-8 rounded-lg border border-[#E5E7EB] px-3 text-xs font-medium text-[#374151] hover:bg-[#F9FAFB]"
+                          onClick={() => setPwEdit({ id: u.id, value: "" })}
+                        >
+                          Set password
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

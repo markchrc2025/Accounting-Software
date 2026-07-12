@@ -1213,7 +1213,8 @@ ON CONFLICT (id) DO NOTHING;
 -- MAKE YOURSELF ADMIN — add your email to THIS workspace's allowlist. Sentire
 -- admits users by their VERIFIED email, so you only need the email here (the id is
 -- generated). Do this once for the first admin; after that, invite users from the
--- app's Users page. Then sign in with this same email via Authenticize.
+-- app's Users page. Then set this email a password (Users page, or seed
+-- BOOKS_ADMIN_EMAIL/BOOKS_ADMIN_INITIAL_PASSWORD on first boot) and sign in.
 --
 -- The same email may be added to several workspaces (one row per workspace, each
 -- with its own role) — after login the app lets you pick which to enter.
@@ -1221,7 +1222,7 @@ ON CONFLICT (id) DO NOTHING;
 -- INSERT INTO app_users (org_id, email, full_name, role)
 -- VALUES (
 --   'a0000000-0000-0000-0000-000000000001',   -- the org id from the bootstrap above
---   'you@example.com',                        -- EDIT: your email (must match your Authenticize login)
+--   'you@example.com',                        -- EDIT: your email (your login email)
 --   'Your Name',                              -- EDIT: your name
 --   'admin'
 -- )

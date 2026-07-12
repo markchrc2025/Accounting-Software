@@ -6,8 +6,8 @@ import { passwordSignIn } from "../password";
 
 export const authRoutes = new Hono();
 
-// In-app email/password sign-in (public). Verifies against Authenticize
-// server-side and returns a JWT the SPA uses as a Bearer token. The workspace is
+// In-app email/password sign-in (public). Verifies against Sentire Books' own
+// credentials and returns a JWT the SPA uses as a Bearer token. The workspace is
 // then resolved as usual (the form's company code selects it).
 authRoutes.post("/password", async (c) => {
   let body: unknown;
