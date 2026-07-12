@@ -61,7 +61,7 @@ const voucherFromApi = (v) => {
 const DR_STATUSES = ['Pending','For Verification','Verified','For Approval','Approved','Disbursed','Rejected','Voided'];
 
 // ── PDF generation ────────────────────────────────────────────────────────────
-function buildPdfHtml(report, bankAccounts, companyName = 'Workscale Resources Inc.') {
+function buildPdfHtml(report, bankAccounts, companyName = 'Sentire Books') {
   const lines    = report.lines || [];
   const bankBals = report.bankBalances || {};
 

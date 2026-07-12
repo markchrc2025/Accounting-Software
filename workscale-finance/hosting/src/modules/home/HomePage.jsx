@@ -50,7 +50,7 @@ export default function HomePage() {
             {greeting}, {firstName}! 👋
           </p>
           <p style={{ fontSize: 13, color: '#64748b', margin: 0 }}>
-            Welcome back to the Workscale Finance Portal.
+            Welcome back to the Sentire Finance Portal.
           </p>
         </div>
         <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: '14px 18px', fontSize: 13, color: '#64748b', flexShrink: 0 }}>
@@ -69,7 +69,7 @@ export default function HomePage() {
           <div style={{ position: 'absolute', bottom: -60, right: 60, width: 150, height: 150, background: 'rgba(249,115,22,.08)', borderRadius: '50%' }} />
           <h1 style={{ fontSize: 28, fontWeight: 900, margin: '0 0 10px', position: 'relative', zIndex: 1 }}>Finance Portal</h1>
           <p style={{ color: '#94a3b8', fontSize: 14, margin: 0, position: 'relative', zIndex: 1 }}>
-            Unified access to all Workscale Finance applications — no separate links needed.
+            Unified access to all Sentire Finance applications — no separate links needed.
           </p>
           <div style={{ display: 'flex', gap: 20, marginTop: 24, position: 'relative', zIndex: 1 }}>
             <div style={{ background: 'rgba(255,255,255,.07)', border: '1px solid rgba(255,255,255,.1)', padding: '10px 16px', borderRadius: 12 }}>

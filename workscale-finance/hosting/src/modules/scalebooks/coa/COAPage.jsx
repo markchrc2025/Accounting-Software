@@ -511,11 +511,11 @@ export default function COAPage() {
         const Phase2 = () => (
           <div>
             <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10,padding:'10px 14px',marginBottom:18,fontSize:12,color:'#1d4ed8',display:'flex',gap:8,alignItems:'flex-start'}}>
-              <span>ℹ️</span><span>The best-match column for each ScaleBooks field has been auto-selected. Adjust any that look incorrect.</span>
+              <span>ℹ️</span><span>The best-match column for each Sentire Books field has been auto-selected. Adjust any that look incorrect.</span>
             </div>
             <div style={{fontWeight:800,fontSize:13,color:'#0b1220',marginBottom:12}}>Chart of Account Details</div>
             <table className="map-tbl">
-              <thead><tr><th>ScaleBooks Field</th><th>Your File Column</th><th>Sample Value (row 1)</th></tr></thead>
+              <thead><tr><th>Sentire Books Field</th><th>Your File Column</th><th>Sample Value (row 1)</th></tr></thead>
               <tbody>
                 {IMPORT_FIELDS.map(f => {
                   const mapped = impWiz.mapping[f.key] || '';

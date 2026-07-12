@@ -40,7 +40,7 @@ export default function LoginPage() {
     <div style={styles.page}>
       <form onSubmit={handleEmailLogin} style={styles.card}>
         <div style={styles.brandRow}>
-          <div style={styles.logoTile}>W</div>
+          <div style={styles.logoTile}>S</div>
           <div>
             <div style={styles.brandName}>Sentire Books</div>
             <div style={styles.brandTag}>SINGLE SIGN-ON</div>
