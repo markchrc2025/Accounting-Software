@@ -1,9 +1,10 @@
 import { Hono } from "hono";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import { and, asc, eq } from "drizzle-orm";
 import { zInviteUser, zUserUpdate } from "@scalebooks/domain";
 import { withOrgContext, appUsers } from "@scalebooks/db";
 import { requireAuth } from "../auth";
+import { setPassword } from "../password";
 
 export const userRoutes = new Hono();
 
@@ -38,8 +39,8 @@ userRoutes.get("/", async (c) => {
   return c.json({ users: rows });
 });
 
-// Invite a user by email (admin only). They self-sign-up in Authenticize; only
-// emails on this list are admitted to the workspace.
+// Add a user to the workspace allowlist by email (admin only). Set their
+// sign-in password separately via POST /:id/password.
 userRoutes.post("/", async (c) => {
   const auth = c.get("auth");
   if (auth.role !== "admin") {
@@ -135,8 +136,8 @@ userRoutes.put("/:id", async (c) => {
   }
 });
 
-// Admin removal from the workspace allowlist (their Authenticize account
-// remains; they just can't enter this workspace anymore).
+// Admin removal from the workspace allowlist (their sign-in credential remains;
+// they just can't enter this workspace anymore).
 userRoutes.delete("/:id", async (c) => {
   const auth = c.get("auth");
   if (auth.role !== "admin") {
@@ -164,4 +165,44 @@ userRoutes.delete("/:id", async (c) => {
     console.error("[deleteUser]", err);
     return c.json({ error: "internal_error" }, 500);
   }
+});
+
+const zSetPassword = z.object({ password: z.string().min(8) });
+
+// Set (or reset) a workspace member's sign-in password (admin only). Keyed by
+// the user's id within the admin's workspace, so an admin can only set
+// passwords for members of their own workspace. Credentials are per-email, so
+// this is the person's password everywhere they're a member.
+userRoutes.post("/:id/password", async (c) => {
+  const auth = c.get("auth");
+  if (auth.role !== "admin") {
+    return c.json({ error: "forbidden", detail: "Admin role required" }, 403);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  const parsed = zSetPassword.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "validation_error", issues: parsed.error.issues }, 400);
+  }
+
+  const id = c.req.param("id");
+  const rows = await withOrgContext(
+    { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+    (tx) =>
+      tx
+        .select({ email: appUsers.email })
+        .from(appUsers)
+        .where(and(eq(appUsers.id, id), eq(appUsers.orgId, auth.orgId))),
+  );
+  const target = rows[0];
+  if (!target) {
+    return c.json({ error: "not_found", detail: "No such user in this workspace" }, 404);
+  }
+
+  await setPassword(target.email, parsed.data.password);
+  return c.json({ ok: true });
 });

@@ -1,71 +1,45 @@
 /**
- * In-app email/password sign-in, proxied to Authenticize server-side.
+ * In-app email/password sign-in — verified locally against Sentire Books' own
+ * credentials store (see @scalebooks/db `credentials`). A correct password
+ * mints a short-lived Books token; the workspace is then resolved from the
+ * app_users allowlist (the login form's company code selects it).
  *
- * The Sentire login form collects the credentials and posts them to our API,
- * which forwards them to Authenticize's Better Auth email/password endpoint,
- * then exchanges the resulting session for a JWKS-signed JWT. Sentire never
- * stores the password — Authenticize remains the credential authority — and no
- * browser cookies cross domains, so it works across separate *.sliplane.app hosts.
- *
- * Trade-off vs. the "Sign in with Sentire" redirect: this path is password-only
- * (social login / MFA and one-click cross-app SSO need the redirect), and it
- * doesn't establish an Authenticize SSO session in the browser.
+ * Sign-in proves identity only. Whether that email is admitted to any workspace
+ * is a separate check on every request (auth.ts), so a valid password for an
+ * email that's on no allowlist gets a token but no workspace.
  */
-const trimSlash = (s: string) => s.replace(/\/+$/, "");
-
-function issuer(): string {
-  const v = process.env.AUTH_ISSUER;
-  if (!v) throw new Error("AUTH_ISSUER is not set");
-  return trimSlash(v);
-}
-
-/** Rebuild a `Cookie` header from a response's Set-Cookie list (name=value only). */
-function cookieHeaderFrom(res: Response): string {
-  const setCookies = res.headers.getSetCookie?.() ?? [];
-  return setCookies
-    .map((sc) => sc.split(";")[0])
-    .filter(Boolean)
-    .join("; ");
-}
+import { getPasswordHash, setPasswordHash } from "@scalebooks/db";
+import { hashPassword, verifyPassword } from "./crypto";
+import { signAppToken } from "./tokens";
 
 export type PasswordResult = { token: string } | { error: string; status: number };
 
 export async function passwordSignIn(email: string, password: string): Promise<PasswordResult> {
-  const base = issuer();
-  // Server-side call: present the auth server's own origin so Better Auth's CSRF
-  // check treats it as same-origin (there's no browser Origin to forward).
-  const origin = base;
+  const emailLc = email.trim().toLowerCase();
 
-  let signIn: Response;
-  try {
-    signIn = await fetch(`${base}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin },
-      body: JSON.stringify({ email, password }),
-    });
-  } catch {
-    return { error: "auth_unreachable", status: 502 };
+  const hash = await getPasswordHash(emailLc);
+  // Always run a verify — against a dummy hash when the email is unknown — so
+  // response time doesn't reveal whether the email is registered.
+  let ok = false;
+  if (hash) {
+    ok = await verifyPassword(password, hash);
+  } else {
+    await verifyPassword(password, DUMMY_HASH);
   }
-  if (signIn.status === 401 || signIn.status === 403 || signIn.status === 400) {
-    return { error: "invalid_credentials", status: 401 };
-  }
-  if (!signIn.ok) {
-    return { error: "sign_in_failed", status: 502 };
-  }
+  if (!ok) return { error: "invalid_credentials", status: 401 };
 
-  const cookie = cookieHeaderFrom(signIn);
-  if (!cookie) return { error: "no_session", status: 502 };
-
-  // Exchange the session for a JWT our API can verify via JWKS.
-  let tokenRes: Response;
-  try {
-    tokenRes = await fetch(`${base}/api/auth/token`, { headers: { cookie, origin } });
-  } catch {
-    return { error: "auth_unreachable", status: 502 };
-  }
-  if (!tokenRes.ok) return { error: "token_failed", status: 502 };
-
-  const body = (await tokenRes.json().catch(() => null)) as { token?: string } | null;
-  if (!body?.token) return { error: "no_token", status: 502 };
-  return { token: body.token };
+  const token = await signAppToken({ sub: emailLc, email: emailLc });
+  return { token };
 }
+
+/** Set (or replace) an email identity's password. */
+export async function setPassword(email: string, password: string): Promise<void> {
+  const hash = await hashPassword(password);
+  await setPasswordHash(email.trim().toLowerCase(), hash);
+}
+
+// A well-formed scrypt hash of a random value — only used to keep failed logins
+// as costly as successful ones (timing-uniform), never matched.
+const DUMMY_HASH =
+  "scrypt$0000000000000000000000000000000000000000000000000000000000000000$" +
+  "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";

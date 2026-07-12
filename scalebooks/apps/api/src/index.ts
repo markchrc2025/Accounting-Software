@@ -1,7 +1,8 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { oidcLogin, oidcCallback, oidcLogout } from "./oidc";
+import { ensureAuthTables, hasCredential } from "@scalebooks/db";
+import { setPassword } from "./password";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { journalRoutes } from "./routes/journal";
@@ -67,13 +68,6 @@ app.get("/", (c) =>
 );
 app.get("/health", (c) => c.json({ ok: true, service: "sentire-books-api" }));
 
-// OIDC login flow with Authenticize. Public (no auth) and registered BEFORE the
-// protected "/auth" mount so /auth/login isn't caught by requireAuth. The
-// callback path matches the redirect URI registered in Authenticize.
-app.get("/auth/login", oidcLogin);
-app.get("/auth/logout", oidcLogout);
-app.get("/api/auth/callback/authenticize", oidcCallback);
-
 app.route("/auth", authRoutes);
 app.route("/users", userRoutes);
 app.route("/accounts", accountRoutes);
@@ -106,9 +100,30 @@ app.route("/asset-depr-postings", assetDeprPostingRoutes);
 app.route("/weekly-projections", weeklyProjectionRoutes);
 app.route("/credit-lines", creditLineRoutes);
 
-// Render (and most PaaS) inject PORT; fall back to API_PORT for local dev.
-const port = Number(process.env.PORT ?? process.env.API_PORT ?? 8787);
-serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });
-console.log(`sentire-books-api listening on :${port}`);
+/**
+ * Boot: make sure the credentials table exists, and — on first run — seed a
+ * password for the configured admin so there's a way in (BOOKS_ADMIN_EMAIL +
+ * BOOKS_ADMIN_INITIAL_PASSWORD; the admin must already be on a workspace's user
+ * list). Existing users get their passwords set by an admin afterwards. The
+ * server still starts even if this fails, so /health stays up.
+ */
+async function boot(): Promise<void> {
+  await ensureAuthTables();
+  const adminEmail = process.env.BOOKS_ADMIN_EMAIL?.trim().toLowerCase();
+  const adminPassword = process.env.BOOKS_ADMIN_INITIAL_PASSWORD;
+  if (adminEmail && adminPassword && !(await hasCredential(adminEmail))) {
+    await setPassword(adminEmail, adminPassword);
+    console.log(`[auth] seeded initial credential for ${adminEmail}`);
+  }
+}
+
+boot()
+  .catch((e) => console.error("[boot] auth setup failed:", e))
+  .finally(() => {
+    // Render (and most PaaS) inject PORT; fall back to API_PORT for local dev.
+    const port = Number(process.env.PORT ?? process.env.API_PORT ?? 8787);
+    serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });
+    console.log(`sentire-books-api listening on :${port}`);
+  });
 
 export type AppType = typeof app;

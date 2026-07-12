@@ -2,7 +2,6 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import {
   setAccessToken,
   setActiveOrg,
-  setTokenRefresher,
   getMe,
   listWorkspaces,
   signInWithPassword,
@@ -11,10 +10,8 @@ import {
 } from "../lib/api";
 
 /**
- * Auth + workspace state, backed by Authenticize via the OIDC Authorization Code
- * flow. Login is a full redirect handled by our API (see src/oidc.ts):
- *
- *   login()  → <API>/auth/login → Authenticize → back with a JWT in the fragment
+ * Auth + workspace state. Sign-in is email/password against Sentire Books' own
+ * API (POST /auth/password), which returns a short-lived Books access token.
  *
  * We keep that token in sessionStorage and send it as `Authorization: Bearer`.
  * Because one identity can belong to several workspaces (a bookkeeper serving
@@ -42,7 +39,6 @@ export interface AuthSession {
   user: { id: string; email: string };
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
 const TOKEN_KEY = "sb.token";
 const ORG_KEY = "sb.org";
 
@@ -66,28 +62,6 @@ const writeSS = (k: string, v: string | null) => {
   }
 };
 
-function mapCallbackError(code: string): string {
-  switch (code) {
-    case "management_account":
-      return "That account manages Authenticize itself and can't sign in to an app. Use your Sentire Books account instead.";
-    case "token_exchange_failed":
-    case "token_unreachable":
-      return "We couldn't complete sign-in with the identity provider. Please try again.";
-    case "access_denied":
-      return "Sign-in was cancelled.";
-    default:
-      return "Sign-in didn't complete. Please try again.";
-  }
-}
-
-/** Send the browser through the API's OIDC login, returning here afterwards. */
-function redirectToLogin(): void {
-  const path = window.location.pathname + window.location.search;
-  // Never round-trip an /auth/* path back as returnTo (avoids nested returnTo loops).
-  const returnTo = path.startsWith("/auth") ? "/" : path;
-  window.location.href = `${API_BASE}/auth/login?returnTo=${encodeURIComponent(returnTo)}`;
-}
-
 interface AuthState {
   session: AuthSession | null;
   phase: AuthPhase;
@@ -95,7 +69,6 @@ interface AuthState {
   workspaces: WorkspaceDto[];
   authError: string | null;
   clearAuthError: () => void;
-  login: () => void;
   signInPassword: (
     companyCode: string,
     email: string,
@@ -120,34 +93,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!authEnabled || started.current) return;
     started.current = true;
 
-    // On a 401, the token expired — bounce through the IdP (silent if the
-    // Authenticize SSO session is still valid) and come back with a fresh one.
-    setTokenRefresher(async () => {
-      redirectToLogin();
-      return null;
-    });
-
-    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
-    const frag = new URLSearchParams(hash);
-    const hashToken = frag.get("token");
-    const hashError = frag.get("error");
-
-    if (hashToken || hashError) {
-      window.history.replaceState(null, "", window.location.pathname + window.location.search);
-    }
-
-    if (hashError) {
-      setAuthError(mapCallbackError(hashError));
-      setPhase("anon");
-      return;
-    }
-
-    const token = hashToken ?? readSS(TOKEN_KEY);
+    // Resume a stored session if there's a token; otherwise show the login.
+    // The token is short-lived — on expiry a request 401s and we drop to anon
+    // (the login screen), where the user signs in again.
+    const token = readSS(TOKEN_KEY);
     if (!token) {
       setPhase("anon");
       return;
     }
-    writeSS(TOKEN_KEY, token);
     void resolveWorkspaces(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -244,8 +197,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  const login = () => redirectToLogin();
-
   /** In-app email/password sign-in; the company code picks the workspace. */
   const signInPassword = async (companyCode: string, email: string, password: string) => {
     setAuthError(null);
@@ -282,7 +233,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setActiveOrg(null);
     setSession(null);
     setOrg(null);
-    window.location.href = `${API_BASE}/auth/logout`;
+    setAuthError(null);
+    setPhase("anon");
   };
 
   return (
@@ -294,7 +246,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         workspaces,
         authError,
         clearAuthError: () => setAuthError(null),
-        login,
         signInPassword,
         chooseWorkspace,
         switchWorkspace,

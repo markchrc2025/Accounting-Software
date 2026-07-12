@@ -7,7 +7,7 @@ import type { ImportAccount } from "@scalebooks/domain";
 const BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
 const DEV_USER_ID = import.meta.env.VITE_DEV_USER_ID ?? "";
 
-// Current access token (a JWT from Authenticize), kept in sync by AuthProvider.
+// Current access token (a Books-signed JWT), kept in sync by AuthProvider.
 // When set, requests use `Authorization: Bearer …`; otherwise they fall back to
 // the dev header.
 let _accessToken: string | null = null;
@@ -125,7 +125,7 @@ export interface WorkspaceDto {
 export const listWorkspaces = () =>
   apiFetch<{ email: string; workspaces: WorkspaceDto[] }>("/auth/workspaces");
 
-/** In-app email/password sign-in — returns a JWT (verified against Authenticize). */
+/** In-app email/password sign-in — returns a Books access token. */
 export const signInWithPassword = (email: string, password: string) =>
   apiFetch<{ token: string }>("/auth/password", {
     method: "POST",
@@ -171,6 +171,13 @@ export const inviteUser = (input: InviteUserInput) =>
     method: "POST",
     body: JSON.stringify(input),
   }).then((r) => r.user);
+
+/** Set (or reset) a workspace member's sign-in password (admin only). */
+export const setUserPassword = (id: string, password: string) =>
+  apiFetch<{ ok: true }>(`/users/${encodeURIComponent(id)}/password`, {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
 
 export const listJournalEntries = () =>
   apiFetch<{ entries: JournalEntryDto[] }>("/journal-entries").then((r) => r.entries);

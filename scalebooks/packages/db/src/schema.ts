@@ -98,7 +98,7 @@ export const appUsers = pgTable(
   "app_users",
   {
     // App-owned id (generated). Users are admitted by their verified EMAIL, not
-    // this id — Authenticize authenticates, Sentire owns the user allowlist.
+    // this id — sign-in proves the email, Sentire owns the user allowlist.
     id: text("id")
       .primaryKey()
       .default(sql`gen_random_uuid()::text`),
