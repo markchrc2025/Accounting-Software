@@ -696,11 +696,14 @@ export const schedulePayments = pgTable(
 );
 
 // ── Loans (0016) ──
-export const loans = pgTable("loans", {
+export const loans = pgTable(
+  "loans",
+  {
   id: uuid("id").primaryKey().defaultRandom(),
   orgId: uuid("org_id")
     .notNull()
     .references(() => organizations.id, { onDelete: "cascade" }),
+  loanNo: text("loan_no"),
   name: text("name").notNull(),
   loanType: text("loan_type").notNull().default("Term Loan"),
   disbursementDate: date("disbursement_date"),
@@ -721,7 +724,9 @@ export const loans = pgTable("loans", {
   pmConfig: jsonb("pm_config"),
   createdBy: text("created_by").references(() => appUsers.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+  },
+  (t) => [unique("loans_org_no_key").on(t.orgId, t.loanNo)],
+);
 
 export const loanPayments = pgTable(
   "loan_payments",

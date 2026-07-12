@@ -43,6 +43,7 @@ export const loanRoutes = makeCrudRoutes({
   createSchema: zLoanInput,
   updateSchema: zLoanUpdate,
   orderBy: [{ column: loans.createdAt, dir: "asc" }],
+  docNo: { field: "loanNo", prefix: "LN", dateField: "disbursementDate" },
 });
 
 export const loanPaymentRoutes = makeCrudRoutes({
