@@ -68,7 +68,7 @@ export default function AccessDenied({ module: moduleName }) {
       {/* Actions */}
       <div style={{ display: 'flex', gap: 10 }}>
         <button
-          onClick={() => navigate('/scalebooks')}
+          onClick={() => navigate('/dashboard')}
           style={{
             padding: '10px 20px', borderRadius: 10, border: 'none',
             background: '#f97316', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: 13,

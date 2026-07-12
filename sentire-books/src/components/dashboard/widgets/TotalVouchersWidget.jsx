@@ -15,7 +15,7 @@ export function TotalVouchersWidget({ count = 0, loading = false }) {
       label="Total Vouchers"
       headerRight={<PeriodSelect defaultValue="all_time" />}
       footer={
-        <button onClick={() => navigate('/scalebooks/vouchers')} className="text-[#F97316] hover:underline">
+        <button onClick={() => navigate('/vouchers')} className="text-[#F97316] hover:underline">
           View vouchers →
         </button>
       }

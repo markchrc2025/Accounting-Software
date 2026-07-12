@@ -198,7 +198,7 @@ function ReportBuilderInner() {
       <div style={{ flexShrink: 0, background: '#fff', borderBottom: '1px solid #e2e8f0', padding: '14px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
           <button
-            onClick={() => navigate('/scalebooks/reports')}
+            onClick={() => navigate('/reports')}
             style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 17, fontWeight: 600, color: '#F97316' }}
             onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
             onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}

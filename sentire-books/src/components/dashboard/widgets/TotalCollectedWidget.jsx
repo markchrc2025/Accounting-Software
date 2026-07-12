@@ -13,7 +13,7 @@ export function TotalCollectedWidget({ total = 0, totalBilled = 0, loading = fal
       label="Total Collected"
       headerRight={<PeriodSelect defaultValue="this_year" />}
       footer={
-        <button onClick={() => navigate('/scalebooks/collections')} className="text-[#F97316] hover:underline">
+        <button onClick={() => navigate('/collections')} className="text-[#F97316] hover:underline">
           View collections →
         </button>
       }
