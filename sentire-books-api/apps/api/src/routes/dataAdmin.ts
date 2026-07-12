@@ -1,13 +1,18 @@
 /**
  * Admin data tools (Settings → Data): export a full JSON snapshot of the
- * workspace, reset it for go-live (wipe business data + restart every
- * document number at 0001), and restore a previously exported snapshot.
+ * workspace, factory-reset it (wipe ALL data, reinstall the default chart of
+ * accounts, restart every document number at 0001), and restore a previously
+ * exported snapshot.
  *
  * All three run inside ONE org-scoped transaction. Reset/restore set the
  * transaction-local `app.allow_data_admin` GUC (see migration 0018) so the
  * posted-journal append-only triggers permit the wipe; RLS still confines
  * everything to the caller's workspace. Users, sign-in credentials, and org
  * settings are never wiped.
+ *
+ * RESET IS A TEMPORARY GO-LIVE TOOL: it stays available while testing and is
+ * switched off for production by setting ALLOW_WORKSPACE_RESET=false on the
+ * API service — no code change needed. Export/restore remain available.
  */
 import { Hono } from "hono";
 import { ZodError, z } from "zod";
@@ -48,6 +53,7 @@ import {
   documentCounters,
   orgSettings,
 } from "@sentire-books/db";
+import { DEFAULT_CHART_OF_ACCOUNTS } from "@sentire-books/domain";
 import { requireAuth } from "../auth";
 
 const EXPORT_FORMAT = "sentire-books-export";
@@ -62,20 +68,18 @@ type Registry = {
   selfRefs?: string[];
   /** DB-computed columns that must not be inserted. */
   generated?: string[];
-  /** Master data a reset can keep (grouped by flag name). */
-  keepGroup?: "contacts" | "referenceData" | "checkbooks" | "chartOfAccounts";
 };
 
 // In INSERT order (parents before children). Wipes run in reverse.
 const REGISTRY: Registry[] = [
-  { key: "accounts", table: accounts, selfRefs: ["parentId"], keepGroup: "chartOfAccounts" },
-  { key: "contacts", table: contacts, selfRefs: ["parentId"], keepGroup: "contacts" },
-  { key: "taxRates", table: taxRates, keepGroup: "referenceData" },
-  { key: "taxGroups", table: taxGroups, keepGroup: "referenceData" },
-  { key: "purposeCategories", table: purposeCategories, keepGroup: "referenceData" },
-  { key: "paymentTerms", table: paymentTerms, keepGroup: "referenceData" },
-  { key: "assetTypes", table: assetTypes, keepGroup: "referenceData" },
-  { key: "checkbooks", table: checkbooks, keepGroup: "checkbooks" },
+  { key: "accounts", table: accounts, selfRefs: ["parentId"] },
+  { key: "contacts", table: contacts, selfRefs: ["parentId"] },
+  { key: "taxRates", table: taxRates },
+  { key: "taxGroups", table: taxGroups },
+  { key: "purposeCategories", table: purposeCategories },
+  { key: "paymentTerms", table: paymentTerms },
+  { key: "assetTypes", table: assetTypes },
+  { key: "checkbooks", table: checkbooks },
   { key: "journalEntries", table: journalEntries, selfRefs: ["accrualReversalOf", "reversalOf"] },
   { key: "journalLines", table: journalLines, lineOf: "journalEntries" },
   { key: "vouchers", table: vouchers },
@@ -107,6 +111,37 @@ async function enableDataAdmin(tx: Tx): Promise<void> {
   await tx.execute(sql`SELECT set_config('app.allow_data_admin', 'on', true)`);
 }
 
+/** Reinstall the default chart of accounts (same set the seed provisions). */
+async function reseedChartOfAccounts(tx: Tx, orgId: string): Promise<number> {
+  const rows = DEFAULT_CHART_OF_ACCOUNTS.map((a) => ({
+    orgId,
+    code: a.code,
+    name: a.name,
+    type: a.type,
+    subtype: a.subtype ?? null,
+    description: a.description ?? null,
+    normalBalance: a.normalBalance,
+  }));
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await tx.insert(accounts).values(rows.slice(i, i + CHUNK));
+  }
+  const existing = await tx
+    .select({ id: accounts.id, name: accounts.name })
+    .from(accounts)
+    .where(eq(accounts.orgId, orgId));
+  const idByName = new Map(existing.map((r) => [r.name, r.id]));
+  for (const a of DEFAULT_CHART_OF_ACCOUNTS) {
+    if (!a.parentName) continue;
+    const parentId = idByName.get(a.parentName);
+    if (!parentId) continue;
+    await tx
+      .update(accounts)
+      .set({ parentId })
+      .where(eq(accounts.id, idByName.get(a.name)!));
+  }
+  return rows.length;
+}
+
 /** Delete a registry entry's org rows; returns the wiped count. */
 async function wipeEntry(tx: Tx, entry: Registry, orgId: string): Promise<number> {
   if (entry.lineOf) return 0; // cascades from its parent
@@ -119,9 +154,6 @@ async function wipeEntry(tx: Tx, entry: Registry, orgId: string): Promise<number
 
 const zResetBody = z.object({
   confirm: z.literal("RESET"),
-  keepContacts: z.boolean().default(true),
-  keepReferenceData: z.boolean().default(true),
-  keepCheckbooks: z.boolean().default(true),
 });
 
 const zImportBody = z.object({
@@ -169,8 +201,15 @@ dataAdminRoutes.get("/export", async (c) => {
   return c.json(payload);
 });
 
-// ── Reset: wipe business data + restart document numbering ───────────────────
+// ── Reset: factory-wipe EVERYTHING + default CoA + fresh numbering ───────────
+// Temporary go-live tool — disable in production with ALLOW_WORKSPACE_RESET=false.
 dataAdminRoutes.post("/reset", async (c) => {
+  if (process.env.ALLOW_WORKSPACE_RESET === "false") {
+    return c.json(
+      { error: "reset_disabled", detail: "Workspace reset is disabled on this environment (ALLOW_WORKSPACE_RESET=false)." },
+      403,
+    );
+  }
   const auth = c.get("auth");
   let body: unknown;
   try {
@@ -179,27 +218,21 @@ dataAdminRoutes.post("/reset", async (c) => {
     return c.json({ error: "invalid_json" }, 400);
   }
   try {
-    const input = zResetBody.parse(body);
-    const keep = (g: Registry["keepGroup"]) =>
-      g === "chartOfAccounts" || // reset never touches the CoA
-      (g === "contacts" && input.keepContacts) ||
-      (g === "referenceData" && input.keepReferenceData) ||
-      (g === "checkbooks" && input.keepCheckbooks);
-
-    const wiped = await withOrgContext(
+    zResetBody.parse(body);
+    const result = await withOrgContext(
       { userId: auth.userId, orgId: auth.orgId, role: auth.role },
       async (tx) => {
         await enableDataAdmin(tx);
         const counts: Record<string, number> = {};
         for (const entry of [...REGISTRY].reverse()) {
-          if (entry.keepGroup && keep(entry.keepGroup)) continue;
           const n = await wipeEntry(tx, entry, auth.orgId);
           if (n > 0) counts[entry.key] = n;
         }
-        return counts;
+        const reseeded = await reseedChartOfAccounts(tx, auth.orgId);
+        return { counts, reseeded };
       },
     );
-    return c.json({ ok: true, wiped });
+    return c.json({ ok: true, wiped: result.counts, chartOfAccounts: result.reseeded });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
     console.error("[workspaceReset]", err);
