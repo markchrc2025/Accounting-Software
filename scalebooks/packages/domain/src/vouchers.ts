@@ -38,6 +38,7 @@ export const VOUCHER_STATUSES = [
   "verified",
   "for_approval",
   "approved",
+  "for_disbursement", // parked in a disbursement report (managed by that module)
   "paid",
   "rejected",
   "posted",
