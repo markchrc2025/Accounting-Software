@@ -92,17 +92,18 @@ function ScaleBooksAppInner() {
         logoUrl={profile.logoUrl}
         onSignOut={handleSignOut}
         approvalCount={approvalCount}
-        onApprovalsClick={() => navigate('/scalebooks/approvals')}
+        onApprovalsClick={() => navigate('/approvals')}
         onSearchClick={() => setCommandPaletteOpen(true)}
-        onSettingsClick={() => navigate('/scalebooks/settings')}
-        onProfileClick={() => navigate('/scalebooks/profile')}
+        onSettingsClick={() => navigate('/settings')}
+        onProfileClick={() => navigate('/profile')}
       />
       <div className="flex flex-1 overflow-hidden">
         <LeftRail onCreateClick={() => setCreateFlyoutOpen(true)} />
         <main className="flex-1 overflow-auto bg-[#F9FAFB]">
           <Routes>
             {/* Dashboard — always accessible */}
-            <Route index element={<DashboardPage />} />
+            <Route index element={<Navigate to="/dashboard" replace />} />
+            <Route path="dashboard" element={<DashboardPage />} />
 
             {/* Disbursement */}
             <Route path="vouchers/*"    element={<ModuleGuard module="Vouchers"><VouchersPage /></ModuleGuard>} />
@@ -135,7 +136,7 @@ function ScaleBooksAppInner() {
             <Route path="settings" element={<ModuleGuard module="Settings"><SettingsPage /></ModuleGuard>} />
             <Route path="profile"  element={<UserProfilePage />} />
 
-            <Route path="*" element={<Navigate to="/scalebooks" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </main>
       </div>

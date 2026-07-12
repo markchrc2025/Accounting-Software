@@ -12,7 +12,7 @@ export function RecentBillingWidget({ statements = [], loading = false }) {
     <WidgetShell
       label="Recent Billing Statements"
       headerRight={
-        <button onClick={() => navigate('/scalebooks/billing')} className="text-[12px] text-[#F97316] hover:underline">
+        <button onClick={() => navigate('/billing')} className="text-[12px] text-[#F97316] hover:underline">
           View all →
         </button>
       }
@@ -24,7 +24,7 @@ export function RecentBillingWidget({ statements = [], loading = false }) {
         <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
           <Info size={20} className="text-[#9CA3AF]" />
           <p className="text-[14px] font-semibold text-[#1F2937]">No billing statements yet.</p>
-          <button onClick={() => navigate('/scalebooks/billing')} className="text-[13px] text-[#F97316] hover:underline">
+          <button onClick={() => navigate('/billing')} className="text-[13px] text-[#F97316] hover:underline">
             Open a client book →
           </button>
         </div>
@@ -33,7 +33,7 @@ export function RecentBillingWidget({ statements = [], loading = false }) {
           {statements.slice(0, 5).map(b => (
             <div
               key={b.id}
-              onClick={() => navigate('/scalebooks/billing')}
+              onClick={() => navigate('/billing')}
               className="flex items-center justify-between py-2.5 cursor-pointer hover:bg-[#FAFAFA] -mx-5 px-5 transition-colors"
             >
               <div>

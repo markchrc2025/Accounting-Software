@@ -5,20 +5,20 @@ import * as Popover from '@radix-ui/react-popover';
 import { ChevronDown } from 'lucide-react';
 
 const QUICK_ACTIONS = [
-  { label: 'Create voucher',         path: '/scalebooks/vouchers' },
-  { label: 'Record disbursement',    path: '/scalebooks/disbursements' },
-  { label: 'Create cheque',          path: '/scalebooks/checks' },
-  { label: 'Create billing statement', path: '/scalebooks/billing' },
-  { label: 'Add journal entry',      path: '/scalebooks/journal' },
+  { label: 'Create voucher',         path: '/vouchers' },
+  { label: 'Record disbursement',    path: '/disbursements' },
+  { label: 'Create cheque',          path: '/checks' },
+  { label: 'Create billing statement', path: '/billing' },
+  { label: 'Add journal entry',      path: '/journal' },
 ];
 
 const ALL_ACTIONS = [
   ...QUICK_ACTIONS,
-  { label: 'Payment Schedule entry', path: '/scalebooks/pay-schedule' },
-  { label: 'Bank Transaction',       path: '/scalebooks/bank' },
-  { label: 'Fixed Asset',            path: '/scalebooks/assets' },
-  { label: 'Service Invoice',        path: '/scalebooks/invoices' },
-  { label: 'Collection entry',       path: '/scalebooks/collections' },
+  { label: 'Payment Schedule entry', path: '/pay-schedule' },
+  { label: 'Bank Transaction',       path: '/bank' },
+  { label: 'Fixed Asset',            path: '/assets' },
+  { label: 'Service Invoice',        path: '/invoices' },
+  { label: 'Collection entry',       path: '/collections' },
 ];
 
 export function CreateActions() {

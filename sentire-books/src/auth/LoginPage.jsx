@@ -13,7 +13,7 @@ export default function LoginPage() {
 
   // Once the provider resolves a workspace, leave the login screen.
   useEffect(() => {
-    if (phase === 'ready') navigate('/scalebooks', { replace: true });
+    if (phase === 'ready') navigate('/dashboard', { replace: true });
   }, [phase, navigate]);
 
   const error =

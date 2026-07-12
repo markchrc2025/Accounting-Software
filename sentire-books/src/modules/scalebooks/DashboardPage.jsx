@@ -198,7 +198,7 @@ function DashboardPageInner() {
 
       {/* ── See all activity ────────────────────────────────────────────────── */}
       <div className="flex justify-end mb-4">
-        <button onClick={() => navigate('/scalebooks/journal')} className="text-[13px] text-[#F97316] hover:underline">
+        <button onClick={() => navigate('/journal')} className="text-[13px] text-[#F97316] hover:underline">
           See all activity →
         </button>
       </div>

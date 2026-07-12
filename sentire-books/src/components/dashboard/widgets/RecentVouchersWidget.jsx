@@ -11,7 +11,7 @@ export function RecentVouchersWidget({ vouchers = [], loading = false }) {
     <WidgetShell
       label="Recent Vouchers"
       headerRight={
-        <button onClick={() => navigate('/scalebooks/vouchers')} className="text-[12px] text-[#F97316] hover:underline">
+        <button onClick={() => navigate('/vouchers')} className="text-[12px] text-[#F97316] hover:underline">
           View all →
         </button>
       }
@@ -22,7 +22,7 @@ export function RecentVouchersWidget({ vouchers = [], loading = false }) {
       ) : vouchers.length === 0 ? (
         <div className="flex items-center justify-center h-full text-[13px] text-[#9CA3AF]">
           No vouchers yet.{' '}
-          <button onClick={() => navigate('/scalebooks/vouchers')} className="text-[#F97316] hover:underline ml-1">
+          <button onClick={() => navigate('/vouchers')} className="text-[#F97316] hover:underline ml-1">
             Create one →
           </button>
         </div>
@@ -31,7 +31,7 @@ export function RecentVouchersWidget({ vouchers = [], loading = false }) {
           {vouchers.slice(0, 5).map(v => (
             <div
               key={v.id}
-              onClick={() => navigate('/scalebooks/vouchers')}
+              onClick={() => navigate('/vouchers')}
               className="flex items-center justify-between py-2.5 cursor-pointer hover:bg-[#FAFAFA] -mx-5 px-5 transition-colors"
             >
               <div>

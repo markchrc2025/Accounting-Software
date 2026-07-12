@@ -6,12 +6,12 @@ import {
 import { usePermissions } from '../../contexts/PermissionsContext.jsx';
 
 const PILLS = [
-  { label: 'Accounting',   icon: Calculator,    color: '#1E3A5F', bg: '#EFF6FF', path: '/scalebooks/journal' },
-  { label: 'Disbursement', icon: Wallet,         color: '#F97316', bg: '#FFF7ED', path: '/scalebooks/vouchers' },
-  { label: 'Billing & AR', icon: FileText,       color: '#2563EB', bg: '#EFF6FF', path: '/scalebooks/billing' },
-  { label: 'Approvals',    icon: CheckCircle,    color: '#16A34A', bg: '#F0FDF4', path: '/scalebooks/approvals', requiresRole: ['Verifier', 'Approver', 'Poster', 'Admin'] },
-  { label: 'Tax',          icon: Receipt,        color: '#DC2626', bg: '#FEF2F2', path: '/scalebooks/tax' },
-  { label: 'Reports',      icon: BarChart3,      color: '#7C3AED', bg: '#F5F3FF', path: '/scalebooks/reports' },
+  { label: 'Accounting',   icon: Calculator,    color: '#1E3A5F', bg: '#EFF6FF', path: '/journal' },
+  { label: 'Disbursement', icon: Wallet,         color: '#F97316', bg: '#FFF7ED', path: '/vouchers' },
+  { label: 'Billing & AR', icon: FileText,       color: '#2563EB', bg: '#EFF6FF', path: '/billing' },
+  { label: 'Approvals',    icon: CheckCircle,    color: '#16A34A', bg: '#F0FDF4', path: '/approvals', requiresRole: ['Verifier', 'Approver', 'Poster', 'Admin'] },
+  { label: 'Tax',          icon: Receipt,        color: '#DC2626', bg: '#FEF2F2', path: '/tax' },
+  { label: 'Reports',      icon: BarChart3,      color: '#7C3AED', bg: '#F5F3FF', path: '/reports' },
 ];
 
 export function HubPills() {

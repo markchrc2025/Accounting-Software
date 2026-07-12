@@ -2,7 +2,7 @@
  * Handoff utility — Payment Schedule → Voucher / Check Voucher.
  *
  * The Schedule page stashes a prefill payload in sessionStorage and
- * navigates to /scalebooks/vouchers or /scalebooks/checks. The target
+ * navigates to /vouchers or /checks. The target
  * page consumes the payload exactly once on mount and auto-opens its
  * "New" modal pre-populated.
  *

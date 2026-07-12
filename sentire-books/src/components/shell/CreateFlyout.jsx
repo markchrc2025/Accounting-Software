@@ -13,35 +13,35 @@ const GROUPS = [
   {
     label: 'Disbursement',
     items: [
-      { icon: FileText,    label: 'Voucher',               shortcut: 'Ctrl+V', path: '/scalebooks/vouchers' },
-      { icon: CreditCard,  label: 'Cheque',                shortcut: 'Ctrl+H', path: '/scalebooks/checks' },
-      { icon: Wallet,      label: 'Disbursement',          shortcut: 'Ctrl+D', path: '/scalebooks/disbursements' },
-      { icon: Calendar,    label: 'Payment Schedule entry',shortcut: null,      path: '/scalebooks/pay-schedule' },
+      { icon: FileText,    label: 'Voucher',               shortcut: 'Ctrl+V', path: '/vouchers' },
+      { icon: CreditCard,  label: 'Cheque',                shortcut: 'Ctrl+H', path: '/checks' },
+      { icon: Wallet,      label: 'Disbursement',          shortcut: 'Ctrl+D', path: '/disbursements' },
+      { icon: Calendar,    label: 'Payment Schedule entry',shortcut: null,      path: '/pay-schedule' },
     ],
   },
   {
     label: 'Accounting',
     items: [
-      { icon: BookOpen,    label: 'Journal Entry',         shortcut: 'Ctrl+J', path: '/scalebooks/journal' },
-      { icon: Building,    label: 'Bank Transaction',      shortcut: null,      path: '/scalebooks/bank' },
-      { icon: Package,     label: 'Fixed Asset',           shortcut: null,      path: '/scalebooks/assets' },
+      { icon: BookOpen,    label: 'Journal Entry',         shortcut: 'Ctrl+J', path: '/journal' },
+      { icon: Building,    label: 'Bank Transaction',      shortcut: null,      path: '/bank' },
+      { icon: Package,     label: 'Fixed Asset',           shortcut: null,      path: '/assets' },
     ],
   },
   {
     label: 'Billing & AR',
     items: [
-      { icon: Receipt,     label: 'Billing Statement',     shortcut: 'Ctrl+B', path: '/scalebooks/billing' },
-      { icon: ClipboardList,label:'Service Invoice',       shortcut: null,      path: '/scalebooks/invoices' },
-      { icon: DollarSign,  label: 'Collection entry',      shortcut: null,      path: '/scalebooks/collections' },
+      { icon: Receipt,     label: 'Billing Statement',     shortcut: 'Ctrl+B', path: '/billing' },
+      { icon: ClipboardList,label:'Service Invoice',       shortcut: null,      path: '/invoices' },
+      { icon: DollarSign,  label: 'Collection entry',      shortcut: null,      path: '/collections' },
     ],
   },
   {
     label: 'Lists',
     items: [
-      { icon: Users,       label: 'Customer',              shortcut: null,      path: '/scalebooks/contacts' },
-      { icon: Truck,       label: 'Vendor',                shortcut: null,      path: '/scalebooks/contacts' },
-      { icon: UserCheck,   label: 'Employee',              shortcut: null,      path: '/scalebooks/contacts' },
-      { icon: List,        label: 'Chart of Accounts entry',shortcut: null,     path: '/scalebooks/coa' },
+      { icon: Users,       label: 'Customer',              shortcut: null,      path: '/contacts' },
+      { icon: Truck,       label: 'Vendor',                shortcut: null,      path: '/contacts' },
+      { icon: UserCheck,   label: 'Employee',              shortcut: null,      path: '/contacts' },
+      { icon: List,        label: 'Chart of Accounts entry',shortcut: null,     path: '/coa' },
     ],
   },
 ];

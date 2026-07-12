@@ -14,12 +14,12 @@ const GROUPS = [
     label: 'Disbursement',
     icon: Wallet,
     items: [
-      { label: 'Vouchers',           path: '/scalebooks/vouchers' },
-      { label: 'Approvals',          path: '/scalebooks/approvals' },
-      { label: 'Weekly Projections', path: '/scalebooks/projections' },
-      { label: 'Payment Schedule',   path: '/scalebooks/pay-schedule' },
-      { label: 'Disbursements',      path: '/scalebooks/disbursements' },
-      { label: 'Check Registry',     path: '/scalebooks/checks' },
+      { label: 'Vouchers',           path: '/vouchers' },
+      { label: 'Approvals',          path: '/approvals' },
+      { label: 'Weekly Projections', path: '/projections' },
+      { label: 'Payment Schedule',   path: '/pay-schedule' },
+      { label: 'Disbursements',      path: '/disbursements' },
+      { label: 'Check Registry',     path: '/checks' },
     ],
   },
   {
@@ -27,12 +27,12 @@ const GROUPS = [
     label: 'Accountant',
     icon: Calculator,
     items: [
-      { label: 'Journal',              path: '/scalebooks/journal' },
-      { label: 'Bank',                 path: '/scalebooks/bank' },
-      { label: 'Chart of Accounts',    path: '/scalebooks/coa' },
-      { label: 'Tax',                  path: '/scalebooks/tax' },
-      { label: 'Financial Management', path: '/scalebooks/financial' },
-      { label: 'Fixed Assets',         path: '/scalebooks/assets' },
+      { label: 'Journal',              path: '/journal' },
+      { label: 'Bank',                 path: '/bank' },
+      { label: 'Chart of Accounts',    path: '/coa' },
+      { label: 'Tax',                  path: '/tax' },
+      { label: 'Financial Management', path: '/financial' },
+      { label: 'Fixed Assets',         path: '/assets' },
     ],
   },
   {
@@ -40,9 +40,9 @@ const GROUPS = [
     label: 'Billing',
     icon: FileText,
     items: [
-      { label: 'Billing Book',     path: '/scalebooks/billing' },
-      { label: 'Service Invoices', path: '/scalebooks/invoices' },
-      { label: 'Collections',      path: '/scalebooks/collections' },
+      { label: 'Billing Book',     path: '/billing' },
+      { label: 'Service Invoices', path: '/invoices' },
+      { label: 'Collections',      path: '/collections' },
     ],
   },
 ] as const;
@@ -158,14 +158,14 @@ export function LeftRail({ onCreateClick }: LeftRailProps) {
           <RailItem
             icon={Home}
             label="Home"
-            active={is('/scalebooks', true)}
-            onClick={() => navigate('/scalebooks')}
+            active={is('/dashboard', true)}
+            onClick={() => navigate('/dashboard')}
           />
           <RailItem
             icon={BarChart3}
             label="Reports"
-            active={location.pathname.startsWith('/scalebooks/reports')}
-            onClick={() => navigate('/scalebooks/reports')}
+            active={location.pathname.startsWith('/reports')}
+            onClick={() => navigate('/reports')}
           />
         </div>
 
@@ -186,8 +186,8 @@ export function LeftRail({ onCreateClick }: LeftRailProps) {
           <RailItem
             icon={Users}
             label="Contacts"
-            active={is('/scalebooks/contacts')}
-            onClick={() => navigate('/scalebooks/contacts')}
+            active={is('/contacts')}
+            onClick={() => navigate('/contacts')}
           />
         </div>
 

@@ -593,8 +593,8 @@ export default function PaymentSchedulePage() {
       notes: `${s.title || ''} — ${occurrenceDate || s.dueDate || ''}`.trim(),
     };
     setSchedulePrefill(payload);
-    if (kind === 'CHECK') navigate('/scalebooks/checks');
-    else                  navigate('/scalebooks/vouchers');
+    if (kind === 'CHECK') navigate('/checks');
+    else                  navigate('/vouchers');
   }
 
   /* ══ Tab: List ═══════════════════════════════════════════════ */
@@ -641,7 +641,7 @@ export default function PaymentSchedulePage() {
                       <td style={{color:'#64748b',fontSize:11}}>{s.paymentMethod||<span style={{color:'#e5e7eb'}}>—</span>}</td>
                       <td>
                         {rs.voucher
-                          ? <button onClick={()=>navigate('/scalebooks/vouchers')} className="pill" style={{...rs.style,border:`1px solid ${rs.style.borderColor}`,cursor:'pointer'}} title={`Voucher ${rs.voucher.voucherId||rs.voucher.id}`}>{rs.label}</button>
+                          ? <button onClick={()=>navigate('/vouchers')} className="pill" style={{...rs.style,border:`1px solid ${rs.style.borderColor}`,cursor:'pointer'}} title={`Voucher ${rs.voucher.voucherId||rs.voucher.id}`}>{rs.label}</button>
                           : <span className="pill" style={rs.style}>{rs.label}</span>}
                       </td>
                       <td><span className={`pill ${s.status==='Cancelled'?'':'pill-active'}`} style={s.status==='Cancelled'?{background:'#f8fafc',borderColor:'#e2e8f0',color:'#94a3b8'}:{}}>{s.status||'Active'}</span></td>
@@ -762,7 +762,7 @@ export default function PaymentSchedulePage() {
                               </div>
                             )}
                             {hasAccess('Financial Management')
-                              ? <button className="btn btn-ghost btn-sm" onClick={()=>navigate('/scalebooks/financial')} title="Manage in Financial Management">View</button>
+                              ? <button className="btn btn-ghost btn-sm" onClick={()=>navigate('/financial')} title="Manage in Financial Management">View</button>
                               : <span title="You do not have access to Financial Management" style={{fontSize:11,color:'#94a3b8',cursor:'not-allowed',padding:'3px 8px',border:'1px solid #e5e7eb',borderRadius:6,display:'inline-block'}}>No access</span>
                             }
                           </div>

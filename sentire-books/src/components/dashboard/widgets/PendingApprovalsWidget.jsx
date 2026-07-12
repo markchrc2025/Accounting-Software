@@ -9,7 +9,7 @@ export function PendingApprovalsWidget({ count = 0, loading = false }) {
     <WidgetShell
       label="Pending Approvals"
       footer={
-        <button onClick={() => navigate('/scalebooks/approvals')} className="text-[#F97316] hover:underline">
+        <button onClick={() => navigate('/approvals')} className="text-[#F97316] hover:underline">
           View all →
         </button>
       }
@@ -22,7 +22,7 @@ export function PendingApprovalsWidget({ count = 0, loading = false }) {
           <p className="text-[12px] text-[#9CA3AF] mt-0.5">Awaiting action</p>
         </div>
         <button
-          onClick={() => navigate('/scalebooks/approvals')}
+          onClick={() => navigate('/approvals')}
           className="mt-3 h-8 rounded-lg bg-[#F97316] text-white text-[13px] font-medium px-4 hover:bg-[#EA580C] transition-colors self-start"
         >
           Review now

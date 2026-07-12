@@ -19,7 +19,7 @@ export function TotalBilledWidget({ total = 0, loading = false }) {
       label="Total Billed (AR)"
       headerRight={<PeriodSelect defaultValue="this_year" />}
       footer={
-        <button onClick={() => navigate('/scalebooks/billing')} className="text-[#F97316] hover:underline">
+        <button onClick={() => navigate('/billing')} className="text-[#F97316] hover:underline">
           View billing book →
         </button>
       }

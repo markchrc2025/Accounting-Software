@@ -53,7 +53,7 @@ export default function ReportsLandingPage() {
     });
   };
 
-  const openReport = (id: string) => navigate(`/scalebooks/reports/builder/${id}`);
+  const openReport = (id: string) => navigate(`/reports/builder/${id}`);
 
   const searchLower   = search.trim().toLowerCase();
   const searchResults = searchLower ? ALL_REPORTS.filter(r => r.label.toLowerCase().includes(searchLower)) : null;
