@@ -1,8 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import {
-  collection, onSnapshot, query, orderBy, where, getDocs, updateDoc, doc, serverTimestamp
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+import { billingStatementsApi, serviceInvoicesApi, collectionsApi, ApiError } from '../../../lib/api.js';
 
 const STATUS_STYLES = {
   'Draft':            { background:'#f8fafc', borderColor:'#e2e8f0', color:'#64748b' },
@@ -51,8 +48,28 @@ const CSS = `
 
 const fmt = (n) => new Intl.NumberFormat('en-PH',{style:'currency',currency:'PHP'}).format(Number(n||0));
 
+// API rows carry integer centavos; the UI thinks in pesos. Mapping also keeps
+// the original field names (bsNo→bsId, siNo→siId, …) the render code expects.
+const toPesos = (c) => Number(c || 0) / 100;
+const bsFromApi = (r) => ({
+  id: r.id, bsId: r.bsNo || '', contactName: r.contactName || '',
+  billingDate: r.billingDate || '', periodStart: r.periodStart || '', periodEnd: r.periodEnd || '',
+  taxGroupName: r.taxGroupName || '', grossAmount: toPesos(r.grossCents),
+  netDue: toPesos(r.netDueCents), appliedAmount: toPesos(r.appliedCents),
+  balance: toPesos(r.balanceCents), description: r.description || '', status: r.status || 'Draft',
+});
+const siFromApi = (r) => ({
+  id: r.id, siId: r.siNo || '', contactName: r.contactName || '', siDate: r.siDate || '',
+  amount: toPesos(r.amountCents), balance: toPesos(r.balanceCents),
+  billingStatementId: r.billingStatementId || '',
+});
+const colFromApi = (r) => ({
+  id: r.id, collectionId: r.collectionNo || '', contactName: r.contactName || '',
+  collectionDate: r.collectionDate || '', amountReceived: toPesos(r.amountReceivedCents),
+  billingStatementId: r.billingStatementId || '',
+});
+
 export default function BillingClientPage() {
-  const [contacts,    setContacts]    = useState([]);
   const [statements,  setStatements]  = useState([]);
   const [invoices,    setInvoices]    = useState([]);
   const [collections, setCollections] = useState([]);
@@ -64,11 +81,20 @@ export default function BillingClientPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
   useEffect(() => {
-    const u1 = onSnapshot(query(collection(db,'contacts'), orderBy('name','asc')), s => setContacts(s.docs.map(d=>({id:d.id,...d.data()}))));
-    const u2 = onSnapshot(query(collection(db,'billingStatements'), orderBy('createdAt','desc')), s => setStatements(s.docs.map(d=>({id:d.id,...d.data()}))));
-    const u3 = onSnapshot(query(collection(db,'serviceInvoices'), orderBy('createdAt','desc')), s => setInvoices(s.docs.map(d=>({id:d.id,...d.data()}))));
-    const u4 = onSnapshot(query(collection(db,'collections'), orderBy('createdAt','desc')), s => setCollections(s.docs.map(d=>({id:d.id,...d.data()}))));
-    return () => { u1(); u2(); u3(); u4(); };
+    (async () => {
+      try {
+        const [sts, sis, cols] = await Promise.all([
+          billingStatementsApi.list(),
+          serviceInvoicesApi.list(),
+          collectionsApi.list(),
+        ]);
+        setStatements(sts.map(bsFromApi));
+        setInvoices(sis.map(siFromApi));
+        setCollections(cols.map(colFromApi));
+      } catch (e) {
+        showToast(e instanceof ApiError ? e.detail : e.message);
+      }
+    })();
   }, []);
 
   const clientList = useMemo(() => {

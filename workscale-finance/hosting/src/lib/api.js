@@ -190,6 +190,13 @@ export const bankBalancesApi = crud('/bank-balances', 'balances', 'balance');
 export const bankTransactionsApi = crud('/bank-transactions', 'transactions', 'transaction');
 export const bankReconciliationsApi = crud('/bank-reconciliations', 'reconciliations', 'reconciliation');
 
+// ── billing / accounts receivable ────────────────────────────────────────────
+export const billingStatementsApi = crud('/billing-statements', 'statements', 'statement');
+export const serviceInvoicesApi = crud('/service-invoices', 'invoices', 'invoice');
+export const collectionsApi = crud('/collections', 'collections', 'collection');
+export const paymentSchedulesApi = crud('/payment-schedules', 'schedules', 'schedule');
+export const schedulePaymentsApi = crud('/schedule-payments', 'payments', 'payment');
+
 export const getGeneralLedger = (p) => apiFetch(`/reports/general-ledger${periodQuery(p)}`);
 export const getIncomeStatement = (p) => apiFetch(`/reports/income-statement${periodQuery(p)}`);
 export const getBalanceSheet = (asOf) =>

@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
-import { db, auth } from '../firebase.js';
+import { createContact } from '../lib/api.js';
 
 /**
  * ContactPicker — type-to-search combobox for selecting a Contact, with
- * inline "+ Add new" that creates a stub contact in Firestore on the fly.
+ * inline "+ Add new" that creates a stub contact via the API on the fly.
  *
  * Props:
  *   contacts       [{id, contactId?, name, types?, type?, needsCompletion?}]
@@ -107,26 +106,14 @@ export default function ContactPicker({
     if (!name) return;
     setCreating(true);
     try {
-      const email = auth.currentUser?.email || '';
       const types = wantedTypes && wantedTypes.length === 1
         ? [wantedTypes[0]]
         : [defaultNewType];
-      const payload = {
-        name,
-        types,
-        type: types[0],          // legacy single-type compatibility
-        status: 'Active',
-        needsCompletion: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        createdBy: email,
-        updatedBy: email,
-      };
-      const ref = await addDoc(collection(db, 'contacts'), payload);
-      const stub = { id: ref.id, ...payload };
+      const created = await createContact({ name, types, needsCompletion: true });
+      const stub = { needsCompletion: true, types, ...created };
       onChange?.({
-        contactId: ref.id,
-        contactName: name,
+        contactId: stub.id,
+        contactName: stub.name || name,
         contact: stub,
         isNew: true,
       });
@@ -135,7 +122,7 @@ export default function ContactPicker({
       setQuery('');
     } catch (e) {
       console.error('ContactPicker: stub create failed', e);
-      alert('Could not create contact: ' + e.message);
+      alert('Could not create contact: ' + (e?.detail || e?.message || e));
     }
     setCreating(false);
   };

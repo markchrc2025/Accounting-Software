@@ -1,15 +1,13 @@
 // Shared helper for issuing a check from the active checkbook.
-// Used by Check Registry, Loan Payments (Financial Mgmt),
-// Fixed Assets installment payments, and Payment Schedule.
+// Used by Payment Schedule (and, as they migrate, Loan Payments and Fixed
+// Assets installment payments).
 //
-// Writes a `checkRegister` doc and atomically advances the
-// active `checkbookMaster` doc's nextCheckNumber for the bank.
+// Writes a check-registry row via the API and advances the active checkbook's
+// nextCheckNumber, so Check Register & Checkbook Inventory stay authoritative.
+// (Same client-orchestrated create + advance pattern as the Check Registry
+// screen; the server stamps the actor from the session.)
 
-import {
-  collection, doc, getDocs, query, where,
-  serverTimestamp, runTransaction,
-} from 'firebase/firestore';
-import { db } from '../firebase.js';
+import { listCheckbooks, createChecks, updateCheckbook } from '../lib/api.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -27,31 +25,29 @@ function genCheckId(checkNumber, dateStr) {
  */
 export async function getActiveCheckbook(bankCode) {
   if (!bankCode) return null;
-  const snap = await getDocs(query(collection(db, 'checkbookMaster'), where('bankCode', '==', bankCode)));
-  const active = snap.docs.map(d => ({ id: d.id, ...d.data() })).find(cb => cb.isActive !== false);
-  return active || null;
+  const books = await listCheckbooks();
+  return books.find(cb => cb.bankCode === bankCode && cb.isActive !== false) || null;
 }
 
 /**
- * Issue a check atomically:
+ * Issue a check:
  *   - validates checkbook range
- *   - writes a `checkRegister` document
- *   - advances `checkbookMaster.nextCheckNumber`
+ *   - creates a check-registry row (status defaults to Issued)
+ *   - advances the checkbook's nextCheckNumber
  *
  * @param {object} opts
  * @param {string} opts.bankCode        Bank account code (required)
  * @param {string} opts.payeeName       Payee display string (required)
- * @param {number} opts.amount          Gross check amount (required)
+ * @param {number} opts.amount          Gross check amount in pesos (required)
  * @param {number} [opts.netAmount]     Net cash amount (defaults to amount)
  * @param {string} [opts.issueDate]     ISO date (defaults to today)
  * @param {string} [opts.checkNumber]   Override; otherwise uses checkbook's next
  * @param {string} [opts.checkDate]     ISO date on the check (defaults to issueDate)
  * @param {string} [opts.payeeContactId]
- * @param {string} [opts.referenceType] e.g. 'Loan Payment', 'Installment', 'Schedule', 'Check Voucher'
- * @param {string} [opts.referenceId]   Source document id (loan id, asset id, schedule id, voucher id)
- * @param {string} [opts.voucherDocId]  Linked voucher doc id (so Cleared/Voided can update it)
+ * @param {string} [opts.referenceType] e.g. 'Loan Payment', 'Installment', 'Scheduled Payment'
+ * @param {string} [opts.referenceId]   Source document id (loan id, asset id, schedule id)
+ * @param {string} [opts.voucherDocId]  Linked voucher uuid (so Cleared/Voided can update it)
  * @param {string} [opts.notes]
- * @param {string} [opts.user]          Email of issuer
  * @returns {Promise<{ checkId, checkNumber, checkbookId, checkRegisterId }>}
  */
 export async function issueCheck(opts) {
@@ -59,7 +55,7 @@ export async function issueCheck(opts) {
     bankCode, payeeName, amount,
     netAmount, issueDate, checkNumber, checkDate,
     payeeContactId = '', referenceType = '', referenceId = '',
-    voucherDocId = '', notes = '', user = '',
+    voucherDocId = '', notes = '',
   } = opts;
 
   if (!bankCode)  throw new Error('Bank account is required to issue a check.');
@@ -82,57 +78,39 @@ export async function issueCheck(opts) {
     throw new Error(`Checkbook exhausted (range ${cb.startingNumber}–${cb.endingNumber}). Add a new checkbook for this bank.`);
   }
 
+  // If caller supplied a specific checkNumber that's already past, keep it,
+  // but never let nextCheckNumber go backward.
+  const newNext = Math.max(next, assigned + 1);
+  if (newNext > end + 1) throw new Error('Checkbook exhausted.');
+
   const issDate = issueDate || today();
   const chkDate = checkDate || issDate;
   const checkIdStr = genCheckId(assigned, issDate);
+  const paddedNo = String(assigned).padStart(padLen, '0');
 
-  const cbRef     = doc(db, 'checkbookMaster', cb.id);
-  const regRef    = doc(collection(db, 'checkRegister'));
+  const created = await createChecks([{
+    checkNo: checkIdStr,
+    checkbookId: cb.id,
+    bankCode,
+    checkNumber: paddedNo,
+    issueDate: issDate,
+    checkDate: chkDate,
+    payeeName,
+    amountCents: Math.round((Number(amount) || 0) * 100),
+    netAmountCents: Math.round((Number(netAmount ?? amount) || 0) * 100),
+    referenceType: referenceType || null,
+    referenceId: referenceId || null,
+    voucherId: voucherDocId && String(voucherDocId).length === 36 ? voucherDocId : null,
+    notes: notes || null,
+    meta: payeeContactId ? { payeeContactId } : null,
+  }]);
 
-  await runTransaction(db, async (tx) => {
-    const cbSnap = await tx.get(cbRef);
-    if (!cbSnap.exists()) throw new Error('Checkbook no longer exists.');
-    const live = cbSnap.data();
-    const liveNext = parseInt(live.nextCheckNumber) || (parseInt(live.startingNumber) || 0);
-    const liveEnd  = parseInt(live.endingNumber)    || 0;
-
-    // If caller supplied a specific checkNumber that's already past, keep it,
-    // but never let nextCheckNumber go backward.
-    const newNext = Math.max(liveNext, assigned + 1);
-    if (newNext > liveEnd + 1) throw new Error('Checkbook exhausted.');
-
-    tx.set(regRef, {
-      checkId: checkIdStr,
-      checkbookId: cb.id,
-      bankCode,
-      checkNumber: String(assigned).padStart(padLen, '0'),
-      issueDate: issDate,
-      checkDate: chkDate,
-      payeeContactId,
-      payeeName,
-      amount: Number(amount) || 0,
-      netAmount: Number(netAmount ?? amount) || 0,
-      status: 'Issued',
-      referenceType,
-      referenceId,
-      voucherDocId,
-      voidReason: '', clearedDate: '', voidedDate: '', stoppedDate: '', staleDate: '',
-      notes,
-      createdAt: serverTimestamp(), createdBy: user,
-      updatedAt: serverTimestamp(), updatedBy: user,
-    });
-
-    tx.update(cbRef, {
-      nextCheckNumber: String(newNext).padStart(padLen, '0'),
-      updatedAt: serverTimestamp(),
-      updatedBy: user,
-    });
-  });
+  await updateCheckbook(cb.id, { nextCheckNumber: String(newNext).padStart(padLen, '0') });
 
   return {
     checkId:         checkIdStr,
-    checkNumber:     String(assigned).padStart(padLen, '0'),
+    checkNumber:     paddedNo,
     checkbookId:     cb.id,
-    checkRegisterId: regRef.id,
+    checkRegisterId: created?.[0]?.id || '',
   };
 }

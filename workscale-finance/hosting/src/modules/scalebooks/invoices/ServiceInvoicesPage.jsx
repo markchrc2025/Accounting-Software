@@ -1,11 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
 import ContactPicker from '../../../components/ContactPicker.jsx';
-import { nextServiceInvoiceId } from '../../../utils/documentIds.js';
+import { serviceInvoicesApi, listContacts, ApiError } from '../../../lib/api.js';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
 const SI_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Sent','Partial','Paid','Voided'];
 const STATUS_STYLES = {
@@ -70,7 +67,49 @@ const NEXT = {
 
 const EMPTY = { isNew:true, siId:'', contactId:'', contactName:'', siDate:'', dueDate:'', amount:0, taxType:'N/A', ewtRate:0, incomeAccountCode:'', billingStatementId:'', notes:'', status:'Draft' };
 
+// API rows carry integer centavos; the UI thinks in pesos. siFromApi keeps the
+// original field names (siNo→siId, amountCents→amount) the render code expects.
+const toPesos = (c) => Number(c || 0) / 100;
+const toCents = (p) => Math.round(Number(p || 0) * 100);
+const siFromApi = (r) => ({
+  id: r.id,
+  siId: r.siNo || '',
+  contactId: r.contactId || '',
+  contactName: r.contactName || '',
+  siDate: r.siDate || '',
+  dueDate: r.dueDate || '',
+  amount: toPesos(r.amountCents),
+  taxType: r.taxType || 'N/A',
+  ewtRate: Number(r.ewtRate) || 0,
+  incomeAccountCode: r.incomeAccountCode || '',
+  billingStatementId: r.billingStatementId || '',
+  appliedAmount: toPesos(r.appliedCents),
+  balance: toPesos(r.balanceCents),
+  notes: r.notes || '',
+  status: r.status || 'Draft',
+  reviewedBy: r.reviewedBy || '',
+  approvedBy: r.approvedBy || '',
+  rejectReason: r.rejectReason || '',
+});
+// appliedCents is deliberately not sent (collections own it); the server
+// computes balance from amount − applied.
+const siToApi = (m, statusOverride) => ({
+  contactId: m.contactId && String(m.contactId).length === 36 ? m.contactId : null,
+  contactName: (m.contactName || '').trim(),
+  siDate: m.siDate || today(),
+  dueDate: m.dueDate || null,
+  amountCents: toCents(m.amount),
+  taxType: m.taxType || 'N/A',
+  ewtRate: Number(m.ewtRate) || 0,
+  incomeAccountCode: m.incomeAccountCode || null,
+  billingStatementId: m.billingStatementId || null,
+  notes: m.notes || null,
+  status: statusOverride || m.status || 'Draft',
+});
+
 export default function ServiceInvoicesPage() {
+  const { userRecord } = usePermissions();
+  const user = userRecord?.email || '';
   const [invoices,  setInvoices]  = useState([]);
   const [contacts,  setContacts]  = useState([]);
   const [search,    setSearch]    = useState('');
@@ -88,11 +127,16 @@ export default function ServiceInvoicesPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({...EMPTY,siId:'',siDate:today()}); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    const u1 = onSnapshot(query(collection(db,'serviceInvoices'), orderBy('createdAt','desc')), s => setInvoices(s.docs.map(d=>({id:d.id,...d.data()}))));
-    const u2 = onSnapshot(query(collection(db,'contacts'), orderBy('name','asc')), s => setContacts(s.docs.map(d=>({id:d.id,...d.data()}))));
-    return () => { u1(); u2(); };
-  }, []);
+  const loadAll = async () => {
+    try {
+      const [sis, cts] = await Promise.all([serviceInvoicesApi.list(), listContacts()]);
+      setInvoices(sis.map(siFromApi));
+      setContacts(cts);
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
+  };
+  useEffect(() => { loadAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const kpis = useMemo(() => ({
     total:   invoices.length,
@@ -110,19 +154,16 @@ export default function ServiceInvoicesPage() {
     return a;
   }, [invoices, search, filterStatus]);
 
-  const genSiId = async (date) => nextServiceInvoiceId(date);
-
   const save = async (statusOverride) => {
     if (!modal?.contactName?.trim()) { showToast('Contact required.'); return; }
     setSaving(true);
     try {
-      const { isNew, id, ...rest } = modal;
-      const siId = isNew ? await genSiId(rest.siDate || today()) : (rest.siId || '');
-      const payload = { ...rest, siId, status: statusOverride||rest.status, balance: Number(rest.amount||0) - Number(rest.appliedAmount||0), updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
-      if (isNew) await addDoc(collection(db,'serviceInvoices'), { ...payload, appliedAmount:0, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||'' });
-      else       await updateDoc(doc(db,'serviceInvoices',id), payload);
+      const payload = siToApi(modal, statusOverride);
+      if (modal.isNew) await serviceInvoicesApi.create(payload); // server assigns the IS number
+      else             await serviceInvoicesApi.update(modal.id, payload);
       showToast('Invoice saved.'); setModal(null);
-    } catch(e) { showToast('Error: '+e.message); }
+      await loadAll();
+    } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     setSaving(false);
   };
 
@@ -131,14 +172,14 @@ export default function ServiceInvoicesPage() {
     setSaving(true);
     try {
       const { id, newStatus, rejectReason } = statusModal;
-      const email = auth.currentUser?.email||'';
-      const upd = { status:newStatus, updatedAt:serverTimestamp(), updatedBy:email };
-      if (newStatus==='Pending Approval') upd.reviewedBy = email;
-      if (newStatus==='Approved') upd.approvedBy = email;
+      const upd = { status:newStatus };
+      if (newStatus==='Pending Approval') upd.reviewedBy = user;
+      if (newStatus==='Approved') upd.approvedBy = user;
       if (rejectReason) upd.rejectReason = rejectReason;
-      await updateDoc(doc(db,'serviceInvoices',id), upd);
+      await serviceInvoicesApi.update(id, upd);
       showToast('Status updated.'); setStatusModal(null);
-    } catch(e) { showToast('Error: '+e.message); }
+      await loadAll();
+    } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     setSaving(false);
   };
 

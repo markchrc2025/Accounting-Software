@@ -1,11 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy, getDocs, where
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
 import ContactPicker from '../../../components/ContactPicker.jsx';
-import { nextBillingStatementId } from '../../../utils/documentIds.js';
+import { billingStatementsApi, listContacts, ApiError } from '../../../lib/api.js';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
 const BS_STATUSES = ['Draft','Pending Review','Pending Approval','Approved','Sent','Partial','Paid','Voided'];
 
@@ -74,7 +71,59 @@ const CSS = `
 const fmt = (n) => new Intl.NumberFormat('en-PH',{style:'currency',currency:'PHP'}).format(Number(n||0));
 const today = () => new Date().toISOString().slice(0,10);
 
+// API rows carry integer centavos; the UI thinks in pesos. bsFromApi also maps
+// bs_no → bsId so the rest of the component keeps its original field names.
+const toPesos = (c) => Number(c || 0) / 100;
+const toCents = (p) => Math.round(Number(p || 0) * 100);
+const bsFromApi = (r) => ({
+  id: r.id,
+  bsId: r.bsNo || '',
+  contactId: r.contactId || '',
+  contactName: r.contactName || '',
+  billingDate: r.billingDate || '',
+  dueDate: r.dueDate || '',
+  creditTerm: r.creditTerm ?? 30,
+  periodStart: r.periodStart || '',
+  periodEnd: r.periodEnd || '',
+  description: r.description || '',
+  grossAmount: toPesos(r.grossCents),
+  taxGroupName: r.taxGroupName || 'VAT',
+  totalVatInclusive: toPesos(r.totalVatInclusiveCents),
+  netDue: toPesos(r.netDueCents),
+  appliedAmount: toPesos(r.appliedCents),
+  balance: toPesos(r.balanceCents),
+  incomeAccount: r.incomeAccount || '',
+  lines: Array.isArray(r.lines) ? r.lines : [],
+  notes: r.notes || '',
+  status: r.status || 'Draft',
+  reviewedBy: r.reviewedBy || '',
+  approvedBy: r.approvedBy || '',
+  rejectReason: r.rejectReason || '',
+});
+// appliedCents is deliberately not sent: it belongs to the collections module,
+// and the server computes balance from netDue − applied.
+const bsToApi = (m, statusOverride) => ({
+  contactId: m.contactId && String(m.contactId).length === 36 ? m.contactId : null,
+  contactName: (m.contactName || '').trim(),
+  billingDate: m.billingDate || today(),
+  dueDate: m.dueDate || null,
+  creditTerm: Number(m.creditTerm) || 30,
+  periodStart: m.periodStart || null,
+  periodEnd: m.periodEnd || null,
+  description: m.description || null,
+  grossCents: toCents(m.grossAmount),
+  taxGroupName: m.taxGroupName || 'VAT',
+  totalVatInclusiveCents: toCents(m.totalVatInclusive),
+  netDueCents: toCents(m.netDue),
+  incomeAccount: m.incomeAccount || null,
+  lines: Array.isArray(m.lines) ? m.lines : [],
+  notes: m.notes || null,
+  status: statusOverride || m.status || 'Draft',
+});
+
 export default function BillingPage() {
+  const { userRecord } = usePermissions();
+  const user = userRecord?.email || '';
   const [statements, setStatements] = useState([]);
   const [contacts,   setContacts]   = useState([]);
   const [search,   setSearch]   = useState('');
@@ -92,11 +141,16 @@ export default function BillingPage() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
-  useEffect(() => {
-    const u1 = onSnapshot(query(collection(db,'billingStatements'), orderBy('createdAt','desc')), s => setStatements(s.docs.map(d=>({id:d.id,...d.data()}))));
-    const u2 = onSnapshot(query(collection(db,'contacts'), orderBy('name','asc')), s => setContacts(s.docs.map(d=>({id:d.id,...d.data()}))));
-    return () => { u1(); u2(); };
-  }, []);
+  const loadAll = async () => {
+    try {
+      const [sts, cts] = await Promise.all([billingStatementsApi.list(), listContacts()]);
+      setStatements(sts.map(bsFromApi));
+      setContacts(cts);
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
+  };
+  useEffect(() => { loadAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const kpis = useMemo(() => {
     const active = statements.filter(s => !['Voided'].includes(s.status));
@@ -138,13 +192,12 @@ export default function BillingPage() {
     if (!modal.contactName?.trim()) { showToast('Contact required.'); return; }
     setSaving(true);
     try {
-      const { isNew, id, ...rest } = modal;
-      const bsId = isNew ? await nextBillingStatementId(rest.billingDate || today()) : (rest.bsId || '');
-      const payload = { ...rest, bsId, status: statusOverride || rest.status, balance: Number(rest.netDue||0) - Number(rest.appliedAmount||0), updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
-      if (isNew) await addDoc(collection(db,'billingStatements'), { ...payload, appliedAmount:0, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||'' });
-      else       await updateDoc(doc(db,'billingStatements',id), payload);
+      const payload = bsToApi(modal, statusOverride);
+      if (modal.isNew) await billingStatementsApi.create(payload); // server assigns the BS number
+      else             await billingStatementsApi.update(modal.id, payload);
       showToast('Billing statement saved.'); setModal(null);
-    } catch(e) { showToast('Error: '+e.message); }
+      await loadAll();
+    } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     setSaving(false);
   };
 
@@ -153,21 +206,24 @@ export default function BillingPage() {
     setSaving(true);
     try {
       const { id, newStatus, rejectReason } = statusModal;
-      const email = auth.currentUser?.email||'';
-      const update = { status:newStatus, updatedAt:serverTimestamp(), updatedBy:email };
-      if (newStatus === 'Pending Approval') update.reviewedBy = email;
-      if (newStatus === 'Approved') update.approvedBy = email;
+      const update = { status:newStatus };
+      if (newStatus === 'Pending Approval') update.reviewedBy = user;
+      if (newStatus === 'Approved') update.approvedBy = user;
       if (rejectReason) update.rejectReason = rejectReason;
-      await updateDoc(doc(db,'billingStatements',id), update);
+      await billingStatementsApi.update(id, update);
       showToast('Status updated.'); setStatusModal(null);
-    } catch(e) { showToast('Error: '+e.message); }
+      await loadAll();
+    } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     setSaving(false);
   };
 
   const doVoid = (bs) => {
     askConfirm(`Void billing statement "${bs.bsId}"?`, async () => {
-      await updateDoc(doc(db,'billingStatements',bs.id), { status:'Voided', updatedAt:serverTimestamp() });
-      showToast('Voided.');
+      try {
+        await billingStatementsApi.update(bs.id, { status:'Voided' });
+        showToast('Voided.');
+        await loadAll();
+      } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     });
   };
 
