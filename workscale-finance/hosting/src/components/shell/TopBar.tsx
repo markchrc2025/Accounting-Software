@@ -96,7 +96,7 @@ export function TopBar({
             : <span className="text-white text-xs font-black leading-none">S</span>
           }
         </div>
-        <span className="text-[17px] font-bold tracking-tight text-[#1F2937]">ScaleBooks</span>
+        <span className="text-[17px] font-bold tracking-tight text-[#1F2937]">Sentire Books</span>
       </div>
 
       {/* ── Company selector ────────────────────────────────────────────── */}
@@ -120,7 +120,7 @@ export function TopBar({
               <span className="h-5 w-5 rounded-md bg-[#F97316] text-white text-[10px] font-black flex items-center justify-center flex-shrink-0">
                 S
               </span>
-              <span className="whitespace-nowrap">{companyName || 'Workscale Resources Inc.'}</span>
+              <span className="whitespace-nowrap">{companyName || 'Sentire Books'}</span>
             </button>
           </div>
         )}

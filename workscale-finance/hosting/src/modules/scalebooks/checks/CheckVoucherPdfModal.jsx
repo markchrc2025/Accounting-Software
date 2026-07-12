@@ -204,7 +204,7 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
         logoBottomY = y + imgH + 2;
       }
       reg(7.5);
-      pdf.text(profile.companyName || 'Workscale Resources Inc.', ML, logoBottomY + 3.5);
+      pdf.text(profile.companyName || 'Sentire Books', ML, logoBottomY + 3.5);
 
       // Document title
       bold(13);
@@ -433,7 +433,7 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
       // Body text
       reg(8.5);
       const body1 = `I/We hereby acknowledge receipt of the check(s) described in ${voucher?.voucherId || '—'},`;
-      const body2 = `issued by ${profile.companyName || 'Workscale Resources Inc.'} in good order and condition.`;
+      const body2 = `issued by ${profile.companyName || 'Sentire Books'} in good order and condition.`;
       pdf.text(body1, PW / 2, y + 16, { align: 'center' });
       pdf.text(body2, PW / 2, y + 21, { align: 'center' });
 
@@ -502,8 +502,8 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
                     <tr>
                       <td style={{ width:'160px', verticalAlign:'middle', border:'none', paddingBottom:6 }}>
                         {(profile.logoBase64 || profile.logoUrl)
-                          ? <><img src={profile.logoBase64 || profile.logoUrl} className="cvpdf-logo" alt="Logo" /><div className="cvpdf-co-name">{profile.companyName || 'Workscale Resources Inc.'}</div></>
-                          : <div className="cvpdf-co-name">{profile.companyName || 'Workscale Resources Inc.'}</div>
+                          ? <><img src={profile.logoBase64 || profile.logoUrl} className="cvpdf-logo" alt="Logo" /><div className="cvpdf-co-name">{profile.companyName || 'Sentire Books'}</div></>
+                          : <div className="cvpdf-co-name">{profile.companyName || 'Sentire Books'}</div>
                         }
                       </td>
                       <td style={{ textAlign:'center', verticalAlign:'middle', border:'none' }}>
@@ -622,7 +622,7 @@ export default function CheckVoucherPdfModal({ voucher, relatedChecks, bankAccou
                   <div className="cvpdf-receipt-title">Acknowledgement Receipt</div>
                   <div style={{ fontSize:'10px', lineHeight:1.7, marginBottom:6 }}>
                     I/We hereby acknowledge receipt of the check(s) described in <strong>{voucher?.voucherId || '—'}</strong>,
-                    issued by <strong>{profile.companyName || 'Workscale Resources Inc.'}</strong> in good order and condition.
+                    issued by <strong>{profile.companyName || 'Sentire Books'}</strong> in good order and condition.
                   </div>
                   <div style={{ fontSize:'10px', lineHeight:1.8 }}>
                     <div><strong>Check No(s):&nbsp;</strong>{checkNosDisplay || '—'}</div>

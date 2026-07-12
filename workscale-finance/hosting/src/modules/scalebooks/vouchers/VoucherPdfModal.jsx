@@ -163,7 +163,7 @@ export default function VoucherPdfModal({ voucher, onClose, autoDownload = false
         logoBottomY = y + imgH + 2;
       }
       reg(7.5);
-      pdf.text(profile.companyName || 'Workscale Resources Inc.', ML, logoBottomY + 3.5);
+      pdf.text(profile.companyName || 'Sentire Books', ML, logoBottomY + 3.5);
 
       // Document title (centred, bold, underlined)
       const typeStr = (TYPE_LABELS[voucher.voucherType] || voucher.voucherType || 'Payment Voucher').toUpperCase();
@@ -375,8 +375,8 @@ export default function VoucherPdfModal({ voucher, onClose, autoDownload = false
                     <tr>
                       <td style={{width:'160px',verticalAlign:'middle',border:'none',paddingBottom:6}}>
                         {(profile.logoBase64 || profile.logoUrl)
-                          ? <><img src={profile.logoBase64 || profile.logoUrl} className="vpdf-logo" alt="Logo" /><div className="vpdf-co-name">{profile.companyName || 'Workscale Resources Inc.'}</div></>
-                          : <div className="vpdf-co-name">{profile.companyName || 'Workscale Resources Inc.'}</div>
+                          ? <><img src={profile.logoBase64 || profile.logoUrl} className="vpdf-logo" alt="Logo" /><div className="vpdf-co-name">{profile.companyName || 'Sentire Books'}</div></>
+                          : <div className="vpdf-co-name">{profile.companyName || 'Sentire Books'}</div>
                         }
                       </td>
                       <td style={{textAlign:'center',verticalAlign:'middle',border:'none',paddingLeft:8,paddingRight:8}}>

@@ -205,7 +205,7 @@ function DashboardPageInner() {
 
       {/* ── Footer ──────────────────────────────────────────────────────────── */}
       <footer className="text-center text-[12px] text-[#9CA3AF] pb-4">
-        © 2026 ScaleBooks.{' '}
+        © 2026 Sentire Books.{' '}
         <span className="hover:underline cursor-pointer">Privacy</span>
         {' · '}
         <span className="hover:underline cursor-pointer">Security</span>

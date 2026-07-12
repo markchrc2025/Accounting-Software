@@ -462,7 +462,7 @@ export default function SettingsPage() {
         <div className="sp-card">
           <div className="sp-card-title">Company Details</div>
           <div className="grid2">
-            <div className="field col2"><label>Company Name *</label><input value={profileForm.companyName} onChange={e=>up('companyName',e.target.value)} placeholder="Workscale Resources Inc." /></div>
+            <div className="field col2"><label>Company Name *</label><input value={profileForm.companyName} onChange={e=>up('companyName',e.target.value)} placeholder="Your Company, Inc." /></div>
             <div className="field col2"><label>Address</label><textarea rows={2} value={profileForm.companyAddress} onChange={e=>up('companyAddress',e.target.value)} /></div>
             <div className="field"><label>City</label><input value={profileForm.city} onChange={e=>up('city',e.target.value)} placeholder="e.g. Makati City" /></div>
             <div className="field"><label>Zip Code</label><input value={profileForm.zipCode} onChange={e=>up('zipCode',e.target.value)} placeholder="e.g. 1200" /></div>
@@ -1369,7 +1369,7 @@ export default function SettingsPage() {
       <div className="sp-sidebar">
         <div className="sp-sb-hdr">
           <h2>Settings</h2>
-          <p>Workscale Finance Portal</p>
+          <p>Sentire Books</p>
         </div>
         {NAV.map(group => (
           <div key={group.group}>

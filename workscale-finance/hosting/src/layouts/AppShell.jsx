@@ -38,7 +38,7 @@ export default function AppShell({ children }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'space-between', padding: collapsed ? '10px 0 18px' : '10px 10px 18px' }}>
           {!collapsed && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div style={{ width: 36, height: 36, borderRadius: 10, background: '#f97316', display: 'grid', placeItems: 'center', fontWeight: 800, fontSize: 16, flexShrink: 0 }}>W</div>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: '#f97316', display: 'grid', placeItems: 'center', fontWeight: 800, fontSize: 16, flexShrink: 0 }}>S</div>
               <div>
                 <div style={{ fontWeight: 900, letterSpacing: '.02em' }}>WORKSCALE</div>
                 <small style={{ color: '#cbd5e1', fontSize: 11 }}>FINANCE PORTAL</small>
@@ -46,7 +46,7 @@ export default function AppShell({ children }) {
             </div>
           )}
           {collapsed && (
-            <div style={{ width: 36, height: 36, borderRadius: 10, background: '#f97316', display: 'grid', placeItems: 'center', fontWeight: 800, fontSize: 16 }}>W</div>
+            <div style={{ width: 36, height: 36, borderRadius: 10, background: '#f97316', display: 'grid', placeItems: 'center', fontWeight: 800, fontSize: 16 }}>S</div>
           )}
           {!collapsed && (
             <button onClick={() => setCollapsed(true)} title="Collapse sidebar" style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 18, padding: '4px 6px', borderRadius: 6 }}>☰</button>
