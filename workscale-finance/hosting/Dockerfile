@@ -1,27 +1,34 @@
 # Sentire Books portal (the full-featured UI, formerly Firebase-hosted) —
 # build the static Vite bundle, serve it with nginx.
 #
-# Built with the REPO ROOT as the Docker context (Sliplane's default).
+# CONTEXT-AGNOSTIC: platforms differ on what they pass as the Docker build
+# context (the repo root vs the directory containing this Dockerfile). The
+# Sliplane deploys showed the context arriving WITHOUT the workscale-finance/
+# prefix, so this build copies whatever context it receives and locates the
+# app inside it — it works either way.
 #
-# IMPORTANT: Vite inlines VITE_* variables at BUILD time, not runtime. Sliplane
-# passes service env vars to the build, so set VITE_API_BASE_URL in the service's
-# Environment Variables — it is a PUBLIC value (the API origin), safe to bake in.
+# IMPORTANT: Vite inlines VITE_* variables at BUILD time, not runtime. Set
+# VITE_API_BASE_URL in the Sliplane service's Environment Variables — it is a
+# PUBLIC value (the API origin), safe to bake in. There is deliberately NO
+# default: the build FAILS if it's unset rather than shipping a bundle that
+# points the login flow at a non-existent host.
 #
-# There is deliberately NO default: shipping a placeholder produces a bundle that
-# points the login flow at a non-existent host. The build FAILS if it's unset.
-#
-# Sliplane service settings (this replaces the old scalebooks/apps/web service):
+# Sliplane service settings:
 #   Dockerfile path : workscale-finance/hosting/Dockerfile
-#   (leave the build context / base directory at the repo root — the default)
 #   Env / build arg : VITE_API_BASE_URL = your API origin
 #                     (e.g. https://sentire-books-api.sliplane.app)
 
 # ---- build stage ----
 FROM node:20-slim AS build
+COPY . /ctx
+RUN set -e; \
+    if   [ -f /ctx/workscale-finance/hosting/package.json ]; then src=/ctx/workscale-finance/hosting; \
+    elif [ -f /ctx/hosting/package.json ];                   then src=/ctx/hosting; \
+    elif [ -f /ctx/package.json ];                           then src=/ctx; \
+    else echo "ERROR: package.json not found in the build context — expected the repo root or workscale-finance/hosting as the context." >&2; exit 1; fi; \
+    mkdir -p /app && cp -a "$src/." /app/
 WORKDIR /app
-COPY workscale-finance/hosting/package.json workscale-finance/hosting/package-lock.json ./
 RUN npm ci
-COPY workscale-finance/hosting/ ./
 
 ARG VITE_API_BASE_URL=""
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
@@ -37,8 +44,7 @@ RUN npm run build
 
 # ---- serve stage ----
 FROM nginx:1.27-alpine
-# nginx.conf comes via the build stage (it was copied in with the source),
-# so this stage never reads the build context — one less path to misconfigure.
+# Everything comes via the build stage — this stage never reads the context.
 COPY --from=build /app/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
