@@ -6,6 +6,7 @@ import {
   listVouchers, getVoucher, createVoucherDraft, updateVoucher, deleteVoucher as apiDeleteVoucher,
   transitionVoucher, voidVoucher as apiVoidVoucher,
   listAccounts, listContacts, createJournalEntry, ApiError,
+  taxRatesApi, taxGroupsApi, purposeCategoriesApi,
 } from '../../../lib/api.js';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
@@ -293,10 +294,11 @@ export default function CheckRegistryPage() {
     loadChecks(); loadCheckbooks(); loadVouchers();
     listAccounts().then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })))).catch(()=>{});
     listContacts().then(setContacts).catch(()=>{});
-    // Tax rates/groups + purpose categories arrive with the tax subsystem
-    // (Phase 4); loans with the loans domain (Phase 6). Line tax config still
-    // round-trips via voucher-line meta meanwhile.
-    setTaxRates([]); setTaxGroups([]); setPurposeCategories([]); setLoans([]);
+    taxRatesApi.list().then(rs => setTaxRates(rs.map(r => ({ ...r, rate: Number(r.rate) })).filter(r => r.isActive !== false))).catch(()=>{});
+    taxGroupsApi.list().then(gs => setTaxGroups(gs.filter(g => g.isActive !== false))).catch(()=>{});
+    purposeCategoriesApi.list().then(setPurposeCategories).catch(()=>{});
+    // Loans arrive with the loans domain (Phase 6).
+    setLoans([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

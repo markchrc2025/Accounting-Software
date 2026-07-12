@@ -6,4 +6,5 @@ export * from "./contacts";
 export * from "./vouchers";
 export * from "./reports";
 export * from "./operations";
+export * from "./reference";
 export * from "./tax/trainTax";
