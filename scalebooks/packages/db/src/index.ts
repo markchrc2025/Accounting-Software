@@ -54,4 +54,5 @@ export { schema };
 export type Db = typeof db;
 export * from "./schema";
 export * from "./context";
+export * from "./auth";
 export * from "./demo";

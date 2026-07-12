@@ -1,6 +1,6 @@
 import type { Context, Next } from "hono";
-import { createRemoteJWKSet, jwtVerify } from "jose";
 import { getUserContext, getUserWorkspaces, type UserRole } from "@scalebooks/db";
+import { verifyAppToken } from "./tokens";
 
 /**
  * Authenticated caller resolved for a SPECIFIC workspace. `orgId`/`role` come
@@ -31,33 +31,20 @@ declare module "hono" {
   }
 }
 
-let _jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
-function getJwks() {
-  const url = process.env.AUTH_JWKS_URL;
-  if (!url) return null;
-  if (!_jwks) _jwks = createRemoteJWKSet(new URL(url));
-  return _jwks;
-}
-
 /** Verify the bearer token (prod) or read a dev header (local only). */
 async function resolveIdentity(c: Context): Promise<{ uid: string; email: string } | null> {
-  const jwks = getJwks();
-  if (jwks) {
+  // Production path: verify our own locally-signed access token.
+  if (process.env.AUTH_JWT_SECRET) {
     const authz = c.req.header("authorization") ?? "";
     const token = authz.startsWith("Bearer ") ? authz.slice(7) : "";
     if (!token) return null;
-    try {
-      const issuer = process.env.AUTH_ISSUER;
-      const { payload } = await jwtVerify(token, jwks, issuer ? { issuer } : undefined);
-      if (!payload.sub) return null;
-      return { uid: payload.sub, email: typeof payload.email === "string" ? payload.email : "" };
-    } catch {
-      return null;
-    }
+    const claims = await verifyAppToken(token);
+    if (!claims) return null;
+    return { uid: claims.sub, email: claims.email };
   }
 
-  // Dev-only fallback when no IdP is configured. NEVER set AUTH_DEV_BYPASS=true
-  // in production — it trusts an unauthenticated header.
+  // Dev-only fallback when no signing secret is configured. NEVER set
+  // AUTH_DEV_BYPASS=true in production — it trusts an unauthenticated header.
   if (process.env.AUTH_DEV_BYPASS === "true") {
     const uid = c.req.header("x-user-id");
     if (!uid) return null;
@@ -92,8 +79,8 @@ export async function requireAuth(c: Context, next: Next) {
     return c.json({ error: "unauthenticated", detail: "Token has no email claim" }, 401);
   }
 
-  // Authenticize authenticates; Sentire owns its users. Admit by verified email
-  // against the app_users allowlist — never by the provider's internal id.
+  // The token proves the email; Sentire owns its users. Admit by verified email
+  // against the app_users allowlist — never by the token's subject id.
   const requestedOrg = c.req.header("x-org-id");
   let ctx;
   if (requestedOrg) {

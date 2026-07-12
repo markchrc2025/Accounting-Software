@@ -5,8 +5,8 @@ export const USER_ROLES = ["maker", "verifier", "approver", "poster", "admin"] a
 export type UserRoleName = (typeof USER_ROLES)[number];
 
 /**
- * Invite a user onto the workspace allowlist. Authenticize authenticates them;
- * Sentire admits them iff their verified email matches a row like this. Email is
+ * Invite a user onto the workspace allowlist. Sign-in proves their email;
+ * Sentire admits them iff that email matches a row like this. Email is
  * normalized to lowercase (the allowlist key is case-insensitive).
  */
 export const zInviteUser = z.object({
