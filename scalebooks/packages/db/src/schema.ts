@@ -524,6 +524,174 @@ export const bankReconciliations = pgTable(
   (t) => [unique("bank_reconciliations_org_no_key").on(t.orgId, t.reconNo)],
 );
 
+// ── Billing / AR (0015) ──
+// balance_cents / unapplied_cents are Postgres GENERATED columns — declared
+// plainly here and never written by the API, so selects return them while
+// inserts/updates leave the computation to the database.
+export const billingStatements = pgTable(
+  "billing_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    bsNo: text("bs_no").notNull(),
+    contactId: uuid("contact_id").references(() => contacts.id),
+    contactName: text("contact_name").notNull(),
+    billingDate: date("billing_date").notNull(),
+    dueDate: date("due_date"),
+    creditTerm: integer("credit_term").notNull().default(30),
+    periodStart: date("period_start"),
+    periodEnd: date("period_end"),
+    description: text("description"),
+    grossCents: bigint("gross_cents", { mode: "number" }).notNull().default(0),
+    taxGroupName: text("tax_group_name").notNull().default("VAT"),
+    totalVatInclusiveCents: bigint("total_vat_inclusive_cents", { mode: "number" })
+      .notNull()
+      .default(0),
+    netDueCents: bigint("net_due_cents", { mode: "number" }).notNull().default(0),
+    appliedCents: bigint("applied_cents", { mode: "number" }).notNull().default(0),
+    balanceCents: bigint("balance_cents", { mode: "number" }),
+    incomeAccount: text("income_account"),
+    lines: jsonb("lines"),
+    notes: text("notes"),
+    status: text("status").notNull().default("Draft"),
+    reviewedBy: text("reviewed_by"),
+    approvedBy: text("approved_by"),
+    rejectReason: text("reject_reason"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("billing_statements_org_bs_no_key").on(t.orgId, t.bsNo),
+    index("billing_statements_org_date_idx").on(t.orgId, t.billingDate),
+  ],
+);
+
+export const serviceInvoices = pgTable(
+  "service_invoices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    siNo: text("si_no").notNull(),
+    contactId: uuid("contact_id").references(() => contacts.id),
+    contactName: text("contact_name").notNull(),
+    siDate: date("si_date").notNull(),
+    dueDate: date("due_date"),
+    amountCents: bigint("amount_cents", { mode: "number" }).notNull().default(0),
+    taxType: text("tax_type").notNull().default("N/A"),
+    ewtRate: numeric("ewt_rate", { precision: 9, scale: 4 }).notNull().default("0"),
+    incomeAccountCode: text("income_account_code"),
+    billingStatementId: text("billing_statement_id"),
+    appliedCents: bigint("applied_cents", { mode: "number" }).notNull().default(0),
+    balanceCents: bigint("balance_cents", { mode: "number" }),
+    notes: text("notes"),
+    status: text("status").notNull().default("Draft"),
+    reviewedBy: text("reviewed_by"),
+    approvedBy: text("approved_by"),
+    rejectReason: text("reject_reason"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("service_invoices_org_si_no_key").on(t.orgId, t.siNo),
+    index("service_invoices_org_date_idx").on(t.orgId, t.siDate),
+  ],
+);
+
+export const collections = pgTable(
+  "collections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    collectionNo: text("collection_no").notNull(),
+    contactId: uuid("contact_id").references(() => contacts.id),
+    contactName: text("contact_name").notNull(),
+    collectionDate: date("collection_date").notNull(),
+    amountReceivedCents: bigint("amount_received_cents", { mode: "number" })
+      .notNull()
+      .default(0),
+    appliedCents: bigint("applied_cents", { mode: "number" }).notNull().default(0),
+    unappliedCents: bigint("unapplied_cents", { mode: "number" }),
+    method: text("method").notNull().default("Cash"),
+    referenceNo: text("reference_no"),
+    billingStatementId: text("billing_statement_id"),
+    siId: text("si_id"),
+    notes: text("notes"),
+    status: text("status").notNull().default("Unposted"),
+    postedBy: text("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true, mode: "string" }),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("collections_org_collection_no_key").on(t.orgId, t.collectionNo),
+    index("collections_org_date_idx").on(t.orgId, t.collectionDate),
+  ],
+);
+
+export const paymentSchedules = pgTable(
+  "payment_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    scheduleNo: text("schedule_no").notNull(),
+    title: text("title").notNull(),
+    contactId: uuid("contact_id").references(() => contacts.id),
+    contactName: text("contact_name"),
+    category: text("category"),
+    frequency: text("frequency").notNull().default("Monthly"),
+    amountCents: bigint("amount_cents", { mode: "number" }).notNull().default(0),
+    dueDate: date("due_date"),
+    startDate: date("start_date"),
+    endDate: date("end_date"),
+    dueDay: integer("due_day").notNull().default(0),
+    status: text("status").notNull().default("Active"),
+    notes: text("notes"),
+    defaultExpenseAccountCode: text("default_expense_account_code"),
+    defaultTaxRateId: text("default_tax_rate_id"),
+    paymentMethod: text("payment_method"),
+    pmConfig: jsonb("pm_config"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("payment_schedules_org_schedule_no_key").on(t.orgId, t.scheduleNo)],
+);
+
+export const schedulePayments = pgTable(
+  "schedule_payments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    scheduleId: uuid("schedule_id").references(() => paymentSchedules.id, {
+      onDelete: "set null",
+    }),
+    scheduleTitle: text("schedule_title"),
+    dueDate: date("due_date"),
+    payDate: date("pay_date").notNull(),
+    amountCents: bigint("amount_cents", { mode: "number" }).notNull().default(0),
+    method: text("method"),
+    bank: text("bank"),
+    checkId: text("check_id"),
+    checkNumber: text("check_number"),
+    checkRegisterId: text("check_register_id"),
+    voucherNo: text("voucher_no"),
+    voucherDocId: uuid("voucher_doc_id"),
+    notes: text("notes"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("schedule_payments_org_schedule_idx").on(t.orgId, t.scheduleId)],
+);
+
 export type Organization = typeof organizations.$inferSelect;
 export type Account = typeof accounts.$inferSelect;
 export type JournalEntry = typeof journalEntries.$inferSelect;

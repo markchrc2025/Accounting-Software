@@ -20,6 +20,13 @@ import {
   bankTransactionRoutes,
   bankReconciliationRoutes,
 } from "./routes/referenceData";
+import {
+  billingStatementRoutes,
+  serviceInvoiceRoutes,
+  collectionRoutes,
+  paymentScheduleRoutes,
+  schedulePaymentRoutes,
+} from "./routes/billingAr";
 
 const app = new Hono();
 
@@ -73,6 +80,11 @@ app.route("/purpose-categories", purposeCategoryRoutes);
 app.route("/bank-balances", bankBalanceRoutes);
 app.route("/bank-transactions", bankTransactionRoutes);
 app.route("/bank-reconciliations", bankReconciliationRoutes);
+app.route("/billing-statements", billingStatementRoutes);
+app.route("/service-invoices", serviceInvoiceRoutes);
+app.route("/collections", collectionRoutes);
+app.route("/payment-schedules", paymentScheduleRoutes);
+app.route("/schedule-payments", schedulePaymentRoutes);
 
 // Render (and most PaaS) inject PORT; fall back to API_PORT for local dev.
 const port = Number(process.env.PORT ?? process.env.API_PORT ?? 8787);

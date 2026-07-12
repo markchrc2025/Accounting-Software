@@ -1,11 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import {
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, query, orderBy
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
 import ContactPicker from '../../../components/ContactPicker.jsx';
-import { nextCollectionId } from '../../../utils/documentIds.js';
+import { collectionsApi, listContacts, ApiError } from '../../../lib/api.js';
+import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
 const COLL_STATUSES = ['Unposted','Posted','Voided'];
 const STATUS_STYLES = {
@@ -62,7 +59,45 @@ const today = () => new Date().toISOString().slice(0,10);
 
 const EMPTY = { isNew:true, collectionId:'', contactId:'', contactName:'', collectionDate:'', amountReceived:0, appliedAmount:0, unappliedAmount:0, method:'Cash', referenceNo:'', billingStatementId:'', siId:'', status:'Unposted', notes:'' };
 
+// API rows carry integer centavos; the UI thinks in pesos. colFromApi keeps the
+// original field names (collectionNo→collectionId, …) the render code expects.
+const toPesos = (c) => Number(c || 0) / 100;
+const toCents = (p) => Math.round(Number(p || 0) * 100);
+const colFromApi = (r) => ({
+  id: r.id,
+  collectionId: r.collectionNo || '',
+  contactId: r.contactId || '',
+  contactName: r.contactName || '',
+  collectionDate: r.collectionDate || '',
+  amountReceived: toPesos(r.amountReceivedCents),
+  appliedAmount: toPesos(r.appliedCents),
+  unappliedAmount: toPesos(r.unappliedCents),
+  method: r.method || 'Cash',
+  referenceNo: r.referenceNo || '',
+  billingStatementId: r.billingStatementId || '',
+  siId: r.siId || '',
+  status: r.status || 'Unposted',
+  notes: r.notes || '',
+  postedBy: r.postedBy || '',
+});
+// The server computes unapplied from received − applied.
+const colToApi = (m) => ({
+  contactId: m.contactId && String(m.contactId).length === 36 ? m.contactId : null,
+  contactName: (m.contactName || '').trim(),
+  collectionDate: m.collectionDate || today(),
+  amountReceivedCents: toCents(m.amountReceived),
+  appliedCents: toCents(m.appliedAmount),
+  method: m.method || 'Cash',
+  referenceNo: m.referenceNo || null,
+  billingStatementId: m.billingStatementId || null,
+  siId: m.siId || null,
+  status: m.status || 'Unposted',
+  notes: m.notes || null,
+});
+
 export default function CollectionsPage() {
+  const { userRecord } = usePermissions();
+  const user = userRecord?.email || '';
   const [collections, setCollections] = useState([]);
   const [contacts,    setContacts]    = useState([]);
   const [search,      setSearch]      = useState('');
@@ -83,11 +118,16 @@ export default function CollectionsPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({...EMPTY,collectionId:'',collectionDate:today()}); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    const u1 = onSnapshot(query(collection(db,'collections'), orderBy('createdAt','desc')), s => setCollections(s.docs.map(d=>({id:d.id,...d.data()}))));
-    const u2 = onSnapshot(query(collection(db,'contacts'), orderBy('name','asc')), s => setContacts(s.docs.map(d=>({id:d.id,...d.data()}))));
-    return () => { u1(); u2(); };
-  }, []);
+  const loadAll = async () => {
+    try {
+      const [cols, cts] = await Promise.all([collectionsApi.list(), listContacts()]);
+      setCollections(cols.map(colFromApi));
+      setContacts(cts);
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
+  };
+  useEffect(() => { loadAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const kpis = useMemo(() => ({
     total:     collections.length,
@@ -111,28 +151,32 @@ export default function CollectionsPage() {
     if (!modal?.contactName?.trim()) { showToast('Contact required.'); return; }
     setSaving(true);
     try {
-      const { isNew, id, ...rest } = modal;
-      const collectionId = isNew ? await nextCollectionId(rest.collectionDate || today()) : (rest.collectionId || '');
-      const unapplied = Number(rest.amountReceived||0) - Number(rest.appliedAmount||0);
-      const payload = { ...rest, collectionId, unappliedAmount: unapplied, updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
-      if (isNew) await addDoc(collection(db,'collections'), { ...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||'' });
-      else       await updateDoc(doc(db,'collections',id), payload);
+      const payload = colToApi(modal);
+      if (modal.isNew) await collectionsApi.create(payload); // server assigns the COL number
+      else             await collectionsApi.update(modal.id, payload);
       showToast('Collection saved.'); setModal(null);
-    } catch(e) { showToast('Error: '+e.message); }
+      await loadAll();
+    } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     setSaving(false);
   };
 
   const doPost = (c) => {
     askConfirm(`Post collection "${c.collectionId}"? This will mark it as Posted.`, async () => {
-      await updateDoc(doc(db,'collections',c.id), { status:'Posted', postedBy:auth.currentUser?.email||'', postedAt:serverTimestamp(), updatedAt:serverTimestamp() });
-      showToast('Posted.');
+      try {
+        await collectionsApi.update(c.id, { status:'Posted', postedBy:user, postedAt:new Date().toISOString() });
+        showToast('Posted.');
+        await loadAll();
+      } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     });
   };
 
   const doVoid = (c) => {
     askConfirm(`Void collection "${c.collectionId}"?`, async () => {
-      await updateDoc(doc(db,'collections',c.id), { status:'Voided', updatedAt:serverTimestamp() });
-      showToast('Voided.');
+      try {
+        await collectionsApi.update(c.id, { status:'Voided' });
+        showToast('Voided.');
+        await loadAll();
+      } catch(e) { showToast('Error: '+(e instanceof ApiError ? e.detail : e.message)); }
     });
   };
 

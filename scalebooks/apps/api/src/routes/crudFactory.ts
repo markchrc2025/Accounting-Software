@@ -28,14 +28,24 @@ export interface CrudOptions {
   orderBy?: { column: AnyColumn; dir?: "asc" | "desc" }[];
   /** Stamp created_by from the caller (default true; table must have the column). */
   stampCreatedBy?: boolean;
-  /** Server-assigned document number: { field, prefix } → PREFIX{YYYYMM}-#### when absent. */
-  docNo?: { field: string; prefix: string };
+  /**
+   * Server-assigned document number: { field, prefix } → PREFIX{YYYYMM}-####
+   * when absent. When dateField names a YYYY-MM-DD column in the payload, the
+   * period comes from the document's own date instead of "now".
+   */
+  docNo?: { field: string; prefix: string; dateField?: string };
   /** Mutations require the admin role (reads stay open to members). */
   adminWrites?: boolean;
 }
 
-async function nextDocNo(tx: Tx, orgId: string, prefix: string): Promise<string> {
-  const now = new Date();
+async function nextDocNo(
+  tx: Tx,
+  orgId: string,
+  prefix: string,
+  docDate?: string,
+): Promise<string> {
+  const parsed = docDate ? new Date(`${docDate}T00:00:00Z`) : new Date();
+  const now = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
   const periodKey = `${prefix}${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   const counter = (await tx.execute(sql`
     INSERT INTO document_counters (org_id, period_key, seq)
@@ -97,7 +107,13 @@ export function makeCrudRoutes(opts: CrudOptions): Hono {
         async (tx) => {
           const values: Record<string, unknown> = { ...input, orgId: auth.orgId };
           if (opts.docNo && !values[opts.docNo.field]) {
-            values[opts.docNo.field] = await nextDocNo(tx, auth.orgId, opts.docNo.prefix);
+            const raw = opts.docNo.dateField ? values[opts.docNo.dateField] : undefined;
+            values[opts.docNo.field] = await nextDocNo(
+              tx,
+              auth.orgId,
+              opts.docNo.prefix,
+              typeof raw === "string" ? raw : undefined,
+            );
           }
           if (opts.stampCreatedBy !== false && hasColumn("createdBy")) {
             values.createdBy = auth.userId;
