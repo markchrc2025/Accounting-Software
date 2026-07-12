@@ -1,11 +1,10 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
-  collection, query, orderBy, onSnapshot,
-  addDoc, updateDoc, doc, serverTimestamp, deleteDoc
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
-import { nextJournalEntryId, nextAccrualJEId } from '../../../utils/documentIds.js';
+  listJournalEntries, createJournalEntry, updateJournalEntry, deleteJournalEntry as apiDeleteJE,
+  transitionJournalEntry, reverseJournalEntry as apiReverseJE,
+  listAccounts, listContacts, ApiError,
+} from '../../../lib/api.js';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
@@ -13,6 +12,34 @@ import ContactPicker from '../../../components/ContactPicker.jsx';
 const JE_TYPES = ['Manual','Adjusting','Accrual','Closing','Reversing'];
 const PAGE_SIZES = [20, 50, 100];
 const uid = () => Math.random().toString(36).slice(2,10).toUpperCase();
+
+// ── API status enum <-> the UI's display labels ───────────────
+const STATUS_LABEL = {
+  draft:'Draft', pending_review:'Pending Review', pending_approval:'Pending Approval',
+  for_clearing:'For Clearing', cleared:'Cleared', for_posting:'For Posting',
+  posted:'Posted', rejected:'Rejected', voided:'Voided', reversed:'Reversed',
+};
+const LABEL_STATUS = Object.fromEntries(Object.entries(STATUS_LABEL).map(([k,v])=>[v,k]));
+
+// API entry row -> the shape this screen renders (pesos, labels, flat lines).
+const fromApi = (e) => ({
+  id: e.id,
+  jeId: e.entryNo,
+  date: e.entryDate,
+  description: e.memo || '',
+  type: e.entryType || 'Manual',
+  reference: e.reference || '',
+  status: STATUS_LABEL[e.status] || e.status,
+  totalDebit: (e.totalCents ?? 0) / 100,
+  totalCredit: (e.totalCents ?? 0) / 100,
+  createdBy: e.createdByEmail || '',
+  lines: (e.lines || []).map(l => ({
+    contactId: l.contactId || '', contactName: l.contactName || '',
+    accountId: l.accountId, accountCode: l.accountCode || '', accountName: l.accountName || '',
+    description: l.description || '',
+    debit: (l.debitCents ?? 0) / 100, credit: (l.creditCents ?? 0) / 100,
+  })),
+});
 
 /* Comma-formatted amount input — shows commas when blurred, raw value when editing */
 function AmountInput({ value, onChange }) {
@@ -157,19 +184,20 @@ export default function JournalPage() {
   const showToast = msg => { setToast(msg); setTimeout(()=>setToast(''),3000); };
   const askConfirm = (message, onConfirm) => setConfirmModal({ message, onConfirm });
 
-  useEffect(() => {
-    return onSnapshot(
-      query(collection(db,'journalEntries'), orderBy('date','desc')),
-      snap => { setEntries(snap.docs.map(d=>({id:d.id,...d.data()}))); setPage(1); }
-    );
+  const loadEntries = useCallback(async () => {
+    try {
+      const rows = await listJournalEntries({ limit: 500 });
+      setEntries(rows.map(fromApi));
+    } catch (e) {
+      showToast(`Couldn't load entries: ${e instanceof ApiError ? e.detail : e.message}`);
+    }
   }, []);
 
-  useEffect(() => {
-    return onSnapshot(query(collection(db,'accounts'), orderBy('code')), s => setAccounts(s.docs.map(d=>({id:d.id,...d.data()}))));
-  }, []);
+  useEffect(() => { loadEntries().then(()=>setPage(1)); }, [loadEntries]);
 
   useEffect(() => {
-    return onSnapshot(query(collection(db,'contacts'), orderBy('name')), s => setContacts(s.docs.map(d=>({id:d.id,...d.data()}))));
+    listAccounts().then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })))).catch(()=>{});
+    listContacts().then(rows => setContacts(rows)).catch(()=>{});
   }, []);
 
   /* ── Filter ────────────────────────────────────────────────── */
@@ -220,139 +248,105 @@ export default function JournalPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); openNew(); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Save ──────────────────────────────────────────────────── */
+  /* ── Save (server assigns the number; accruals auto-create their reversal) ── */
+  const apiLines = (validLines) => validLines.map(l => ({
+    accountId: l.accountId || (accounts.find(a => a.code === l.accountCode)?.id),
+    debitCents: Math.round((parseFloat(l.debit) || 0) * 100),
+    creditCents: Math.round((parseFloat(l.credit) || 0) * 100),
+    contactId: l.contactId || undefined,
+    description: l.description || undefined,
+  }));
+
   async function saveJE(form) {
     setSaving(true);
     try {
-      const validLines = lines.filter(l=>l.accountCode||(parseFloat(l.debit)>0)||(parseFloat(l.credit)>0));
+      const validLines = lines.filter(l => (parseFloat(l.debit) > 0) || (parseFloat(l.credit) > 0));
       const totalDebit  = validLines.reduce((s,l)=>s+(parseFloat(l.debit)||0),0);
       const totalCredit = validLines.reduce((s,l)=>s+(parseFloat(l.credit)||0),0);
       if (Math.abs(totalDebit-totalCredit)>0.005) { alert('Debits must equal Credits before saving.'); setSaving(false); return; }
-      const isNewAccrual = !form.id && form.type === 'Accrual';
-      const jeId = form.id ? (form.jeId||'') : (form.jeId || (isNewAccrual ? await nextAccrualJEId() : await nextJournalEntryId(form.date)));
-      const savedLines = validLines.map(l=>({contactId:l.contactId||'',contactName:l.contactName||'',accountCode:l.accountCode||'',accountName:l.accountName||'',description:l.description||'',debit:parseFloat(l.debit)||0,credit:parseFloat(l.credit)||0}));
-      const payload = {
-        jeId, date: form.date||'', description: form.description||'',
-        type: form.type||'Manual', reference: form.reference||'',
-        status: form.status||'Draft',
-        lines: savedLines,
-        totalDebit, totalCredit,
-        updatedAt: serverTimestamp(), updatedBy: auth.currentUser?.email||'',
-      };
+      const payload = apiLines(validLines);
+      if (payload.some(l => !l.accountId)) { showToast('Every line with an amount needs an account.'); setSaving(false); return; }
+
       if (form.id) {
-        await updateDoc(doc(db,'journalEntries',form.id), payload);
+        await updateJournalEntry(form.id, {
+          entryDate: form.date, memo: form.description || null,
+          entryType: form.type || 'Manual', reference: form.reference || null,
+          lines: payload,
+        });
         showToast('JE updated.');
       } else {
-        await addDoc(collection(db,'journalEntries'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
-        if (isNewAccrual) {
-          // Compute 1st of the following month as the reversal date
-          const [yr, mo] = (form.date||new Date().toISOString().slice(0,10)).split('-').map(Number);
-          const revYear  = mo === 12 ? yr + 1 : yr;
-          const revMonth = mo === 12 ? 1 : mo + 1;
-          const reversalDate = `${revYear}-${String(revMonth).padStart(2,'0')}-01`;
-          const revJeId = await nextAccrualJEId();
-          const reversalLines = savedLines.map(l=>({...l, debit:l.credit, credit:l.debit}));
-          await addDoc(collection(db,'journalEntries'), {
-            jeId: revJeId,
-            date: reversalDate,
-            description: `Accrual Reversal of ${jeId}`,
-            type: 'Reversing',
-            reference: jeId,
-            status: 'Draft',
-            lines: reversalLines,
-            totalDebit: totalCredit,
-            totalCredit: totalDebit,
-            accrualReversalOf: jeId,
-            createdAt: serverTimestamp(), createdBy: auth.currentUser?.email||'',
-            updatedAt: serverTimestamp(), updatedBy: auth.currentUser?.email||'',
-          });
-          showToast(`Accrual JE ${jeId} saved. Auto-reversal ${revJeId} created for ${reversalDate}.`);
+        const res = await createJournalEntry({
+          entryDate: form.date, memo: form.description || undefined,
+          entryType: form.type || 'Manual', reference: form.reference || undefined,
+          post: false, lines: payload,
+        });
+        if (res.accrualReversal) {
+          showToast(`Accrual JE ${res.entryNo} saved. Auto-reversal ${res.accrualReversal.entryNo} created for ${res.accrualReversal.entryDate}.`);
         } else {
-          showToast('JE saved as draft.');
+          showToast(`JE ${res.entryNo} saved as draft.`);
         }
       }
       setModal(null);
-    } catch(e) { console.error(e); alert('Save failed.'); }
+      await loadEntries();
+    } catch(e) {
+      console.error(e);
+      alert(e instanceof ApiError ? e.detail : 'Save failed.');
+    }
     setSaving(false);
   }
 
-  async function postEntry(id) {
-    await updateDoc(doc(db,'journalEntries',id),{status:'Pending Review',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
-    showToast('Submitted for approval.');
+  /* ── Workflow transitions (server enforces the whitelist + role gates) ────── */
+  async function moveStatus(id, to, doneMsg) {
+    try {
+      await transitionJournalEntry(id, to);
+      showToast(doneMsg);
+      await loadEntries();
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.detail : e.message);
+    }
   }
+  const postEntry   = (id) => moveStatus(id, 'pending_review', 'Submitted for approval.');
+  const clearEntry  = (id) => moveStatus(id, 'cleared', 'Journal Entry cleared.');
+  const requestPost = (id) => moveStatus(id, 'for_posting', 'Submitted for posting.');
+  const approvePost = (id) => moveStatus(id, 'posted', 'Journal Entry posted.');
 
-  async function clearEntry(id) {
-    await updateDoc(doc(db,'journalEntries',id),{status:'Cleared',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
-    showToast('Journal Entry cleared.');
-  }
-
-  async function requestPost(id) {
-    await updateDoc(doc(db,'journalEntries',id),{status:'For Posting',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
-    showToast('Submitted for posting.');
-  }
-
-  async function bulkSubmitForApproval() {
-    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'Draft'));
-    if (!ids.length) return showToast('No "Draft" entries selected.');
-    askConfirm(`Submit ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'} for approval?`, async () => {
-      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'Pending Review', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
+  async function bulkMove(fromLabel, to, verb) {
+    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === fromLabel));
+    if (!ids.length) return showToast(`No "${fromLabel}" entries selected.`);
+    askConfirm(`${verb} ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'}?`, async () => {
+      const results = await Promise.allSettled(ids.map(id => transitionJournalEntry(id, to)));
+      const okCount = results.filter(r => r.status === 'fulfilled').length;
       setSelected(new Set());
-      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} submitted for approval.`);
+      showToast(okCount === ids.length
+        ? `${okCount} entr${okCount > 1 ? 'ies' : 'y'} updated.`
+        : `${okCount}/${ids.length} updated (${ids.length - okCount} failed).`);
+      await loadEntries();
     });
   }
-
-  async function approvePost(id) {
-    await updateDoc(doc(db,'journalEntries',id),{status:'Posted',updatedAt:serverTimestamp(),updatedBy:auth.currentUser?.email||''});
-    showToast('Journal Entry posted.');
-  }
+  const bulkSubmitForApproval = () => bulkMove('Draft', 'pending_review', 'Submit');
+  const bulkClear             = () => bulkMove('For Clearing', 'cleared', 'Clear');
+  const bulkSubmitForPosting  = () => bulkMove('Cleared', 'for_posting', 'Submit');
+  const bulkPost              = () => bulkMove('For Posting', 'posted', 'Post');
 
   async function reverseEntry(e) {
-    const today = new Date().toISOString().slice(0,10);
-    const rev = {
-      jeId: await nextJournalEntryId(today), date: today,
-      description:`Reversal of ${e.jeId}`, type:'Reversing', reference:e.jeId, status:'Draft',
-      lines:(e.lines||[]).map(l=>({accountCode:l.accountCode,accountName:l.accountName,description:l.description,debit:l.credit||0,credit:l.debit||0})),
-      totalDebit:e.totalCredit||0, totalCredit:e.totalDebit||0,
-      createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||'',
-    };
-    await addDoc(collection(db,'journalEntries'),rev);
-    await updateDoc(doc(db,'journalEntries',e.id),{status:'Reversed',updatedAt:serverTimestamp()});
-    showToast('Reversing entry created.');
+    try {
+      const res = await apiReverseJE(e.id);
+      showToast(`Reversing entry ${res.entryNo} posted.`);
+      await loadEntries();
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.detail : err.message);
+    }
   }
 
   function deleteEntry(id) {
     askConfirm('Delete this journal entry?', async () => {
-      await deleteDoc(doc(db,'journalEntries',id));
-    });
-  }
-
-  async function bulkClear() {
-    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'For Clearing'));
-    if (!ids.length) return showToast('No "For Clearing" entries selected.');
-    askConfirm(`Clear ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'}?`, async () => {
-      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'Cleared', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
-      setSelected(new Set());
-      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} cleared.`);
-    });
-  }
-
-  async function bulkSubmitForPosting() {
-    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'Cleared'));
-    if (!ids.length) return showToast('No "Cleared" entries selected.');
-    askConfirm(`Submit ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'} for posting?`, async () => {
-      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'For Posting', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
-      setSelected(new Set());
-      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} submitted for posting.`);
-    });
-  }
-
-  async function bulkPost() {
-    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'For Posting'));
-    if (!ids.length) return showToast('No "For Posting" entries selected.');
-    askConfirm(`Post ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'}? This finalizes them in the General Ledger.`, async () => {
-      await Promise.all(ids.map(id => updateDoc(doc(db,'journalEntries',id), { status:'Posted', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' })));
-      setSelected(new Set());
-      showToast(`${ids.length} entr${ids.length > 1 ? 'ies' : 'y'} posted.`);
+      try {
+        await apiDeleteJE(id);
+        showToast('Journal entry deleted.');
+        await loadEntries();
+      } catch (e) {
+        showToast(e instanceof ApiError ? e.detail : e.message);
+      }
     });
   }
 
