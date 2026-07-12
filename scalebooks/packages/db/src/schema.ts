@@ -69,6 +69,7 @@ export const voucherType = pgEnum("voucher_type", [
 ]);
 
 // Approval workflow (0012): the JE posts at 'approved'; 'void' reverses it.
+// 'for_disbursement' (0013): parked in a disbursement report, reverts on removal.
 export const voucherStatus = pgEnum("voucher_status", [
   "draft",
   "pending",
@@ -76,6 +77,7 @@ export const voucherStatus = pgEnum("voucher_status", [
   "verified",
   "for_approval",
   "approved",
+  "for_disbursement",
   "paid",
   "rejected",
   "posted",
@@ -276,6 +278,8 @@ export const vouchers = pgTable(
     paymentFromAccountId: uuid("payment_from_account_id").references(() => accounts.id),
     notes: text("notes"),
     meta: jsonb("meta"),
+    preDisbursementStatus: text("pre_disbursement_status"),
+    disbursementRef: text("disbursement_ref"),
     createdBy: text("created_by").references(() => appUsers.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     postedAt: timestamp("posted_at", { withTimezone: true }),
@@ -306,6 +310,105 @@ export const voucherLines = pgTable(
   (t) => [
     unique("voucher_lines_voucher_line_key").on(t.voucherId, t.lineNo),
     index("voucher_lines_voucher_idx").on(t.voucherId),
+  ],
+);
+
+/** Org-level settings: company profile, approval routing, numbering (jsonb). */
+export const orgSettings = pgTable("org_settings", {
+  orgId: uuid("org_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  profile: jsonb("profile"),
+  approvalRouting: jsonb("approval_routing"),
+  docNumbering: jsonb("doc_numbering"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const checkbooks = pgTable(
+  "checkbooks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    bankCode: text("bank_code").notNull(),
+    checkbookType: text("checkbook_type").notNull().default("Loose"),
+    startingNumber: text("starting_number").notNull(),
+    endingNumber: text("ending_number"),
+    checksCount: integer("checks_count"),
+    nextCheckNumber: text("next_check_number"),
+    isActive: boolean("is_active").notNull().default(true),
+    notes: text("notes"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("checkbooks_org_bank_idx").on(t.orgId, t.bankCode)],
+);
+
+export const checkRegistry = pgTable(
+  "check_registry",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    checkNo: text("check_no").notNull(),
+    checkbookId: uuid("checkbook_id").references(() => checkbooks.id),
+    bankCode: text("bank_code"),
+    checkNumber: text("check_number").notNull(),
+    checkDate: date("check_date"),
+    issueDate: date("issue_date"),
+    payeeName: text("payee_name"),
+    amountCents: bigint("amount_cents", { mode: "number" }).notNull().default(0),
+    netAmountCents: bigint("net_amount_cents", { mode: "number" }),
+    status: text("status").notNull().default("Issued"),
+    referenceType: text("reference_type"),
+    referenceId: text("reference_id"),
+    voucherId: uuid("voucher_id").references(() => vouchers.id),
+    journalEntryId: uuid("journal_entry_id").references(() => journalEntries.id),
+    isPartOfMultiple: boolean("is_part_of_multiple").notNull().default(false),
+    lineNo: integer("line_no"),
+    voidReason: text("void_reason"),
+    clearedDate: date("cleared_date"),
+    voidedDate: date("voided_date"),
+    stoppedDate: date("stopped_date"),
+    staleDate: date("stale_date"),
+    notes: text("notes"),
+    meta: jsonb("meta"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("check_registry_org_status_idx").on(t.orgId, t.status),
+    index("check_registry_org_bank_idx").on(t.orgId, t.bankCode, t.checkNumber),
+  ],
+);
+
+export const disbursementReports = pgTable(
+  "disbursement_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    reportNo: text("report_no").notNull(),
+    reportDate: date("report_date").notNull(),
+    bankCode: text("bank_code"),
+    totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
+    expectedCollectionCents: bigint("expected_collection_cents", { mode: "number" })
+      .notNull()
+      .default(0),
+    status: text("status").notNull().default("Pending"),
+    notes: text("notes"),
+    bankBalances: jsonb("bank_balances"),
+    lines: jsonb("lines"),
+    meta: jsonb("meta"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("disbursement_reports_org_no_key").on(t.orgId, t.reportNo),
+    index("disbursement_reports_org_date_idx").on(t.orgId, t.reportDate),
   ],
 );
 

@@ -9,6 +9,9 @@ import { accountRoutes } from "./routes/accounts";
 import { reportRoutes } from "./routes/reports";
 import { contactRoutes } from "./routes/contacts";
 import { voucherRoutes } from "./routes/vouchers";
+import { settingsRoutes } from "./routes/settings";
+import { checkbookRoutes, checkRoutes } from "./routes/checks";
+import { disbursementRoutes } from "./routes/disbursements";
 
 const app = new Hono();
 
@@ -52,6 +55,10 @@ app.route("/journal-entries", journalRoutes);
 app.route("/reports", reportRoutes);
 app.route("/contacts", contactRoutes);
 app.route("/vouchers", voucherRoutes);
+app.route("/settings", settingsRoutes);
+app.route("/checkbooks", checkbookRoutes);
+app.route("/checks", checkRoutes);
+app.route("/disbursement-reports", disbursementRoutes);
 
 // Render (and most PaaS) inject PORT; fall back to API_PORT for local dev.
 const port = Number(process.env.PORT ?? process.env.API_PORT ?? 8787);

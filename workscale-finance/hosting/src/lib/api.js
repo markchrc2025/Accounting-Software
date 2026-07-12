@@ -134,6 +134,45 @@ export const voidVoucher = (id) =>
   apiFetch(`/vouchers/${id}/void`, { method: 'POST', body: JSON.stringify({}) });
 export const getTrialBalance = (p) => apiFetch(`/reports/trial-balance${periodQuery(p)}`);
 export const getProfitAndLoss = (p) => apiFetch(`/reports/profit-and-loss${periodQuery(p)}`);
+// ── settings / checkbooks / checks / disbursements ───────────────────────────
+export const getSettings = () => apiFetch('/settings');
+export const updateSettings = (payload) =>
+  apiFetch('/settings', { method: 'PUT', body: JSON.stringify(payload) });
+
+export const listCheckbooks = () => apiFetch('/checkbooks').then((r) => r.checkbooks);
+export const createCheckbook = (p) =>
+  apiFetch('/checkbooks', { method: 'POST', body: JSON.stringify(p) }).then((r) => r.checkbook);
+export const updateCheckbook = (id, p) =>
+  apiFetch(`/checkbooks/${id}`, { method: 'PUT', body: JSON.stringify(p) }).then((r) => r.checkbook);
+export const deleteCheckbook = (id) => apiFetch(`/checkbooks/${id}`, { method: 'DELETE' });
+
+export const listChecks = (params) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== '') s.set(k, v);
+  const q = s.toString();
+  return apiFetch(`/checks${q ? `?${q}` : ''}`).then((r) => r.checks);
+};
+export const createChecks = (checks) =>
+  apiFetch('/checks', { method: 'POST', body: JSON.stringify({ checks }) }).then((r) => r.checks);
+export const updateCheck = (id, p) =>
+  apiFetch(`/checks/${id}`, { method: 'PUT', body: JSON.stringify(p) }).then((r) => r.check);
+export const setCheckStatus = (id, status, opts) =>
+  apiFetch(`/checks/${id}/status`, { method: 'POST', body: JSON.stringify({ status, ...(opts || {}) }) }).then((r) => r.check);
+export const deleteCheck = (id) => apiFetch(`/checks/${id}`, { method: 'DELETE' });
+
+export const listDisbursementReports = () =>
+  apiFetch('/disbursement-reports').then((r) => r.reports);
+export const getDisbursementReport = (id) =>
+  apiFetch(`/disbursement-reports/${id}`).then((r) => r.report);
+export const createDisbursementReport = (p) =>
+  apiFetch('/disbursement-reports', { method: 'POST', body: JSON.stringify(p) }).then((r) => r.report);
+export const updateDisbursementReport = (id, p) =>
+  apiFetch(`/disbursement-reports/${id}`, { method: 'PUT', body: JSON.stringify(p) }).then((r) => r.report);
+export const setDisbursementStatus = (id, status, reason) =>
+  apiFetch(`/disbursement-reports/${id}/status`, { method: 'POST', body: JSON.stringify({ status, ...(reason ? { reason } : {}) }) }).then((r) => r.report);
+export const deleteDisbursementReport = (id) =>
+  apiFetch(`/disbursement-reports/${id}`, { method: 'DELETE' });
+
 export const getGeneralLedger = (p) => apiFetch(`/reports/general-ledger${periodQuery(p)}`);
 export const getIncomeStatement = (p) => apiFetch(`/reports/income-statement${periodQuery(p)}`);
 export const getBalanceSheet = (asOf) =>

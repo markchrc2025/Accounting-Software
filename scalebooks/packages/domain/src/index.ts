@@ -5,4 +5,5 @@ export * from "./users";
 export * from "./contacts";
 export * from "./vouchers";
 export * from "./reports";
+export * from "./operations";
 export * from "./tax/trainTax";
