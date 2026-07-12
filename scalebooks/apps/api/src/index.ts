@@ -16,6 +16,7 @@ import {
   taxRateRoutes,
   taxGroupRoutes,
   purposeCategoryRoutes,
+  paymentTermRoutes,
   bankBalanceRoutes,
   bankTransactionRoutes,
   bankReconciliationRoutes,
@@ -87,6 +88,7 @@ app.route("/disbursement-reports", disbursementRoutes);
 app.route("/tax-rates", taxRateRoutes);
 app.route("/tax-groups", taxGroupRoutes);
 app.route("/purpose-categories", purposeCategoryRoutes);
+app.route("/payment-terms", paymentTermRoutes);
 app.route("/bank-balances", bankBalanceRoutes);
 app.route("/bank-transactions", bankTransactionRoutes);
 app.route("/bank-reconciliations", bankReconciliationRoutes);

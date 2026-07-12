@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../firebase.js';
-import { doc, onSnapshot, query, collection, where } from 'firebase/firestore';
+import { useAuth } from '../../auth/AuthProvider.jsx';
+import { getSettings } from '../../lib/api.js';
 
 import DashboardPage       from './DashboardPage.jsx';
 import VouchersPage        from './vouchers/VouchersPage.jsx';
@@ -63,42 +62,25 @@ function ScaleBooksAppInner() {
   const [createFlyoutOpen,  setCreateFlyoutOpen]  = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [profile, setProfile] = useState({ companyName: '', logoUrl: '' });
-  const [user, setUser] = useState(auth.currentUser);
-  const [userName, setUserName] = useState(auth.currentUser?.displayName ?? '');
+  const { session, signOut } = useAuth();
   const navigate = useNavigate();
   const approvalCount = useApprovalCount();
 
-  useEffect(() => {
-    const unsubAuth = onAuthStateChanged(auth, u => {
-      setUser(u);
-      setUserName(u?.displayName ?? '');
-    });
-    return unsubAuth;
-  }, []);
+  const userEmail = session?.user?.email || '';
+  const userName  = session?.user?.fullName || (userEmail ? userEmail.split('@')[0] : '');
 
-  // Keep userName in sync with appUsers.fullName (Admin-managed source of truth)
+  // Company branding (name + logo) from org settings — loaded once.
   useEffect(() => {
-    if (!user?.email) return;
-    const q = query(collection(db, 'appUsers'), where('email', '==', user.email));
-    const unsub = onSnapshot(q, snap => {
-      const d = snap.docs[0]?.data();
-      if (d) setUserName(d.fullName || d.displayName || user.displayName || '');
-    });
-    return unsub;
-  }, [user?.email]);
-
-  useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'settings', 'profile'), snap => {
-      if (snap.exists()) {
-        const d = snap.data();
-        setProfile({ companyName: d.companyName || '', logoUrl: d.logoUrl || '' });
-      }
-    });
-    return unsub;
+    getSettings()
+      .then(s => {
+        const p = s?.profile || {};
+        setProfile({ companyName: p.companyName || '', logoUrl: p.logoUrl || '' });
+      })
+      .catch(() => {});
   }, []);
 
   function handleSignOut() {
-    auth.signOut().then(() => navigate('/login'));
+    signOut();
   }
 
   return (
@@ -106,7 +88,7 @@ function ScaleBooksAppInner() {
       <TopBar
         companyName={profile.companyName}
         userName={userName || undefined}
-        userEmail={user?.email}
+        userEmail={userEmail || undefined}
         logoUrl={profile.logoUrl}
         onSignOut={handleSignOut}
         approvalCount={approvalCount}

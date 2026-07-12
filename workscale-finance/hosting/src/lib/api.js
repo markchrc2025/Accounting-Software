@@ -136,6 +136,16 @@ export const getTrialBalance = (p) => apiFetch(`/reports/trial-balance${periodQu
 export const getProfitAndLoss = (p) => apiFetch(`/reports/profit-and-loss${periodQuery(p)}`);
 // ── users (admin-only list; callers fall back to emails on 403) ──────────────
 export const listUsers = () => apiFetch('/users').then((r) => r.users);
+export const inviteUser = (p) =>
+  apiFetch('/users', { method: 'POST', body: JSON.stringify(p) }).then((r) => r.user);
+export const updateUser = (id, p) =>
+  apiFetch(`/users/${id}`, { method: 'PUT', body: JSON.stringify(p) }).then((r) => r.user);
+export const deleteUser = (id) => apiFetch(`/users/${id}`, { method: 'DELETE' });
+
+// ── document counters (admin inspection/override) ────────────────────────────
+export const listCounters = () => apiFetch('/settings/counters').then((r) => r.counters);
+export const overrideCounter = (periodKey, seq) =>
+  apiFetch(`/settings/counters/${encodeURIComponent(periodKey)}`, { method: 'PUT', body: JSON.stringify({ seq }) }).then((r) => r.counter);
 
 // ── settings / checkbooks / checks / disbursements ───────────────────────────
 export const getSettings = () => apiFetch('/settings');
@@ -186,6 +196,7 @@ const crud = (base, plural, singular) => ({
 export const taxRatesApi = crud('/tax-rates', 'rates', 'rate');
 export const taxGroupsApi = crud('/tax-groups', 'groups', 'group');
 export const purposeCategoriesApi = crud('/purpose-categories', 'categories', 'category');
+export const paymentTermsApi = crud('/payment-terms', 'terms', 'term');
 export const bankBalancesApi = crud('/bank-balances', 'balances', 'balance');
 export const bankTransactionsApi = crud('/bank-transactions', 'transactions', 'transaction');
 export const bankReconciliationsApi = crud('/bank-reconciliations', 'reconciliations', 'reconciliation');

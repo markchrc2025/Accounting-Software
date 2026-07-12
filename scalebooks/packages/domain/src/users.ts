@@ -13,5 +13,14 @@ export const zInviteUser = z.object({
   email: z.string().trim().toLowerCase().email("A valid email is required").max(160),
   fullName: z.string().trim().max(160).optional(),
   role: z.enum(USER_ROLES).default("maker"),
+  profile: z.record(z.unknown()).nullable().optional(),
 });
 export type InviteUser = z.infer<typeof zInviteUser>;
+
+/** Admin edit of an existing user (email is immutable — it is the allowlist key). */
+export const zUserUpdate = z.object({
+  fullName: z.string().trim().max(160).nullable().optional(),
+  role: z.enum(USER_ROLES).optional(),
+  profile: z.record(z.unknown()).nullable().optional(),
+});
+export type UserUpdate = z.infer<typeof zUserUpdate>;

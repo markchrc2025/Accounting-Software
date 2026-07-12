@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { getUserWorkspaces } from "@scalebooks/db";
+import { and, eq } from "drizzle-orm";
+import { getUserWorkspaces, withOrgContext, appUsers } from "@scalebooks/db";
 import { requireAuth, requireIdentity } from "../auth";
 import { passwordSignIn } from "../password";
 
@@ -44,10 +45,24 @@ authRoutes.get("/workspaces", requireIdentity, async (c) => {
 
 // The signed-in user's identity, resolved for the ACTIVE workspace (chosen via
 // the x-org-id header) and their role in it.
-authRoutes.get("/me", requireAuth, (c) => {
+authRoutes.get("/me", requireAuth, async (c) => {
   const a = c.get("auth");
+  // The profile card needs a display name; fetch it from the allowlist row.
+  const [row] = await withOrgContext(
+    { userId: a.userId, orgId: a.orgId, role: a.role },
+    (tx) =>
+      tx
+        .select({ fullName: appUsers.fullName, profile: appUsers.profile })
+        .from(appUsers)
+        .where(and(eq(appUsers.orgId, a.orgId), eq(appUsers.id, a.userId))),
+  );
   return c.json({
-    user: { id: a.userId, email: a.email },
+    user: {
+      id: a.userId,
+      email: a.email,
+      fullName: row?.fullName ?? null,
+      profile: row?.profile ?? null,
+    },
     org: { id: a.orgId, name: a.orgName, code: a.orgCode },
     role: a.role,
   });

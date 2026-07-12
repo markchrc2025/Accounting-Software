@@ -1,14 +1,12 @@
 import { useState, useEffect } from 'react';
-import {
-  doc, getDoc, setDoc, serverTimestamp,
-  collection, onSnapshot, addDoc, updateDoc, deleteDoc, getDocs, writeBatch, query, orderBy, where,
-} from 'firebase/firestore';
-import { updateProfile } from 'firebase/auth';
-import { db, auth, storage, functions } from '../../../firebase.js';
-import { httpsCallable } from 'firebase/functions';
-import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
-import { invalidateDocIdSettings } from '../../../utils/documentIds.js';
+import {
+  getMe, getSettings, updateSettings,
+  listUsers, inviteUser, updateUser, deleteUser,
+  listCounters, overrideCounter,
+  purposeCategoriesApi, paymentTermsApi,
+  ApiError,
+} from '../../../lib/api.js';
 
 const GLOBAL_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
 const MODULE_ROLES  = ['Maker', 'Verifier', 'Approver', 'Poster', 'Admin'];
@@ -33,47 +31,33 @@ const formatTin = v => {
   return branch.length ? result + '-' + branch : result;
 };
 
-const MODULE_BACKUP_GROUPS = [
-  { group: 'Disbursement', modules: [
-    { label: 'Vouchers',           collections: ['vouchers'] },
-    { label: 'Weekly Projections', collections: ['weeklyProjections'] },
-    { label: 'Payment Schedule',   collections: ['paymentSchedules'] },
-    { label: 'Disbursements',      collections: ['disbursementReports'] },
-    { label: 'Check Registry',     collections: ['checkRegister', 'checkbookMaster'] },
-  ]},
-  { group: 'Accountant', modules: [
-    { label: 'Journal',              collections: ['journalEntries'] },
-    { label: 'Bank',                 collections: ['dailyBankBalances', 'bankTransactions', 'creditLines', 'bankReconciliations'] },
-    { label: 'Chart of Accounts',    collections: ['accounts'] },
-    { label: 'Tax',                  collections: ['taxEntries', 'taxRates'] },
-    { label: 'Financial Management', collections: [], singleDocs: [{ coll: 'finc', id: 'profile' }] },
-    { label: 'Fixed Assets',         collections: [], singleDocs: [{ coll: 'fixedAssets', id: 'profile' }] },
-  ]},
-  { group: 'Billing & AR', modules: [
-    { label: 'Billing Book',     collections: ['billingStatements'] },
-    { label: 'Service Invoices', collections: ['serviceInvoices'] },
-    { label: 'Collections',      collections: ['collections'] },
-  ]},
-  { group: 'System', modules: [
-    { label: 'Contacts',          collections: ['contacts'] },
-    { label: 'Users & Reference', collections: ['appUsers', 'purposeCategories', 'paymentTerms'] },
-    { label: 'Settings (Config)', collections: [], includeSettings: true },
-  ]},
-];
-const ALL_MODULES_FLAT  = MODULE_BACKUP_GROUPS.flatMap(g => g.modules);
-const ALL_MODULE_LABELS = ALL_MODULES_FLAT.map(m => m.label);
+// API user rows keep the portal's rich per-user extras (roles[] labels,
+// moduleAccess, workEmail, signatureUrl, inviteStatus, invitedAt…) in the
+// `profile` jsonb bag; they round-trip through it unchanged.
+const userFromApi = (u) => {
+  const p = (u.profile && typeof u.profile === 'object') ? u.profile : {};
+  return {
+    id:           u.id,
+    email:        u.email || '',
+    fullName:     u.fullName || '',
+    workEmail:    p.workEmail || '',
+    roles:        Array.isArray(p.roles) ? p.roles : [],
+    moduleAccess: (p.moduleAccess && typeof p.moduleAccess === 'object') ? p.moduleAccess : {},
+    signatureUrl: p.signatureUrl || '',
+    inviteStatus: p.inviteStatus || '',
+    profile:      p, // preserved so unknown profile keys survive a save
+  };
+};
 
-function serializeData(obj) {
-  if (obj === null || obj === undefined) return obj;
-  if (obj && typeof obj === 'object' && typeof obj.toDate === 'function') return obj.toDate().toISOString();
-  if (Array.isArray(obj)) return obj.map(serializeData);
-  if (typeof obj === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(obj)) out[k] = serializeData(v);
-    return out;
-  }
-  return obj;
-}
+// Canonical lowercase workspace role derived from the portal's role labels.
+const deriveRole = (roles) => {
+  const r = Array.isArray(roles) ? roles : [];
+  if (r.includes('Admin'))    return 'admin';
+  if (r.includes('Approver')) return 'approver';
+  if (r.includes('Poster'))   return 'poster';
+  if (r.includes('Verifier')) return 'verifier';
+  return 'maker';
+};
 
 const NAV = [
   { group: 'ORGANIZATION SETTINGS', items: [
@@ -204,10 +188,7 @@ export default function SettingsPage() {
   const [saving,        setSaving]        = useState(false);
   const [logoUploading,  setLogoUploading]  = useState(false);
   const [toast,          setToast]          = useState('');
-  const [backupModal,   setBackupModal]   = useState(null);
-  const [restoreModal,  setRestoreModal]  = useState(null);
-  const [resetModal,    setResetModal]    = useState(null);
-  const [dataWorking,   setDataWorking]   = useState(false);
+  const [meName,        setMeName]        = useState('');
   const [counters,      setCounters]      = useState({}); // { periodKey: seq }
   const [seqOverrides,  setSeqOverrides]  = useState({}); // { periodKey: editedSeq }
   // Users & Roles inner tabs
@@ -219,14 +200,16 @@ export default function SettingsPage() {
   const [selYear,  setSelYear]  = useState(_today.getFullYear());
   const [selMonth, setSelMonth] = useState(_today.getMonth() + 1); // 1-12
 
-  const { isAdmin } = usePermissions();
+  const { isAdmin, userRecord } = usePermissions();
   const showToast  = msg => { setToast(msg); setTimeout(() => setToast(''), 3000); };
   const askConfirm = (msg, fn) => setConfirmModal({ msg, fn });
-  const me = auth.currentUser?.email || '';
+  const errMsg = (e) => (e instanceof ApiError ? e.detail : e.message);
+  const me = userRecord?.email || '';
 
-  useEffect(() => {
-    getDoc(doc(db, 'settings', 'profile')).then(snap => {
-      const d = snap.exists() ? snap.data() : {};
+  const loadSettings = async () => {
+    try {
+      const s = await getSettings();
+      const d = s?.profile || {};
       setProfileForm({
         companyName:      d.companyName      || '',
         companyAddress:   d.companyAddress   || '',
@@ -244,69 +227,96 @@ export default function SettingsPage() {
         billingWebAppUrl: d.billingWebAppUrl || '',
         voucherNotedBy: d.voucherNotedBy || ''
       });
-    });
-    getDoc(doc(db, 'settings', 'modules')).then(snap => {
-      const d = snap.exists() ? snap.data() : {};
+      // The old settings/modules doc is now two jsonb bags: docNumbering
+      // (prefixes + format flags) and modulePolicies (workflow rules).
+      const m = { ...(s?.docNumbering || {}), ...(s?.modulePolicies || {}) };
       setModuleForm({
-        vcPrefix:     d.vcPrefix     || 'PV',
-        cvPrefix:     d.cvPrefix     || 'CV',
-        drPrefix:     d.drPrefix     || 'DR',
-        wpPrefix:     d.wpPrefix     || 'WP',
-        isPrefix:     d.isPrefix     || 'IS',
-        bsPrefix:     d.bsPrefix     || 'BS',
-        colPrefix:    d.colPrefix    || 'COL',
-        cntPrefix:    d.cntPrefix    || 'CNT',
-        jePrefix:     d.jePrefix     || 'JE',
-        btPrefix:     d.btPrefix     || 'BT',
-        psPrefix:     d.psPrefix     || 'PS',
-        brPrefix:     d.brPrefix     || 'BREC',
-        prPrefix:     d.prPrefix     || 'PR',
-        fpPrefix:     d.fpPrefix     || 'FP',
-        lvPrefix:     d.lvPrefix     || 'LV',
-        chkPrefix:    d.chkPrefix    || 'CHK',
-        includeYear:  d.includeYear  !== false,
-        includeMonth: d.includeMonth !== false,
-        enabledVoucherTypes:    d.enabledVoucherTypes    || [...VOUCHER_TYPES],
-        requireVoucherApproval: d.requireVoucherApproval || false,
-        requirePurposeCategory: d.requirePurposeCategory || false,
-        staleCheckDays:    d.staleCheckDays    || 180,
-        requireVoidReason: d.requireVoidReason !== false,
+        vcPrefix:     m.vcPrefix     || 'PV',
+        cvPrefix:     m.cvPrefix     || 'CV',
+        drPrefix:     m.drPrefix     || 'DR',
+        wpPrefix:     m.wpPrefix     || 'WP',
+        isPrefix:     m.isPrefix     || 'IS',
+        bsPrefix:     m.bsPrefix     || 'BS',
+        colPrefix:    m.colPrefix    || 'COL',
+        cntPrefix:    m.cntPrefix    || 'CNT',
+        jePrefix:     m.jePrefix     || 'JE',
+        btPrefix:     m.btPrefix     || 'BT',
+        psPrefix:     m.psPrefix     || 'PS',
+        brPrefix:     m.brPrefix     || 'BREC',
+        prPrefix:     m.prPrefix     || 'PR',
+        fpPrefix:     m.fpPrefix     || 'FP',
+        lvPrefix:     m.lvPrefix     || 'LV',
+        chkPrefix:    m.chkPrefix    || 'CHK',
+        includeYear:  m.includeYear  !== false,
+        includeMonth: m.includeMonth !== false,
+        enabledVoucherTypes:    m.enabledVoucherTypes    || [...VOUCHER_TYPES],
+        requireVoucherApproval: m.requireVoucherApproval || false,
+        requirePurposeCategory: m.requirePurposeCategory || false,
+        staleCheckDays:    m.staleCheckDays    || 180,
+        requireVoidReason: m.requireVoidReason !== false,
       });
-    });
-    getDoc(doc(db, 'settings', 'approvalRouting')).then(snap => {
-      const d = snap.exists() ? snap.data() : {};
+      const ar = s?.approvalRouting || {};
       setApprovalRouting({
-        routes:    Array.isArray(d.routes)    ? d.routes    : [],
-        delegates: Array.isArray(d.delegates) ? d.delegates : [],
+        routes:    Array.isArray(ar.routes)    ? ar.routes    : [],
+        delegates: Array.isArray(ar.delegates) ? ar.delegates : [],
       });
-    });
-  }, []);
+    } catch (e) { showToast('Error loading settings: ' + errMsg(e)); }
+  };
+
+  const loadUsers = () =>
+    listUsers()
+      .then(rows => setUsers(rows.map(userFromApi).sort((a, b) => (a.email || '').localeCompare(b.email || ''))))
+      .catch(() => setUsers([])); // admin-only endpoint — 403 for everyone else
+
+  const loadCategories = () =>
+    purposeCategoriesApi.list()
+      .then(rows => setCategories([...rows].sort((a, b) => (a.name || '').localeCompare(b.name || ''))))
+      .catch(e => showToast('Error loading categories: ' + errMsg(e)));
+
+  const loadTerms = () =>
+    paymentTermsApi.list()
+      .then(rows => setPaymentTerms([...rows].sort((a, b) => (a.days || 0) - (b.days || 0))))
+      .catch(e => showToast('Error loading payment terms: ' + errMsg(e)));
+
+  const loadCounters = () =>
+    listCounters()
+      .then(rows => {
+        const map = {};
+        rows.forEach(r => { map[r.periodKey] = Number(r.seq || 0); });
+        setCounters(map);
+      })
+      .catch(() => setCounters({})); // admin-only endpoint
 
   useEffect(() => {
-    const u1 = onSnapshot(query(collection(db, 'appUsers'),          orderBy('email')), s => setUsers(s.docs.map(d => ({id:d.id,...d.data()}))));
-    const u2 = onSnapshot(query(collection(db, 'purposeCategories'), orderBy('name')),  s => setCategories(s.docs.map(d => ({id:d.id,...d.data()}))));
-    const u3 = onSnapshot(query(collection(db, 'paymentTerms'),      orderBy('days')),  s => setPaymentTerms(s.docs.map(d => ({id:d.id,...d.data()}))));
-    const u4 = onSnapshot(collection(db, 'documentCounters'), s => {
-      const map = {};
-      s.docs.forEach(d => { map[d.id] = Number(d.data()?.seq || 0); });
-      setCounters(map);
-    });
-    return () => { u1(); u2(); u3(); u4(); };
-  }, []);
+    loadSettings();
+    loadUsers();
+    loadCategories();
+    loadTerms();
+    loadCounters();
+    getMe().then(r => setMeName(r?.user?.fullName || '')).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveProfile = async () => {
     setSaving(true);
     try {
-      await setDoc(doc(db, 'settings', 'profile'), { ...profileForm, updatedAt:serverTimestamp(), updatedBy:me }, { merge:true });
+      await updateSettings({ profile: profileForm });
       showToast('Organization profile saved.');
-    } catch(e) { showToast('Error: ' + e.message); }
+    } catch(e) { showToast('Error: ' + errMsg(e)); }
     setSaving(false);
   };
 
   const saveModules = async () => {
     setSaving(true);
     try {
-      await setDoc(doc(db, 'settings', 'modules'), { ...moduleForm, updatedAt:serverTimestamp(), updatedBy:me }, { merge:true });
+      const {
+        enabledVoucherTypes, requireVoucherApproval, requirePurposeCategory,
+        staleCheckDays, requireVoidReason,
+        ...docNumbering
+      } = moduleForm;
+      await updateSettings({
+        docNumbering,
+        modulePolicies: { enabledVoucherTypes, requireVoucherApproval, requirePurposeCategory, staleCheckDays, requireVoidReason },
+      });
       // Persist any admin-edited counter sequences.
       if (isAdmin && Object.keys(seqOverrides).length) {
         const writes = Object.entries(seqOverrides).map(async ([periodKey, val]) => {
@@ -314,18 +324,14 @@ export default function SettingsPage() {
           const nextN = Math.max(1, parseInt(val, 10) || 1);
           const seq   = nextN - 1;
           if (seq === (counters[periodKey] || 0)) return;
-          // Derive prefix from periodKey by stripping trailing digits (year/month).
-          const prefix = periodKey.replace(/\d+$/, '');
-          await setDoc(doc(db, 'documentCounters', periodKey), {
-            prefix, periodKey, seq, updatedAt: serverTimestamp(), updatedBy: me,
-          }, { merge: true });
+          await overrideCounter(periodKey, seq);
         });
         await Promise.all(writes);
         setSeqOverrides({});
+        await loadCounters();
       }
-      invalidateDocIdSettings();
       showToast('Settings saved.');
-    } catch(e) { showToast('Error: ' + e.message); }
+    } catch(e) { showToast('Error: ' + errMsg(e)); }
     setSaving(false);
   };
 
@@ -336,52 +342,38 @@ export default function SettingsPage() {
     try {
       const { isNew, id, _isMeNotSaved, ...rest } = userModal;
       const treatAsNew = isNew || _isMeNotSaved;
-      const data = {
-        email:        rest.email.trim().toLowerCase(),
-        fullName:     rest.fullName.trim(),
+      const roles        = Array.isArray(rest.roles) ? rest.roles : [];
+      const moduleAccess = (rest.moduleAccess && typeof rest.moduleAccess === 'object') ? rest.moduleAccess : {};
+      // Per-user extras live in the profile jsonb bag; spread the loaded
+      // profile first so keys we don't edit here round-trip unchanged.
+      const profile = {
+        ...(rest.profile || {}),
+        roles,
+        moduleAccess,
         workEmail:    (rest.workEmail || '').trim(),
-        roles:        Array.isArray(rest.roles) ? rest.roles : [],
-        moduleAccess: (rest.moduleAccess && typeof rest.moduleAccess === 'object') ? rest.moduleAccess : {},
         signatureUrl: rest.signatureUrl || '',
       };
+      const email    = rest.email.trim().toLowerCase();
+      const fullName = rest.fullName.trim();
       if (treatAsNew) {
-        // Prevent duplicate — check if email already exists in appUsers
-        const dupSnap = await getDocs(query(collection(db, 'appUsers'), where('email', '==', data.email)));
-        if (!dupSnap.empty) {
-          setSaving(false);
-          return showToast('This email is already registered as a user.');
-        }
-        await addDoc(collection(db, 'appUsers'), { ...data, inviteStatus: 'invited', invitedAt: serverTimestamp(), createdAt:serverTimestamp(), createdBy:me });
-        try {
-          // Cloud Function creates Auth account + sends branded invitation email
-          const createAuthUser = httpsCallable(functions, 'createAuthUser');
-          await createAuthUser({ email: data.email, fullName: data.fullName });
-          showToast('User saved. Invitation email sent to ' + data.email);
-        } catch (emailErr) {
-          showToast('User saved, but invitation email failed: ' + emailErr.message);
-        }
+        await inviteUser({
+          email,
+          fullName,
+          role: deriveRole(roles),
+          profile: { ...profile, inviteStatus: 'invited', invitedAt: new Date().toISOString() },
+        });
+        showToast('User saved. ' + email + ' must also register at the Sentire account portal before signing in.');
       } else {
-        await updateDoc(doc(db, 'appUsers', id), { ...data, updatedAt:serverTimestamp(), updatedBy:me });
-        // If Admin changed the name of the currently logged-in user, sync Firebase Auth immediately
-        if (auth.currentUser && auth.currentUser.email === data.email && data.fullName !== auth.currentUser.displayName) {
-          await updateProfile(auth.currentUser, { displayName: data.fullName });
-        }
+        await updateUser(id, { fullName, role: deriveRole(roles), profile });
         showToast('User saved.');
       }
       setUserModal(null);
-    } catch(e) { showToast('Error: ' + e.message); }
-    setSaving(false);
-  };
-
-  const resendInvite = async (user) => {
-    try {
-      // Cloud Function regenerates password-reset link and resends branded invite email
-      const createAuthUser = httpsCallable(functions, 'createAuthUser');
-      await createAuthUser({ email: user.email, fullName: user.fullName });
-      showToast('Invitation resent to ' + user.email);
-    } catch (e) {
-      showToast('Failed to resend invitation: ' + e.message);
+      await loadUsers();
+    } catch(e) {
+      if (e instanceof ApiError && e.status === 409) showToast('This email is already registered as a user.');
+      else showToast('Error: ' + errMsg(e));
     }
+    setSaving(false);
   };
 
   const saveCat = async () => {
@@ -389,10 +381,11 @@ export default function SettingsPage() {
     setSaving(true);
     try {
       const { isNew, id, name } = catModal;
-      if (isNew) await addDoc(collection(db, 'purposeCategories'), { name:name.trim(), createdAt:serverTimestamp(), createdBy:me });
-      else       await updateDoc(doc(db, 'purposeCategories', id),  { name:name.trim(), updatedAt:serverTimestamp(), updatedBy:me });
+      if (isNew) await purposeCategoriesApi.create({ name: name.trim() });
+      else       await purposeCategoriesApi.update(id, { name: name.trim() });
       showToast('Category saved.'); setCatModal(null);
-    } catch(e) { showToast('Error: ' + e.message); }
+      await loadCategories();
+    } catch(e) { showToast('Error: ' + errMsg(e)); }
     setSaving(false);
   };
 
@@ -400,28 +393,33 @@ export default function SettingsPage() {
     if (!termModal?.name?.trim()) return showToast('Name required.');
     setSaving(true);
     try {
-      const { isNew, id, ...rest } = termModal;
-      if (isNew) await addDoc(collection(db, 'paymentTerms'), { ...rest, createdAt:serverTimestamp(), createdBy:me });
-      else       await updateDoc(doc(db, 'paymentTerms', id),  { ...rest, updatedAt:serverTimestamp(), updatedBy:me });
+      const { isNew, id, name, days, description } = termModal;
+      const payload = { name: name.trim(), days: parseInt(days, 10) || 0, description: description || '' };
+      if (isNew) await paymentTermsApi.create(payload);
+      else       await paymentTermsApi.update(id, payload);
       showToast('Payment term saved.'); setTermModal(null);
-    } catch(e) { showToast('Error: ' + e.message); }
+      await loadTerms();
+    } catch(e) { showToast('Error: ' + errMsg(e)); }
     setSaving(false);
   };
 
-  const del = (colName, id, label) =>
+  const del = (removeFn, id, label, reload) =>
     askConfirm(`Delete "${label}"?`, async () => {
-      await deleteDoc(doc(db, colName, id));
-      showToast('Deleted.');
+      try {
+        await removeFn(id);
+        showToast('Deleted.');
+        await reload();
+      } catch(e) { showToast('Error: ' + errMsg(e)); }
     });
 
   const saveApprovalRouting = async (newData) => {
     setSaving(true);
     try {
       const clean = { routes: newData.routes || [], delegates: newData.delegates || [] };
-      await setDoc(doc(db, 'settings', 'approvalRouting'), { ...clean, updatedAt: serverTimestamp(), updatedBy: me }, { merge: true });
+      await updateSettings({ approvalRouting: clean });
       setApprovalRouting(clean);
       showToast('Approval routing saved.');
-    } catch(e) { showToast('Error: ' + e.message); }
+    } catch(e) { showToast('Error: ' + errMsg(e)); }
     setSaving(false);
   };
 
@@ -430,23 +428,23 @@ export default function SettingsPage() {
     const up = (k, v) => setProfileForm(f => ({ ...f, [k]: v }));
     const handleLogoUpload = async (e) => {
       const file = e.target.files?.[0];
+      e.target.value = '';
       if (!file) return;
       if (!file.type.startsWith('image/')) return showToast('Please select an image file.');
+      if (file.size > 300 * 1024) return showToast('Logo is too large (max 300KB). Please use a smaller or compressed image.');
       setLogoUploading(true);
       try {
-        // Convert to base64 data URL (used by PDF generator without CORS issues)
+        // Stored inline as a base64 data URL in the profile settings —
+        // the PDF generator reads logoBase64, the TopBar reads logoUrl.
         const base64 = await new Promise((res, rej) => {
           const reader = new FileReader();
           reader.onload = () => res(reader.result);
           reader.onerror = rej;
           reader.readAsDataURL(file);
         });
-        const sRef = storageRef(storage, 'settings/company-logo');
-        await uploadBytes(sRef, file);
-        const url = await getDownloadURL(sRef);
-        up('logoUrl', url);
+        up('logoUrl', base64);
         up('logoBase64', base64);
-        showToast('Logo uploaded.');
+        showToast('Logo added. Save the profile to keep it.');
       } catch(err) { showToast('Upload failed: ' + err.message); }
       setLogoUploading(false);
     };
@@ -492,8 +490,8 @@ export default function SettingsPage() {
                   {logoUploading ? 'Uploading…' : '📁 Upload Logo'}
                   <input type="file" accept="image/*" style={{display:'none'}} disabled={logoUploading} onChange={handleLogoUpload} />
                 </label>
-                {profileForm.logoUrl && <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer'}} onClick={()=>up('logoUrl','')}>Remove</button>}
-                <span style={{fontSize:11,color:'#94a3b8'}}>PNG, JPG or SVG. Shown on documents.</span>
+                {profileForm.logoUrl && <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer'}} onClick={()=>{up('logoUrl',''); up('logoBase64','');}}>Remove</button>}
+                <span style={{fontSize:11,color:'#94a3b8'}}>PNG, JPG or SVG, up to 300KB. Shown on documents.</span>
               </div>
             </div>
           </div>
@@ -513,13 +511,13 @@ export default function SettingsPage() {
   }
 
   function UsersRoles() {
-    const meEmail = (auth.currentUser?.email || '').toLowerCase();
+    const meEmail = me.toLowerCase();
     const meInList = users.some(u => (u.email || '').toLowerCase() === meEmail);
     const displayUsers = meInList ? users : [
       {
         id: '__me__',
-        email: auth.currentUser?.email || '',
-        fullName: auth.currentUser?.displayName || '',
+        email: me,
+        fullName: meName,
         workEmail: '',
         roles: ['Admin'],
         moduleAccess: {},
@@ -655,7 +653,7 @@ export default function SettingsPage() {
           <table style={{minWidth:900}}>
             <thead>
               <tr>
-                <th>GOOGLE ACCOUNT EMAIL</th>
+                <th>ACCOUNT EMAIL</th>
                 <th>FULL NAME</th>
                 <th>WORK EMAIL</th>
                 <th>ROLES</th>
@@ -722,13 +720,9 @@ export default function SettingsPage() {
                           moduleAccess: (u.moduleAccess && typeof u.moduleAccess === 'object') ? u.moduleAccess : {},
                           fullName:     u.fullName || u.displayName || '',
                         })}>✏️ Edit</button>
-                        {!isMe && u.inviteStatus === 'invited' && (
-                          <button className="btn btn-xs" style={{background:'#fff7ed',color:'#ea580c',border:'1px solid #fed7aa',cursor:'pointer',borderRadius:8}}
-                            onClick={() => resendInvite(u)}>📨 Resend Invite</button>
-                        )}
                         {!isMe && (
                           <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}}
-                            onClick={() => del('appUsers', u.id, u.email)}>🗑</button>
+                            onClick={() => del(deleteUser, u.id, u.email, loadUsers)}>🗑</button>
                         )}
                       </div>
                     </td>
@@ -1257,7 +1251,7 @@ export default function SettingsPage() {
                   <td style={{textAlign:'center'}}>
                     <div style={{display:'flex',gap:4,justifyContent:'center'}}>
                       <button className="btn btn-ghost btn-xs" onClick={()=>setCatModal({isNew:false,id:c.id,name:c.name})}>Edit</button>
-                      <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}} onClick={()=>del('purposeCategories',c.id,c.name)}>Delete</button>
+                      <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}} onClick={()=>del(purposeCategoriesApi.remove,c.id,c.name,loadCategories)}>Delete</button>
                     </div>
                   </td>
                 </tr>
@@ -1290,7 +1284,7 @@ export default function SettingsPage() {
                   <td style={{textAlign:'center'}}>
                     <div style={{display:'flex',gap:4,justifyContent:'center'}}>
                       <button className="btn btn-ghost btn-xs" onClick={()=>setTermModal({isNew:false,...t})}>Edit</button>
-                      <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}} onClick={()=>del('paymentTerms',t.id,t.name)}>Delete</button>
+                      <button className="btn btn-xs" style={{background:'#fef2f2',color:'#dc2626',border:'none',cursor:'pointer',borderRadius:8}} onClick={()=>del(paymentTermsApi.remove,t.id,t.name,loadTerms)}>Delete</button>
                     </div>
                   </td>
                 </tr>
@@ -1302,111 +1296,12 @@ export default function SettingsPage() {
     );
   }
 
-  // ── Data helpers ─────────────────────────────────────────────────────────
-  const doBackup = async (selected) => {
-    setDataWorking(true);
-    try {
-      const selectedModules = ALL_MODULES_FLAT.filter(m => selected.has(m.label));
-      const backupCollections = {};
-      const backupSingleDocs = {};
-      for (const mod of selectedModules) {
-        for (const collName of mod.collections) {
-          const snap = await getDocs(collection(db, collName));
-          backupCollections[collName] = snap.docs.map(d => ({ id: d.id, ...serializeData(d.data()) }));
-        }
-        for (const { coll, id } of (mod.singleDocs || [])) {
-          const snap = await getDoc(doc(db, coll, id));
-          if (snap.exists()) backupSingleDocs[`${coll}/${id}`] = serializeData(snap.data());
-        }
-      }
-      const settingsData = {};
-      if (selected.has('Settings (Config)')) {
-        const profSnap = await getDoc(doc(db, 'settings', 'profile'));
-        const modSnap  = await getDoc(doc(db, 'settings', 'modules'));
-        if (profSnap.exists()) settingsData.profile = serializeData(profSnap.data());
-        if (modSnap.exists())  settingsData.modules  = serializeData(modSnap.data());
-      }
-      const backup = {
-        version: '1.0',
-        app: 'workscale-finance',
-        exportedAt: new Date().toISOString(),
-        exportedBy: me,
-        modules: [...selected],
-        collections: backupCollections,
-        singleDocs: backupSingleDocs,
-        settings: settingsData,
-      };
-      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href = url;
-      a.download = `workscale-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showToast('Backup downloaded successfully.');
-      setBackupModal(null);
-    } catch (e) { showToast('Backup failed: ' + e.message); }
-    setDataWorking(false);
-  };
-
-  const doRestore = async (parsed) => {
-    setDataWorking(true);
-    try {
-      for (const [collName, docs] of Object.entries(parsed.collections || {})) {
-        for (let i = 0; i < docs.length; i += 499) {
-          const batch = writeBatch(db);
-          docs.slice(i, i + 499).forEach(({ id, ...data }) => {
-            batch.set(doc(db, collName, id), data);
-          });
-          await batch.commit();
-        }
-      }
-      for (const [path, data] of Object.entries(parsed.singleDocs || {})) {
-        const [coll, id] = path.split('/');
-        await setDoc(doc(db, coll, id), data, { merge: true });
-      }
-      if (parsed.settings?.profile) await setDoc(doc(db, 'settings', 'profile'), parsed.settings.profile, { merge: true });
-      if (parsed.settings?.modules)  await setDoc(doc(db, 'settings', 'modules'),  parsed.settings.modules,  { merge: true });
-      showToast('Data restored successfully.');
-      setRestoreModal(null);
-    } catch (e) { showToast('Restore failed: ' + e.message); }
-    setDataWorking(false);
-  };
-
-  const doReset = async () => {
-    setDataWorking(true);
-    try {
-      for (const mod of ALL_MODULES_FLAT) {
-        for (const collName of mod.collections) {
-          const snap = await getDocs(collection(db, collName));
-          const refs = snap.docs.map(d => d.ref);
-          for (let i = 0; i < refs.length; i += 499) {
-            const batch = writeBatch(db);
-            refs.slice(i, i + 499).forEach(ref => batch.delete(ref));
-            await batch.commit();
-          }
-        }
-        for (const { coll, id } of (mod.singleDocs || [])) {
-          try { await deleteDoc(doc(db, coll, id)); } catch (_) {}
-        }
-      }
-      try { await deleteDoc(doc(db, 'settings', 'profile')); } catch (_) {}
-      try { await deleteDoc(doc(db, 'settings', 'modules')); } catch (_) {}
-      try { await deleteObject(storageRef(storage, 'settings/company-logo')); } catch (_) {}
-      showToast('All data has been permanently deleted.');
-      setResetModal(null);
-    } catch (e) { showToast('Reset failed: ' + e.message); }
-    setDataWorking(false);
-  };
-
   // ── DataSettings section ──────────────────────────────────────────────────
   function DataSettings() {
     if (!isAdmin) {
       return (
         <>
-          <div className="sp-ch"><h1>Data Settings</h1><p>Backup, restore, or permanently reset all data across the portal.</p></div>
+          <div className="sp-ch"><h1>Data Settings</h1><p>How your data is stored, backed up, and restored.</p></div>
           <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:12,padding:'20px 22px',display:'flex',alignItems:'flex-start',gap:14}}>
             <span style={{fontSize:22,flexShrink:0}}>🔒</span>
             <div>
@@ -1421,61 +1316,31 @@ export default function SettingsPage() {
       <>
         <div className="sp-ch">
           <h1>Data Settings</h1>
-          <p>Backup, restore, or permanently reset all data across the portal. Accessible to Admins only.</p>
+          <p>How your data is stored, backed up, and restored. Accessible to Admins only.</p>
         </div>
 
-        {/* Backup */}
         <div className="sp-card">
-          <div className="sp-card-title">Backup Data</div>
-          <p style={{margin:'0 0 14px',fontSize:13,color:'#374151',lineHeight:1.6}}>
-            Download a full or selective backup of your data as a JSON file. The backup is compatible with the Restore Data feature.
-          </p>
-          <button className="btn btn-primary btn-sm" onClick={() => setBackupModal({ selected: new Set(ALL_MODULE_LABELS) })}>
-            📥 Backup Data
-          </button>
-        </div>
-
-        {/* Restore */}
-        <div className="sp-card">
-          <div className="sp-card-title">Restore Data</div>
-          <p style={{margin:'0 0 14px',fontSize:13,color:'#374151',lineHeight:1.6}}>
-            Restore data from a previously exported backup file. Existing records with the same ID will be overwritten; new records will be added.
-          </p>
-          <label className="btn btn-ghost btn-sm" style={{cursor:'pointer',display:'inline-flex',alignItems:'center',gap:6}}>
-            📤 Select Backup File
-            <input type="file" accept=".json" style={{display:'none'}} onChange={e => {
-              const file = e.target.files?.[0];
-              if (!file) return;
-              const reader = new FileReader();
-              reader.onload = ev => {
-                try {
-                  const parsed = JSON.parse(ev.target.result);
-                  if (!parsed.version || parsed.app !== 'workscale-finance') {
-                    showToast('Invalid backup file. Only Workscale Finance backups are accepted.');
-                    return;
-                  }
-                  setRestoreModal({ file, parsed });
-                } catch { showToast('Could not parse the file. Ensure it is a valid JSON backup.'); }
-              };
-              reader.readAsText(file);
-              e.target.value = '';
-            }} />
-          </label>
-        </div>
-
-        {/* Complete Reset */}
-        <div className="sp-card" style={{borderColor:'#fecaca'}}>
-          <div className="sp-card-title" style={{color:'#ef4444'}}>⚠️ Complete Reset Data</div>
-          <p style={{margin:'0 0 12px',fontSize:13,color:'#374151',lineHeight:1.6}}>
-            Permanently delete <strong>all data</strong> across every module — vouchers, journal entries, bank records, billing, invoices, collections, contacts, and settings.{' '}
-            <strong style={{color:'#dc2626'}}>This action cannot be undone.</strong>
-          </p>
-          <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:'10px 14px',fontSize:12,color:'#991b1b',marginBottom:14}}>
-            We strongly recommend downloading a backup before performing a reset.
+          <div className="sp-card-title">Backups Now Happen at the Database Level</div>
+          <div style={{display:'flex',alignItems:'flex-start',gap:14}}>
+            <span style={{fontSize:22,flexShrink:0}}>🛡️</span>
+            <div>
+              <p style={{margin:'0 0 10px',fontSize:13,color:'#374151',lineHeight:1.6}}>
+                Your data now lives in a managed <strong>Postgres</strong> database hosted on <strong>Sliplane</strong>.
+                Backups are taken at the database level — <code>pg_dump</code> exports and the platform&apos;s managed
+                snapshots — so every module is covered automatically, with nothing to export by hand.
+              </p>
+              <p style={{margin:0,fontSize:13,color:'#374151',lineHeight:1.6}}>
+                If you need a copy of your data or a point-in-time restore, contact your system administrator,
+                who can produce a database export or roll back to a snapshot.
+              </p>
+            </div>
           </div>
-          <button className="btn btn-danger btn-sm" onClick={() => setResetModal({ confirmText: '' })}>
-            🗑️ Complete Reset Data
-          </button>
+        </div>
+
+        <div className="info-box">
+          The previous in-browser JSON <strong>Backup</strong>, <strong>Restore</strong>, and <strong>Complete Reset</strong> tools
+          have been retired — they only covered the old storage system and are no longer needed now that backups are
+          managed by the database itself.
         </div>
       </>
     );
@@ -1535,14 +1400,21 @@ export default function SettingsPage() {
               <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.08em',textTransform:'uppercase',paddingBottom:6,borderBottom:'1px solid #f1f5f9'}}>
                 Basic Information
               </div>
+              {userModal.isNew && (
+                <div className="info-box" style={{marginBottom:0}}>
+                  <strong>Heads up:</strong> adding a user here does not create their login. They sign up once at
+                  the Sentire account portal; this list controls which workspaces admit them. Ask them to register
+                  at the account portal with the <strong>same email</strong> before they sign in.
+                </div>
+              )}
               <div className="grid2">
                 <div className="field col2">
-                  <label>Google Account Email *</label>
+                  <label>Account Email *</label>
                   <input type="email" value={userModal.email}
                     disabled={!userModal.isNew}
                     onChange={e=>setUserModal(m=>({...m,email:e.target.value}))}
-                    placeholder="user@gmail.com" autoFocus={userModal.isNew} />
-                  {userModal.isNew && <span style={{fontSize:11,color:'#94a3b8'}}>Must be a valid Google / Gmail account. The user will log in with this email.</span>}
+                    placeholder="user@company.com" autoFocus={userModal.isNew} />
+                  {userModal.isNew && <span style={{fontSize:11,color:'#94a3b8'}}>The user will sign in with this email — it must match their Sentire account portal registration.</span>}
                 </div>
                 <div className="field">
                   <label>Full Name *</label>
@@ -1751,134 +1623,6 @@ export default function SettingsPage() {
       )}
 
       {toast && <div className="sp-toast">{toast}</div>}
-
-      {/* ── Backup Modal ── */}
-      {backupModal && (
-        <div className="backdrop" onClick={() => !dataWorking && setBackupModal(null)}>
-          <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
-            <div className="modal-h">
-              <strong>📥 Backup Data</strong>
-              <button className="btn btn-ghost btn-sm" disabled={dataWorking} onClick={() => setBackupModal(null)}>✕</button>
-            </div>
-            <div className="modal-b" style={{maxHeight:'55vh',overflowY:'auto'}}>
-              <p style={{margin:0,fontSize:13,color:'#374151',lineHeight:1.5}}>
-                Select the modules to include in the backup. The file can be used with <strong>Restore Data</strong>.
-              </p>
-              <div style={{display:'flex',gap:8}}>
-                <button className="btn btn-ghost btn-xs" onClick={() => setBackupModal(m => ({ ...m, selected: new Set(ALL_MODULE_LABELS) }))}>Select All</button>
-                <button className="btn btn-ghost btn-xs" onClick={() => setBackupModal(m => ({ ...m, selected: new Set() }))}>Deselect All</button>
-              </div>
-              {MODULE_BACKUP_GROUPS.map(grp => (
-                <div key={grp.group}>
-                  <div style={{fontSize:10,fontWeight:900,color:'#94a3b8',letterSpacing:'.08em',textTransform:'uppercase',marginBottom:8,paddingBottom:4,borderBottom:'1px solid #f1f5f9'}}>{grp.group}</div>
-                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px 20px',marginBottom:12}}>
-                    {grp.modules.map(mod => (
-                      <label key={mod.label} style={{display:'flex',alignItems:'center',gap:7,cursor:'pointer',fontSize:13,color:'#374151',padding:'2px 0'}}>
-                        <input type="checkbox"
-                          checked={backupModal.selected.has(mod.label)}
-                          onChange={e => {
-                            const next = new Set(backupModal.selected);
-                            if (e.target.checked) next.add(mod.label); else next.delete(mod.label);
-                            setBackupModal(m => ({ ...m, selected: next }));
-                          }}
-                          style={{width:14,height:14,accentColor:'#f97316',cursor:'pointer'}}
-                        />
-                        {mod.label}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="modal-f">
-              <button className="btn btn-ghost" disabled={dataWorking} onClick={() => setBackupModal(null)}>Cancel</button>
-              <button className="btn btn-primary" disabled={dataWorking || backupModal.selected.size === 0} onClick={() => doBackup(backupModal.selected)}>
-                {dataWorking ? 'Preparing…' : `📥 Download Backup (${backupModal.selected.size} module${backupModal.selected.size !== 1 ? 's' : ''})`}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Restore Modal ── */}
-      {restoreModal && (() => {
-        const { parsed } = restoreModal;
-        const totalRecords = Object.values(parsed.collections || {}).reduce((s, docs) => s + docs.length, 0);
-        const settingsKeys = Object.keys(parsed.settings || {});
-        return (
-          <div className="backdrop" onClick={() => !dataWorking && setRestoreModal(null)}>
-            <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
-              <div className="modal-h">
-                <strong>📤 Restore Data</strong>
-                <button className="btn btn-ghost btn-sm" disabled={dataWorking} onClick={() => setRestoreModal(null)}>✕</button>
-              </div>
-              <div className="modal-b">
-                <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:10,padding:'12px 14px',fontSize:12,color:'#92400e',lineHeight:1.6}}>
-                  ⚠️ <strong>Merge restore:</strong> Existing records with the same ID will be overwritten. Records not in the backup will not be removed.
-                </div>
-                <div style={{background:'#f8fafc',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 16px',fontSize:13}}>
-                  <div style={{fontWeight:800,color:'#0b1220',marginBottom:6}}>Backup Summary</div>
-                  <div style={{display:'grid',gridTemplateColumns:'auto 1fr',gap:'5px 14px',color:'#374151'}}>
-                    <span style={{color:'#94a3b8',fontSize:12}}>File</span><span style={{fontWeight:600}}>{restoreModal.file.name}</span>
-                    <span style={{color:'#94a3b8',fontSize:12}}>Exported</span><span>{parsed.exportedAt ? new Date(parsed.exportedAt).toLocaleString() : '—'}</span>
-                    <span style={{color:'#94a3b8',fontSize:12}}>Exported By</span><span>{parsed.exportedBy || '—'}</span>
-                    <span style={{color:'#94a3b8',fontSize:12}}>Modules</span><span>{(parsed.modules || []).join(', ') || '—'}</span>
-                    <span style={{color:'#94a3b8',fontSize:12}}>Total Records</span><span style={{fontWeight:700,color:'#f97316'}}>{totalRecords.toLocaleString()}</span>
-                    {settingsKeys.length > 0 && <><span style={{color:'#94a3b8',fontSize:12}}>Settings</span><span>{settingsKeys.join(', ')}</span></>}
-                  </div>
-                </div>
-              </div>
-              <div className="modal-f">
-                <button className="btn btn-ghost" disabled={dataWorking} onClick={() => setRestoreModal(null)}>Cancel</button>
-                <button className="btn btn-primary" disabled={dataWorking} onClick={() => doRestore(parsed)}>
-                  {dataWorking ? 'Restoring…' : '📤 Restore Now'}
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* ── Reset Modal ── */}
-      {resetModal && (
-        <div className="backdrop" onClick={() => !dataWorking && setResetModal(null)}>
-          <div style={{width:'min(500px,98vw)',background:'#fff',borderRadius:16,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,.25)'}} onClick={e => e.stopPropagation()}>
-            <div style={{padding:'14px 18px',borderBottom:'1px solid #e5e7eb',background:'#fef2f2',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-              <strong style={{fontSize:14,fontWeight:900,color:'#991b1b'}}>⚠️ Complete Reset Data</strong>
-              <button className="btn btn-ghost btn-sm" disabled={dataWorking} onClick={() => setResetModal(null)}>✕</button>
-            </div>
-            <div style={{padding:'20px 20px 14px'}}>
-              <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:'12px 14px',marginBottom:16,fontSize:13,color:'#991b1b',lineHeight:1.6}}>
-                <strong>This will permanently delete ALL data across every module:</strong>
-                <ul style={{margin:'8px 0 0',paddingLeft:18,fontSize:12,color:'#b91c1c',lineHeight:1.8}}>
-                  <li>All vouchers, approvals, projections, payment schedules, disbursements, checks</li>
-                  <li>All journal entries, bank records, reconciliations, accounts (COA), tax entries, financial management (loans), fixed assets</li>
-                  <li>All billing statements, service invoices, collections</li>
-                  <li>All contacts, users, purpose categories, payment terms, and settings</li>
-                </ul>
-              </div>
-              <div className="field">
-                <label>Type <strong>RESET</strong> to confirm</label>
-                <input
-                  value={resetModal.confirmText}
-                  onChange={e => setResetModal(m => ({ ...m, confirmText: e.target.value }))}
-                  placeholder="Type RESET here"
-                  autoFocus
-                  style={{borderColor: resetModal.confirmText === 'RESET' ? '#ef4444' : undefined}}
-                />
-              </div>
-            </div>
-            <div style={{display:'flex',justifyContent:'flex-end',gap:10,padding:'12px 18px',borderTop:'1px solid #e5e7eb'}}>
-              <button className="btn btn-ghost" disabled={dataWorking} onClick={() => setResetModal(null)}>Cancel</button>
-              <button className="btn btn-danger"
-                disabled={resetModal.confirmText !== 'RESET' || dataWorking}
-                onClick={doReset}>
-                {dataWorking ? 'Deleting all data…' : '🗑️ Delete All Data'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
