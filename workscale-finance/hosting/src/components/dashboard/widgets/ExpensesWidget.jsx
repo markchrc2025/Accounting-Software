@@ -34,7 +34,7 @@ export function ExpensesWidget() {
         <div className="flex items-center gap-4 flex-1 min-h-0 mt-2">
           {/* Donut */}
           <div className="h-24 w-24 flex-shrink-0">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height={96} minWidth={0}>
               <PieChart>
                 <Pie
                   data={STUB_CATEGORIES.length ? STUB_CATEGORIES : [{ name: 'empty', value: 1, color: '#F3F4F6' }]}
