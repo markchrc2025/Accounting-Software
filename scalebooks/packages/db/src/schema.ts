@@ -108,6 +108,8 @@ export const appUsers = pgTable(
     email: text("email").notNull(),
     fullName: text("full_name"),
     role: userRole("role").notNull().default("maker"),
+    // Portal-owned extras: roles[], moduleAccess matrix, workEmail, signature.
+    profile: jsonb("profile"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   // Unique PER workspace, not globally: one email may belong to many workspaces
@@ -322,6 +324,7 @@ export const orgSettings = pgTable("org_settings", {
   profile: jsonb("profile"),
   approvalRouting: jsonb("approval_routing"),
   docNumbering: jsonb("doc_numbering"),
+  modulePolicies: jsonb("module_policies"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -898,6 +901,22 @@ export const creditLines = pgTable("credit_lines", {
   createdBy: text("created_by").references(() => appUsers.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ── Payment terms (0017) ──
+export const paymentTerms = pgTable(
+  "payment_terms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    days: integer("days").notNull().default(0),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("payment_terms_org_name_key").on(t.orgId, t.name)],
+);
 
 export type Organization = typeof organizations.$inferSelect;
 export type Account = typeof accounts.$inferSelect;

@@ -10,6 +10,8 @@ import {
   zTaxGroupUpdate,
   zPurposeCategoryInput,
   zPurposeCategoryUpdate,
+  zPaymentTermInput,
+  zPaymentTermUpdate,
   zBankBalanceInput,
   zBankBalanceUpdate,
   zBankTransactionInput,
@@ -21,6 +23,7 @@ import {
   taxRates,
   taxGroups,
   purposeCategories,
+  paymentTerms,
   dailyBankBalances,
   bankTransactions,
   bankReconciliations,
@@ -83,4 +86,15 @@ export const bankReconciliationRoutes = makeCrudRoutes({
   updateSchema: zBankReconciliationUpdate,
   orderBy: [{ column: bankReconciliations.createdAt, dir: "desc" }],
   docNo: { field: "reconNo", prefix: "RC" },
+});
+
+export const paymentTermRoutes = makeCrudRoutes({
+  plural: "terms",
+  singular: "term",
+  table: paymentTerms,
+  createSchema: zPaymentTermInput,
+  updateSchema: zPaymentTermUpdate,
+  orderBy: [{ column: paymentTerms.days, dir: "asc" }],
+  stampCreatedBy: false,
+  adminWrites: true,
 });

@@ -1,9 +1,7 @@
-// useTimeOfDayGreeting — returns { greeting, firstName } based on Asia/Manila time
-// firstName is resolved from Firestore appUsers (fullName field) so it shows
-// the real person's name, not the Google account / company name.
-import { useState, useEffect } from 'react';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { auth, db } from '../firebase.js';
+// useTimeOfDayGreeting — returns { greeting, firstName } based on Asia/Manila time.
+// firstName comes from the Authenticize session (user.fullName, falling back to
+// the email prefix) so it shows the real person's name.
+import { useAuth } from '../auth/AuthProvider.jsx';
 
 function getManilaGreeting() {
   const manilaHour = new Date(
@@ -19,23 +17,8 @@ function firstNameFrom(fullName) {
 }
 
 export function useTimeOfDayGreeting() {
-  const [firstName, setFirstName] = useState(() =>
-    firstNameFrom(auth.currentUser?.displayName)
-  );
-
-  useEffect(() => {
-    const email = auth.currentUser?.email;
-    if (!email) return;
-
-    getDocs(query(collection(db, 'appUsers'), where('email', '==', email)))
-      .then(snap => {
-        const data = snap.docs[0]?.data();
-        // Prefer fullName, then displayName, then fall back to auth displayName
-        const name = data?.fullName || data?.displayName || auth.currentUser?.displayName || '';
-        setFirstName(firstNameFrom(name));
-      })
-      .catch(() => {});
-  }, []);
-
-  return { greeting: getManilaGreeting(), firstName };
+  const { session } = useAuth();
+  const email = session?.user?.email || '';
+  const name = session?.user?.fullName || (email ? email.split('@')[0] : '');
+  return { greeting: getManilaGreeting(), firstName: firstNameFrom(name) };
 }

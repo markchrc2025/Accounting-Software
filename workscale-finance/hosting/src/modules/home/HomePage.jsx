@@ -1,4 +1,4 @@
-import { auth } from '../../firebase.js';
+import { useAuth } from '../../auth/AuthProvider.jsx';
 
 const APP_CARDS = [
   {
@@ -32,10 +32,12 @@ const APP_CARDS = [
 ];
 
 export default function HomePage() {
-  const user = auth.currentUser;
+  const { session } = useAuth();
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
-  const firstName = user?.displayName?.split(' ')[0] || 'there';
+  const email = session?.user?.email || '';
+  const displayName = session?.user?.fullName || (email ? email.split('@')[0] : '');
+  const firstName = displayName.trim().split(/\s+/)[0] || 'there';
   const today = new Date().toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' });
 
   return (

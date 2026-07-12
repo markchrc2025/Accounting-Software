@@ -1,77 +1,185 @@
-import { useState, useEffect } from 'react';
-import { collection, query, where, onSnapshot, updateDoc, doc, getDoc, serverTimestamp } from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+import { useState, useEffect, useCallback } from 'react';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
+import { useAuth } from '../../../auth/AuthProvider.jsx';
+import {
+  getSettings, listVouchers, listJournalEntries, listDisbursementReports,
+  weeklyProjectionsApi, transitionVoucher, transitionJournalEntry,
+  setDisbursementStatus, getVoucher, getJournalEntry, ApiError,
+} from '../../../lib/api.js';
 
 const fmt = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
 
-// Config per document type: which Firestore collection to watch, which statuses indicate
-// "needs verifier" vs "needs approver", and what status to advance to on approval.
+// ── API <-> UI mappings (mirrors VouchersPage / JournalPage) ─────────────────
+const TYPE_TO_API = { PAYMENT:'payment', RECEIPT:'receipt', PAYROLL:'payroll', FINAL_PAY:'final_pay', LOAN:'loan', CHECK:'check' };
+const API_TO_TYPE = Object.fromEntries(Object.entries(TYPE_TO_API).map(([k,v])=>[v,k]));
+const VSTATUS_LABEL = {
+  draft:'Draft', pending:'Pending', for_verification:'For Verification', verified:'Verified',
+  for_approval:'For Approval', approved:'Approved', paid:'Paid', rejected:'Rejected',
+  posted:'Approved', void:'Voided',
+};
+const JSTATUS_LABEL = {
+  draft:'Draft', pending_review:'Pending Review', pending_approval:'Pending Approval',
+  for_clearing:'For Clearing', cleared:'Cleared', for_posting:'For Posting',
+  posted:'Posted', rejected:'Rejected', voided:'Voided', reversed:'Reversed',
+};
+
+// The API enforces workflow graphs one hop at a time; approvals may need to walk
+// several hops (e.g. an admin approving a voucher still at 'for_verification').
+const VOUCHER_CHAIN = ['pending', 'for_verification', 'verified', 'for_approval', 'approved'];
+const JOURNAL_CHAIN = ['pending_review', 'pending_approval', 'for_clearing', 'cleared', 'for_posting'];
+function chainSteps(chain, from, to) {
+  const i = chain.indexOf(from);
+  const j = chain.indexOf(to);
+  if (j === -1) return [];
+  if (i === -1) return [to]; // unexpected status — try the direct hop, server will 409 with detail
+  if (j <= i) return [];
+  return chain.slice(i + 1, j + 1);
+}
+
+// ── API rows -> the legacy shapes this screen renders ────────────────────────
+// `status` stays the RAW api status (queue matching + transitions); display
+// labels are derived where needed. Extra legacy fields (check numbers, net cash,
+// reject reasons, …) live in jsonb `meta` and are spread through for the preview.
+const voucherRow = (v) => ({
+  ...(v.meta || {}),
+  id: v.id,
+  status: v.status,
+  statusLabel: VSTATUS_LABEL[v.status] || v.status,
+  voucherType: API_TO_TYPE[v.voucherType] || 'PAYMENT',
+  voucherId: v.voucherNo,
+  preparationDate: v.voucherDate,
+  purposeCategory: v.purposeCategory || '',
+  contactSummary: (v.meta && v.meta.contactSummary) || v.contactName || '',
+  totalAmount: (v.totalCents ?? 0) / 100,
+  notes: v.notes || '',
+  linkedJeId: v.journalEntryId || null,
+  paymentFrom: (v.meta && v.meta.paymentFrom) || v.paymentFromAccountName || v.paymentFromAccountCode || '',
+  createdBy: v.createdByEmail || '',
+  createdAt: v.createdAt,
+  lines: null, // loaded on demand via getVoucher when previewed
+});
+// Voucher API detail line -> the legacy line shape (as VouchersPage does).
+const voucherLineFromApi = (l) => {
+  const m = l.meta || {};
+  return {
+    lineNo: l.lineNo, contactId: m.contactId || '', contact: m.contact || '',
+    expenseAccountCode: l.accountCode || '', description: l.description || '',
+    amount: (l.amountCents ?? 0) / 100, category: m.category || '',
+    taxRateId: m.taxRateId || '', taxType: m.taxType || 'N/A',
+    taxRate: m.taxRate || 0, taxAmt: m.taxAmt || 0, inclusive: !!m.inclusive,
+    lineCheckNo: m.lineCheckNo || '', lineCheckDate: m.lineCheckDate || '',
+  };
+};
+const journalRow = (e) => ({
+  id: e.id,
+  status: e.status,
+  statusLabel: JSTATUS_LABEL[e.status] || e.status,
+  jeId: e.entryNo,
+  date: e.entryDate,
+  description: e.memo || '',
+  totalDebit: (e.totalCents ?? 0) / 100,
+  createdBy: e.createdByEmail || '',
+  createdAt: e.createdAt,
+  lines: (e.lines || []).map(l => ({
+    accountCode: l.accountCode || '',
+    accountName: l.accountName || '',
+    contact: l.contactName || '',
+    description: l.description || '',
+    debit: (l.debitCents ?? 0) / 100,
+    credit: (l.creditCents ?? 0) / 100,
+  })),
+});
+const disbursementRow = (r) => ({
+  ...(r.meta || {}),
+  id: r.id,
+  status: r.status, // stored capitalized ('For Verification', 'For Approval', …)
+  statusLabel: r.status,
+  reportId: r.reportNo,
+  date: r.reportDate,
+  createdBy: r.createdByEmail || '',
+  totalAmount: (r.totalCents ?? 0) / 100,
+  notes: r.notes || '',
+  createdAt: r.createdAt,
+  lines: Array.isArray(r.lines) ? r.lines : [], // jsonb snapshot — legacy peso shape
+});
+const projectionRow = (p) => ({
+  id: p.id,
+  status: p.status, // stored capitalized ('Pending Review', 'Pending Approval', …)
+  statusLabel: p.status,
+  projId: p.projNo || '',
+  startDate: p.startDate || '',
+  weekCoverage: p.weekCoverage || '',
+  totalAmount: (p.totalOutCents ?? 0) / 100,
+  notes: p.notes || '',
+  createdAt: p.createdAt,
+  lines: Array.isArray(p.lines) ? p.lines : [], // jsonb snapshot — legacy peso shape
+});
+
+// One list call per API source (Vouchers + Check Voucher share 'vouchers').
+const SOURCES = {
+  vouchers:      { fetch: () => listVouchers({ limit: 500 }),       map: voucherRow },
+  journal:       { fetch: () => listJournalEntries({ limit: 500 }), map: journalRow },
+  disbursements: { fetch: () => listDisbursementReports(),          map: disbursementRow },
+  projections:   { fetch: () => weeklyProjectionsApi.list(),        map: projectionRow },
+};
+
+// Config per document type: which API source to list, which RAW statuses indicate
+// "needs verifier" vs "needs approver", and how to render the row.
 const DOC_TYPE_CONFIG = {
   'Vouchers': {
-    collection:         'vouchers',
-    verifierStatus:     ['For Verification', 'Pending'],   // 'Pending' kept for legacy docs
-    approverStatus:     'For Approval',
-    verifierNextStatus: 'For Approval',
-    approverNextStatus: 'Approved',
-    docFilter:          (d) => d.voucherType !== 'CHECK',
-    label:              'Voucher',
-    idField:            'voucherId',
-    dateField:          'preparationDate',
-    descField:          'contactSummary',
-    amountField:        'totalAmount',
+    source:         'vouchers',
+    verifierStatus: ['for_verification', 'pending'],   // 'pending' kept for legacy docs
+    approverStatus: 'for_approval',
+    docFilter:      (d) => d.voucherType !== 'CHECK',
+    label:          'Voucher',
+    idField:        'voucherId',
+    dateField:      'preparationDate',
+    descField:      'contactSummary',
+    amountField:    'totalAmount',
   },
   'Check Voucher': {
-    collection:         'vouchers',
-    verifierStatus:     'For Verification',
-    approverStatus:     'For Approval',
-    verifierNextStatus: 'For Approval',
-    approverNextStatus: 'Approved',
-    docFilter:          (d) => d.voucherType === 'CHECK',
-    label:              'Check Voucher',
-    idField:            'voucherId',
-    dateField:          'preparationDate',
-    descField:          'contactSummary',
-    amountField:        'totalAmount',
+    source:         'vouchers',
+    verifierStatus: ['for_verification'],
+    approverStatus: 'for_approval',
+    docFilter:      (d) => d.voucherType === 'CHECK',
+    label:          'Check Voucher',
+    idField:        'voucherId',
+    dateField:      'preparationDate',
+    descField:      'contactSummary',
+    amountField:    'totalAmount',
   },
   'Disbursements': {
-    collection:         'disbursementReports',
-    verifierStatus:     'For Verification',
-    approverStatus:     'For Approval',
-    verifierNextStatus: 'For Approval',
-    approverNextStatus: 'Approved',
-    docFilter:          () => true,
-    label:              'Disbursement',
-    idField:            'reportId',
-    dateField:          'date',
-    descField:          'createdBy',
-    amountField:        'totalAmount',
+    source:         'disbursements',
+    verifierStatus: ['For Verification'],
+    approverStatus: 'For Approval',
+    docFilter:      () => true,
+    label:          'Disbursement',
+    idField:        'reportId',
+    dateField:      'date',
+    descField:      'createdBy',
+    amountField:    'totalAmount',
   },
   'Weekly Projections': {
-    collection:         'weeklyProjections',
-    verifierStatus:     'Pending Review',
-    approverStatus:     'Pending Approval',
-    verifierNextStatus: 'Pending Approval',
-    approverNextStatus: 'Approved',
-    docFilter:          () => true,
-    label:              'Projection',
-    idField:            'projId',
-    dateField:          'startDate',
-    descField:          'weekCoverage',
-    amountField:        'totalAmount',
+    source:         'projections',
+    verifierStatus: ['Pending Review'],
+    approverStatus: 'Pending Approval',
+    docFilter:      () => true,
+    label:          'Projection',
+    idField:        'projId',
+    dateField:      'startDate',
+    descField:      'weekCoverage',
+    amountField:    'totalAmount',
   },
   'Journal': {
-    collection:         'journalEntries',
-    verifierStatus:     'Pending Review',
-    approverStatus:     'Pending Approval',
-    verifierNextStatus: 'Pending Approval',
-    approverNextStatus: 'For Posting',
-    docFilter:          () => true,
-    label:              'Journal Entry',
-    idField:            'jeId',
-    dateField:          'date',
-    descField:          'description',
-    amountField:        'totalDebit',
+    source:         'journal',
+    verifierStatus: ['pending_review'],
+    approverStatus: 'pending_approval',
+    docFilter:      () => true,
+    label:          'Journal Entry',
+    idField:        'jeId',
+    dateField:      'date',
+    descField:      'description',
+    amountField:    'totalDebit',
   },
 };
 
@@ -91,6 +199,9 @@ const CSS = `
   .approve-btn:hover { background:#a7f3d0; }
   .reject-btn  { background:#fee2e2; color:#dc2626; border:0; border-radius:8px; padding:6px 12px; font-weight:700; font-size:12px; cursor:pointer; white-space:nowrap; }
   .reject-btn:hover  { background:#fecaca; }
+  .refresh-btn { background:#f1f5f9; color:#0b1220; border:0; border-radius:10px; padding:9px 16px; font-weight:700; font-size:13px; cursor:pointer; font-family:inherit; }
+  .refresh-btn:hover { background:#e2e8f0; }
+  .refresh-btn:disabled { opacity:.5; cursor:not-allowed; }
   .toast { position:fixed; right:16px; bottom:16px; background:#0b1220; color:#fff; padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; z-index:9999; }
   .badge-count { display:inline-block; background:#ef4444; color:#fff; border-radius:999px; font-size:10px; font-weight:800; padding:1px 7px; margin-left:6px; }
   .info-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:16px; }
@@ -109,6 +220,10 @@ const CSS = `
 
 export default function ApprovalsPage() {
   const { isAdmin } = usePermissions();
+  const { session } = useAuth();
+  const userEmail = session?.user?.email || '';
+  const me = userEmail.toLowerCase();
+
   const [pending,      setPending]      = useState([]);
   const [loading,      setLoading]      = useState(true);
   const [selected,     setSelected]     = useState(new Set());
@@ -119,152 +234,147 @@ export default function ApprovalsPage() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
-  // Fetch linked JE when a regular Voucher preview opens
-  useEffect(() => {
-    setPreviewJe(null);
-    if (!previewItem) return;
-    if (previewItem._docType === 'Vouchers' && previewItem.linkedJeId) {
-      getDoc(doc(db, 'journalEntries', previewItem.linkedJeId))
-        .then(snap => { if (snap.exists()) setPreviewJe({ id: snap.id, ...snap.data() }); })
-        .catch(() => {});
-    }
-  }, [previewItem]);
+  // ── Load queues: routing from settings + one list call per API source ──────
+  // Real-time listeners are gone with Firestore: the page loads on mount, after
+  // every action, and via the Refresh button.
+  const load = useCallback(async () => {
+    if (!me) { setPending([]); setLoading(false); return; }
+    setLoading(true);
+    try {
+      const settings = await getSettings();
+      const routes = settings?.approvalRouting?.routes ?? [];
 
-  useEffect(() => {
-    const me = auth.currentUser?.email?.toLowerCase();
-    if (!me) { setLoading(false); return; }
-
-    let docUnsubs = [];
-    const cancelDocListeners = () => { docUnsubs.forEach(u => u()); docUnsubs = []; };
-
-    // Use onSnapshot so the page reacts automatically when approval routing is saved/changed
-    const routingUnsub = onSnapshot(doc(db, 'settings', 'approvalRouting'), (snap) => {
-      cancelDocListeners(); // tear down old collection listeners before rebuilding
-
-      const routes = snap.exists() ? (snap.data().routes ?? []) : [];
-      console.log('[ApprovalsPage] me:', me, '| routes:', routes.length);
-
-      // Determine which doc types this user is a verifier or approver for (based on routing)
-      // No maker filtering — the verifier/approver sees ALL docs of that type at the right status,
-      // regardless of who created them (Admin, Maker, or anyone else).
-      const docTypeRoles = {}; // docType → { isVerifier: bool, isApprover: bool }
+      // Determine which doc types this user is a verifier or approver for.
+      // No maker filtering — the verifier/approver sees ALL docs of that type at
+      // the right status, regardless of who created them.
+      const docTypeRoles = {}; // docType → { isVerifier, isApprover }
       for (const docType of Object.keys(DOC_TYPE_CONFIG)) {
         const isVerifier = routes.some(r => r.documentType === docType && (r.verifierEmail || '').toLowerCase() === me);
         const isApprover = routes.some(r => r.documentType === docType && (r.approverEmail || '').toLowerCase() === me);
         if (isVerifier || isApprover) docTypeRoles[docType] = { isVerifier, isApprover };
       }
-      console.log('[ApprovalsPage] docTypeRoles:', JSON.stringify(docTypeRoles));
 
-      // Group doc types by Firestore collection to avoid duplicate listeners on same collection
-      // (Vouchers + Check Voucher share the same 'vouchers' collection)
-      const collectionGroups = {}; // collectionName → { docTypes: string[] }
-      for (const docType of Object.keys(docTypeRoles)) {
-        const colName = DOC_TYPE_CONFIG[docType].collection;
-        if (!collectionGroups[colName]) collectionGroups[colName] = { docTypes: [] };
-        collectionGroups[colName].docTypes.push(docType);
-      }
-
-      if (Object.keys(collectionGroups).length === 0) {
-        console.log('[ApprovalsPage] No routes found for this user → empty state');
+      const sourceNames = [...new Set(Object.keys(docTypeRoles).map(t => DOC_TYPE_CONFIG[t].source))];
+      if (sourceNames.length === 0) {
         setPending([]);
         setLoading(false);
         return;
       }
 
-      // Track loaded state per collection so we only clear loading once all are ready
-      const loadedFlags = {};
-      const snapshots   = {}; // collectionName → doc[]
+      const bySource = await Promise.all(sourceNames.map(async (name) => {
+        const rows = await SOURCES[name].fetch().catch(() => []);
+        return rows.map(r => ({ ...SOURCES[name].map(r), _source: name }));
+      }));
 
-      const checkAllLoaded = () => {
-        if (Object.keys(loadedFlags).length === Object.keys(collectionGroups).length
-            && Object.values(loadedFlags).every(Boolean)) {
-          const merged = Object.values(snapshots).flat();
-          merged.sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
-          setPending(merged);
-          setLoading(false);
-        }
-      };
-
-      for (const [colName, { docTypes }] of Object.entries(collectionGroups)) {
-        loadedFlags[colName] = false;
-
-        // Collect all relevant statuses for this collection
-        const statusSet = new Set();
-        for (const docType of docTypes) {
-          const cfg   = DOC_TYPE_CONFIG[docType];
-          const roles = docTypeRoles[docType];
-          if (roles.isVerifier) [].concat(cfg.verifierStatus).forEach(s => statusSet.add(s));
-          if (roles.isApprover) statusSet.add(cfg.approverStatus);
-        }
-
-        const q = query(
-          collection(db, colName),
-          where('status', 'in', [...statusSet]),
-        );
-        console.log(`[ApprovalsPage] Query ${colName} — status IN`, [...statusSet]);
-
-        const unsub = onSnapshot(q, (qSnap) => {
-          console.log(`[ApprovalsPage] ${colName} snapshot: ${qSnap.docs.length} raw docs`);
-
-          const allDocs = qSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-          const filtered = [];
-
-          for (const d of allDocs) {
-            for (const docType of docTypes) {
-              const cfg   = DOC_TYPE_CONFIG[docType];
-              const roles = docTypeRoles[docType];
-              if (!cfg.docFilter(d)) continue;
-              if (roles.isVerifier && [].concat(cfg.verifierStatus).includes(d.status)) {
-                filtered.push({ ...d, _collection: colName, _docType: docType });
-                break;
-              }
-              if (roles.isApprover && d.status === cfg.approverStatus) {
-                filtered.push({ ...d, _collection: colName, _docType: docType });
-                break;
-              }
-            }
+      const merged = [];
+      const seen = new Set();
+      for (const row of bySource.flat()) {
+        for (const [docType, roles] of Object.entries(docTypeRoles)) {
+          const cfg = DOC_TYPE_CONFIG[docType];
+          if (cfg.source !== row._source) continue;
+          if (!cfg.docFilter(row)) continue;
+          const needsVerify  = roles.isVerifier && cfg.verifierStatus.includes(row.status);
+          const needsApprove = roles.isApprover && row.status === cfg.approverStatus;
+          if ((needsVerify || needsApprove) && !seen.has(`${row._source}-${row.id}`)) {
+            seen.add(`${row._source}-${row.id}`);
+            merged.push({ ...row, _docType: docType });
+            break;
           }
-
-          // Deduplicate by id
-          const seen = new Set();
-          snapshots[colName] = filtered.filter(d => { if (seen.has(d.id)) return false; seen.add(d.id); return true; });
-
-          loadedFlags[colName] = true;
-          checkAllLoaded();
-        });
-
-        docUnsubs.push(unsub);
+        }
       }
-    }, () => setLoading(false));
+      merged.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0)); // oldest first
+      setPending(merged);
+    } catch (e) {
+      console.error('[ApprovalsPage] load failed', e);
+      setPending([]);
+    }
+    setLoading(false);
+  }, [me]);
 
-    return () => { routingUnsub(); cancelDocListeners(); };
-  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // Fetch details when a preview opens: voucher line items (list rows don't
+  // embed them) and the linked JE for regular Vouchers.
+  const previewId = previewItem?.id;
+  useEffect(() => {
+    setPreviewJe(null);
+    if (!previewItem) return;
+    let cancelled = false;
+
+    if (previewItem._docType === 'Vouchers' && previewItem.linkedJeId) {
+      getJournalEntry(previewItem.linkedJeId)
+        .then(({ entry, lines }) => {
+          if (cancelled || !entry) return;
+          setPreviewJe({
+            id: entry.id,
+            jeId: entry.entryNo,
+            status: JSTATUS_LABEL[entry.status] || entry.status,
+            lines: (lines || []).map(l => ({
+              accountCode: l.accountCode || '',
+              accountName: l.accountName || '',
+              description: l.description || '',
+              debit: (l.debitCents ?? 0) / 100,
+              credit: (l.creditCents ?? 0) / 100,
+            })),
+          });
+        })
+        .catch(() => {});
+    }
+
+    if ((previewItem._docType === 'Vouchers' || previewItem._docType === 'Check Voucher') && previewItem.lines === null) {
+      getVoucher(previewItem.id)
+        .then(({ lines }) => {
+          if (cancelled) return;
+          const mapped = (lines || []).map(voucherLineFromApi);
+          setPreviewItem(prev => (prev && prev.id === previewItem.id ? { ...prev, lines: mapped } : prev));
+        })
+        .catch(() => {});
+    }
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewId]);
 
   function toggle(id) {
     setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   }
 
-  async function approve(item, remarks) {
-    const me = auth.currentUser?.email;
+  // NOTE: remarks typed in the confirm modal are not persisted server-side yet
+  // for vouchers, journal entries, and projections (the API status routes carry
+  // no remarks field — server-side remark/audit persistence lands later).
+  // Disbursement reject reasons ARE persisted via setDisbursementStatus.
+  async function approve(item, _remarks) {
     const cfg = DOC_TYPE_CONFIG[item._docType];
-    const isVerifying = !isAdmin && [].concat(cfg.verifierStatus).includes(item.status);
-    const nextStatus  = isVerifying ? cfg.verifierNextStatus : cfg.approverNextStatus;
-    const extra = isVerifying
-      ? { verifiedAt: serverTimestamp(), verifiedBy: me, verifierRemarks: remarks || '' }
-      : { approvedAt: serverTimestamp(), approvedBy: me, approverRemarks: remarks || '' };
-    await updateDoc(doc(db, item._collection, item.id), { status: nextStatus, ...extra, updatedAt: serverTimestamp() });
+    const isVerifying = !isAdmin && cfg.verifierStatus.includes(item.status);
+    if (cfg.source === 'vouchers') {
+      const target = isVerifying ? 'for_approval' : 'approved';
+      for (const to of chainSteps(VOUCHER_CHAIN, item.status, target)) await transitionVoucher(item.id, to);
+    } else if (cfg.source === 'journal') {
+      // Legacy approver action lands the entry at For Posting; the API graph
+      // requires stepping through for_clearing/cleared to get there.
+      const target = isVerifying ? 'pending_approval' : 'for_posting';
+      for (const to of chainSteps(JOURNAL_CHAIN, item.status, target)) await transitionJournalEntry(item.id, to);
+    } else if (cfg.source === 'disbursements') {
+      // Server stamps reviewedBy/approvedBy in meta from the authenticated user.
+      await setDisbursementStatus(item.id, isVerifying ? 'For Approval' : 'Approved');
+    } else if (cfg.source === 'projections') {
+      await weeklyProjectionsApi.update(item.id, { status: isVerifying ? 'Pending Approval' : 'Approved' });
+    }
     showToast(isVerifying ? `${cfg.label} verified. Sent for final approval.` : `${cfg.label} approved.`);
   }
 
   async function reject(item, remarks) {
-    await updateDoc(doc(db, item._collection, item.id), {
-      status: 'Rejected',
-      rejectedAt: serverTimestamp(),
-      rejectedBy: auth.currentUser?.email,
-      rejectionReason: remarks || '',
-      updatedAt: serverTimestamp(),
-    });
-    showToast(`${DOC_TYPE_CONFIG[item._docType]?.label || 'Document'} rejected.`);
+    const cfg = DOC_TYPE_CONFIG[item._docType];
+    if (cfg.source === 'vouchers') {
+      await transitionVoucher(item.id, 'rejected');
+    } else if (cfg.source === 'journal') {
+      await transitionJournalEntry(item.id, 'rejected');
+    } else if (cfg.source === 'disbursements') {
+      await setDisbursementStatus(item.id, 'Rejected', remarks || undefined);
+    } else if (cfg.source === 'projections') {
+      await weeklyProjectionsApi.update(item.id, { status: 'Rejected' });
+    }
+    showToast(`${cfg?.label || 'Document'} rejected.`);
   }
 
   async function handleConfirm() {
@@ -281,8 +391,10 @@ export default function ApprovalsPage() {
         ? `${succeed} document${succeed > 1 ? 's' : ''} ${action === 'approve' ? 'processed' : 'rejected'} successfully.`
         : `${succeed} processed, ${failed} failed. Please retry the failed items.`);
     } else if (failed > 0) {
-      showToast('Action failed. Please try again.');
+      const err = results.find(r => r.status === 'rejected')?.reason;
+      showToast(err instanceof ApiError ? err.detail : 'Action failed. Please try again.');
     }
+    await load(); // reload the affected queues
   }
 
   const totalAmt = pending.reduce((s, item) => {
@@ -308,6 +420,9 @@ export default function ApprovalsPage() {
           </h1>
           <p style={{ margin:0, fontSize:12, color:'#64748b' }}>Documents routed to you for review or approval</p>
         </div>
+        <button className="refresh-btn" onClick={load} disabled={loading}>
+          ↻ {loading ? 'Refreshing…' : 'Refresh'}
+        </button>
       </div>
 
       <div className="ap-body">
@@ -322,7 +437,7 @@ export default function ApprovalsPage() {
           </div>
           <div className="info-card">
             <div className="info-label">Logged in as</div>
-            <div className="info-value" style={{ fontSize:13, color:'#475569', fontWeight:700 }}>{auth.currentUser?.email}</div>
+            <div className="info-value" style={{ fontSize:13, color:'#475569', fontWeight:700 }}>{userEmail}</div>
           </div>
         </div>
 
@@ -375,7 +490,7 @@ export default function ApprovalsPage() {
                   const amount = Number(item[cfg.amountField]) || 0;
                   const isChecked = selected.has(item.id);
                   return (
-                    <tr key={`${item._collection}-${item.id}`} style={{ background: isChecked ? '#f0f9ff' : undefined }}>
+                    <tr key={`${item._source}-${item.id}`} style={{ background: isChecked ? '#f0f9ff' : undefined }}>
                       <td style={{ textAlign:'center', width:40 }} onClick={e => e.stopPropagation()}>
                         <input type="checkbox" checked={isChecked} onChange={() => toggle(item.id)} style={{ cursor:'pointer' }} />
                       </td>
@@ -811,5 +926,3 @@ export default function ApprovalsPage() {
     </div>
   );
 }
-
-

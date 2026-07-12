@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
-import { collection, query, orderBy, limit, onSnapshot, where } from 'firebase/firestore';
-import { db } from '../../firebase.js';
 import { useNavigate } from 'react-router-dom';
+import { listVouchers, billingStatementsApi } from '../../lib/api.js';
 import { usePermissions } from '../../contexts/PermissionsContext.jsx';
 
 import { PrivacyProvider } from '../../contexts/PrivacyContext.jsx';
@@ -21,6 +20,15 @@ import { TotalCollectedWidget }   from '../../components/dashboard/widgets/Total
 import { RecentVouchersWidget }   from '../../components/dashboard/widgets/RecentVouchersWidget.jsx';
 import { RecentBillingWidget }    from '../../components/dashboard/widgets/RecentBillingWidget.jsx';
 import { AddWidgetCard }          from '../../components/dashboard/widgets/AddWidgetCard.jsx';
+
+// API status enum -> UI labels (mirrors VouchersPage's VSTATUS_LABEL).
+const VSTATUS_LABEL = {
+  draft:'Draft', pending:'Pending', for_verification:'For Verification', verified:'Verified',
+  for_approval:'For Approval', approved:'Approved', paid:'Paid', rejected:'Rejected',
+  posted:'Approved', void:'Voided',
+};
+// Raw API statuses that count as "pending approval" (legacy: Pending / For Verification / For Approval).
+const PENDING_API_STATUSES = ['pending', 'for_verification', 'for_approval'];
 
 export default function DashboardPage() {
   return (
@@ -42,65 +50,64 @@ function DashboardPageInner() {
   const [isCustomising, setIsCustomising] = useState(false);
   const { layout, isCustomised, setLayout, saveLayout, resetLayout, cancelEdit } = useDashboardLayout();
 
-  // ── Firestore real-time listeners ─────────────────────────────────────────
+  // ── One-shot REST load (Firestore listeners replaced by the API) ──────────
   useEffect(() => {
-    const loaded = new Set();
-    const KEYS = ['vouchers', 'billing', 'allV', 'pending'];
-    function markDone(key) {
-      loaded.add(key);
-      if (KEYS.every(k => loaded.has(k))) setLoading(false);
-    }
+    let cancelled = false;
+    setLoading(true);
 
-    const u1 = onSnapshot(
-      query(collection(db, 'vouchers'), orderBy('createdAt', 'desc'), limit(8)),
-      snap => {
-        // CHECK vouchers are owned by Check Registry — exclude them here
-        const vouchers = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(v => v.voucherType !== 'CHECK');
-        setRecentVouchers(vouchers.slice(0, 5));
-        markDone('vouchers');
-      },
-      e => { console.error(e); markDone('vouchers'); }
-    );
+    const vouchersReq = listVouchers({ limit: 500 })
+      .then(rows => {
+        if (cancelled) return;
+        const mapped = rows.map(v => ({
+          id:              v.id,
+          voucherId:       v.voucherNo,
+          voucherType:     v.voucherType, // raw api enum ('check', 'payment', …)
+          status:          VSTATUS_LABEL[v.status] || v.status,
+          apiStatus:       v.status,
+          preparationDate: v.voucherDate,
+          contactSummary:  (v.meta && v.meta.contactSummary) || v.contactName || '',
+          purposeCategory: v.purposeCategory || '',
+          totalAmount:     (v.totalCents ?? 0) / 100,
+          createdAt:       v.createdAt,
+        }));
+        // CHECK vouchers are owned by Check Registry — exclude them here.
+        // The API sorts by voucherDate; re-sort by createdAt desc for "recent".
+        const recent = mapped
+          .filter(v => v.voucherType !== 'check')
+          .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+          .slice(0, 5);
+        setRecentVouchers(recent);
+        const pending = canSeeApprovals
+          ? mapped.filter(v => PENDING_API_STATUSES.includes(v.apiStatus)).length
+          : 0; // Makers have no approval queue
+        setStats(prev => ({ ...prev, vouchers: mapped.length, pending }));
+      })
+      .catch(e => console.error(e));
 
-    const u2 = onSnapshot(
-      query(collection(db, 'billingStatements'), orderBy('createdAt', 'desc'), limit(5)),
-      snap => {
-        const statements = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const billingReq = billingStatementsApi.list()
+      .then(rows => {
+        if (cancelled) return;
+        const statements = rows.slice(0, 5).map(b => ({
+          id:              b.id,
+          billingNo:       b.bsNo,
+          contactName:     b.contactName || '',
+          period:          b.periodStart && b.periodEnd ? `${b.periodStart} – ${b.periodEnd}` : '',
+          netDue:          (b.netDueCents ?? 0) / 100,
+          amountCollected: (b.appliedCents ?? 0) / 100,
+          status:          b.status || 'Draft',
+        }));
         setRecentBilling(statements);
-        const totalBilled    = statements.reduce((s, d) => s + (d.netDue || d.totalAmount || 0), 0);
+        const totalBilled    = statements.reduce((s, d) => s + (d.netDue || 0), 0);
         const totalCollected = statements.reduce((s, d) => s + (d.amountCollected || 0), 0);
         setStats(prev => ({ ...prev, totalBilled, totalCollected }));
-        markDone('billing');
-      },
-      e => { console.error(e); markDone('billing'); }
-    );
+      })
+      .catch(e => console.error(e));
 
-    const u3 = onSnapshot(
-      collection(db, 'vouchers'),
-      snap => {
-        setStats(prev => ({ ...prev, vouchers: snap.size }));
-        markDone('allV');
-      },
-      e => { console.error(e); markDone('allV'); }
-    );
+    Promise.allSettled([vouchersReq, billingReq]).then(() => {
+      if (!cancelled) setLoading(false);
+    });
 
-    let u4 = () => {};
-    if (canSeeApprovals) {
-      u4 = onSnapshot(
-        query(collection(db, 'vouchers'), where('status', 'in', ['Pending', 'For Verification', 'For Approval'])),
-        snap => {
-          setStats(prev => ({ ...prev, pending: snap.size }));
-          markDone('pending');
-        },
-        e => { console.error(e); markDone('pending'); }
-      );
-    } else {
-      // Makers have no approval queue
-      setStats(prev => ({ ...prev, pending: 0 }));
-      markDone('pending');
-    }
-
-    return () => { u1(); u2(); u3(); u4(); };
+    return () => { cancelled = true; };
   }, [canSeeApprovals]);
 
   // ── Widget map — keyed by layout item id ────────────────────────────────────

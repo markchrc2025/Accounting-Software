@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { auth } from '../firebase.js';
+import { useAuth } from '../auth/AuthProvider.jsx';
 
 const NAV_ITEMS = [
   { label: 'Portal Home',   icon: '🏠', path: '/' },
@@ -14,7 +14,8 @@ export default function AppShell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   const navigate  = useNavigate();
   const location  = useLocation();
-  const user      = auth.currentUser;
+  const { session, signOut } = useAuth();
+  const userEmail = session?.user?.email;
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
@@ -90,9 +91,9 @@ export default function AppShell({ children }) {
         {!collapsed && (
           <div style={{ marginTop: 'auto', padding: '16px 14px', color: '#cbd5e1', fontSize: 12 }}>
             <div>Logged in:</div>
-            <div style={{ wordBreak: 'break-all', marginTop: 2 }}>{user?.email || '—'}</div>
+            <div style={{ wordBreak: 'break-all', marginTop: 2 }}>{userEmail || '—'}</div>
             <button
-              onClick={() => auth.signOut()}
+              onClick={signOut}
               style={{ marginTop: 10, background: 'rgba(255,255,255,.08)', border: 'none', color: '#cbd5e1', borderRadius: 8, padding: '6px 12px', fontSize: 11, fontWeight: 700, cursor: 'pointer', width: '100%' }}
             >
               Sign Out

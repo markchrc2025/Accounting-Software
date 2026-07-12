@@ -106,5 +106,14 @@ export const zOrgSettingsUpdate = z.object({
   profile: z.record(z.unknown()).nullable().optional(),
   approvalRouting: z.record(z.unknown()).nullable().optional(),
   docNumbering: z.record(z.unknown()).nullable().optional(),
+  modulePolicies: z.record(z.unknown()).nullable().optional(),
 });
 export type OrgSettingsUpdate = z.infer<typeof zOrgSettingsUpdate>;
+
+// ── Payment terms (Settings reference data) ──────────────────────────────────
+export const zPaymentTermInput = z.object({
+  name: z.string().trim().min(1, "Name is required").max(120),
+  days: z.number().int().min(0).max(3650).default(0),
+  description: nullableTrimmed(500),
+});
+export const zPaymentTermUpdate = zPaymentTermInput.partial();
