@@ -3,16 +3,16 @@ name: ScaleBooks CI
 on:
   push:
     paths:
-      - "scalebooks/**"
+      - "sentire-books-api/**"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
-      - "scalebooks/**"
+      - "sentire-books-api/**"
       - ".github/workflows/ci.yml"
 
 defaults:
   run:
-    working-directory: scalebooks
+    working-directory: sentire-books-api
 
 jobs:
   build-and-test:
@@ -24,7 +24,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: scalebooks
+          POSTGRES_DB: sentire_books
         ports:
           - 5432:5432
         options: >-
@@ -35,9 +35,9 @@ jobs:
 
     env:
       # Owner connection — runs migrations + seed (exempt from RLS).
-      DATABASE_URL_DIRECT: postgres://postgres:postgres@localhost:5432/scalebooks
+      DATABASE_URL_DIRECT: postgres://postgres:postgres@localhost:5432/sentire_books
       # App-role connection — runs the integration tests (subject to RLS).
-      DATABASE_URL: postgres://sentire_books_app:app@localhost:5432/scalebooks
+      DATABASE_URL: postgres://sentire_books_app:app@localhost:5432/sentire_books
 
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: scalebooks/pnpm-lock.yaml
+          cache-dependency-path: sentire-books-api/pnpm-lock.yaml
 
       - name: Install
         run: pnpm install
@@ -77,9 +77,9 @@ jobs:
             -c "ALTER ROLE sentire_books_app WITH LOGIN PASSWORD 'app';"
 
       - name: Seed (as owner)
-        run: pnpm --filter @scalebooks/db seed
+        run: pnpm --filter @sentire-books/db seed
         env:
           DATABASE_URL: ${{ env.DATABASE_URL_DIRECT }}
 
       - name: Integration tests (as app role — RLS enforced)
-        run: pnpm --filter @scalebooks/api test:int
+        run: pnpm --filter @sentire-books/api test:int

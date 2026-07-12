@@ -1,7 +1,7 @@
 # Sentire Books — System Design, Requirements & Actors
 
 > **Status:** Living document · **Product:** Sentire Books (accounting) · **Platform codename:** `scalebooks`
-> **Sources of truth:** the running code in [`scalebooks/`](../scalebooks) (built) and the portal in [`sentire-books/`](../sentire-books) (fully migrated). Everything marked **✅ Built** is verified against the code as of this writing; **🔜 Roadmap** items come from the legacy system's proven workflows or stated plans.
+> **Sources of truth:** the running code in [`sentire-books-api/`](../sentire-books-api) (built) and the portal in [`sentire-books/`](../sentire-books) (fully migrated). Everything marked **✅ Built** is verified against the code as of this writing; **🔜 Roadmap** items come from the legacy system's proven workflows or stated plans.
 
 ---
 
@@ -49,8 +49,8 @@ The current system replaces a legacy Firebase/Firestore app (now the fully migra
 
 | Actor | Role in the system |
 |---|---|
-| **Web SPA** (`@scalebooks/web`) | React/Vite app; renders UI, performs client-side validation (UX only), holds the Supabase session. |
-| **API** (`@scalebooks/api`) | Hono/Node service; the only ledger writer. Verifies JWTs, resolves org context, executes transactional postings. |
+| **Web SPA** (`@sentire-books-api/web`) | React/Vite app; renders UI, performs client-side validation (UX only), holds the Supabase session. |
+| **API** (`@sentire-books-api/api`) | Hono/Node service; the only ledger writer. Verifies JWTs, resolves org context, executes transactional postings. |
 | **Authenticize** | Identity provider (self-hosted OIDC / OAuth 2.1 on Better Auth). Issues RS256 JWTs (email/password + Google). The API validates them via Authenticize's JWKS — no shared secret. |
 | **PostgreSQL** | System of record. Enforces balance, immutability, uniqueness, and Row-Level-Security tenant isolation. |
 | **Google IdP** | Upstream OAuth provider federated through Authenticize. |
@@ -185,7 +185,7 @@ flowchart LR
     CI["GitHub Actions CI<br/>typecheck · tests · migrations<br/>RLS-enforced integration tests"] -. "gates every merge" .-> Render
 ```
 
-**Monorepo layout** (`scalebooks/`, pnpm workspaces + Turborepo, strict TypeScript):
+**Monorepo layout** (`sentire-books-api/`, pnpm workspaces + Turborepo, strict TypeScript):
 
 | Package | Purpose |
 |---|---|
