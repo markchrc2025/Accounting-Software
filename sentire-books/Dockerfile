@@ -1,11 +1,9 @@
-# Sentire Books portal (the full-featured UI, formerly Firebase-hosted) —
-# build the static Vite bundle, serve it with nginx.
+# Sentire Books portal — build the static Vite bundle, serve it with nginx.
 #
 # CONTEXT-AGNOSTIC: platforms differ on what they pass as the Docker build
-# context (the repo root vs the directory containing this Dockerfile). The
-# Sliplane deploys showed the context arriving WITHOUT the workscale-finance/
-# prefix, so this build copies whatever context it receives and locates the
-# app inside it — it works either way.
+# context (the repo root vs the directory containing this Dockerfile), so this
+# build copies whatever context it receives and locates the app inside it —
+# it works either way.
 #
 # IMPORTANT: Vite inlines VITE_* variables at BUILD time, not runtime. Set
 # VITE_API_BASE_URL in the Sliplane service's Environment Variables — it is a
@@ -14,7 +12,7 @@
 # points the login flow at a non-existent host.
 #
 # Sliplane service settings:
-#   Dockerfile path : workscale-finance/hosting/Dockerfile
+#   Dockerfile path : sentire-books/Dockerfile
 #   Env / build arg : VITE_API_BASE_URL = your API origin
 #                     (e.g. https://sentire-books-api.sliplane.app)
 
@@ -22,10 +20,9 @@
 FROM node:20-slim AS build
 COPY . /ctx
 RUN set -e; \
-    if   [ -f /ctx/workscale-finance/hosting/package.json ]; then src=/ctx/workscale-finance/hosting; \
-    elif [ -f /ctx/hosting/package.json ];                   then src=/ctx/hosting; \
-    elif [ -f /ctx/package.json ];                           then src=/ctx; \
-    else echo "ERROR: package.json not found in the build context — expected the repo root or workscale-finance/hosting as the context." >&2; exit 1; fi; \
+    if   [ -f /ctx/sentire-books/package.json ]; then src=/ctx/sentire-books; \
+    elif [ -f /ctx/package.json ];               then src=/ctx; \
+    else echo "ERROR: package.json not found in the build context — expected the repo root or sentire-books/ as the context." >&2; exit 1; fi; \
     mkdir -p /app && cp -a "$src/." /app/
 WORKDIR /app
 RUN npm ci

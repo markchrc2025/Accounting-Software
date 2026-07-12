@@ -6,7 +6,7 @@ the existing app (open Firestore rules, client-side-only validation, non-atomic
 multi-document writes, floating-point money, no tests).
 
 This is a **foundation**, not a finished port. The existing React UI in
-`../workscale-finance/hosting/src` is migrated module-by-module on top of it.
+`../sentire-books/src` is migrated module-by-module on top of it.
 
 ## Stack
 
