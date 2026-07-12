@@ -176,6 +176,20 @@ export const setDisbursementStatus = (id, status, reason) =>
 export const deleteDisbursementReport = (id) =>
   apiFetch(`/disbursement-reports/${id}`, { method: 'DELETE' });
 
+// ── tax + bank reference data ────────────────────────────────────────────────
+const crud = (base, plural, singular) => ({
+  list: () => apiFetch(base).then((r) => r[plural]),
+  create: (p) => apiFetch(base, { method: 'POST', body: JSON.stringify(p) }).then((r) => r[singular]),
+  update: (id, p) => apiFetch(`${base}/${id}`, { method: 'PUT', body: JSON.stringify(p) }).then((r) => r[singular]),
+  remove: (id) => apiFetch(`${base}/${id}`, { method: 'DELETE' }),
+});
+export const taxRatesApi = crud('/tax-rates', 'rates', 'rate');
+export const taxGroupsApi = crud('/tax-groups', 'groups', 'group');
+export const purposeCategoriesApi = crud('/purpose-categories', 'categories', 'category');
+export const bankBalancesApi = crud('/bank-balances', 'balances', 'balance');
+export const bankTransactionsApi = crud('/bank-transactions', 'transactions', 'transaction');
+export const bankReconciliationsApi = crud('/bank-reconciliations', 'reconciliations', 'reconciliation');
+
 export const getGeneralLedger = (p) => apiFetch(`/reports/general-ledger${periodQuery(p)}`);
 export const getIncomeStatement = (p) => apiFetch(`/reports/income-statement${periodQuery(p)}`);
 export const getBalanceSheet = (asOf) =>

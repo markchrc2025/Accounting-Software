@@ -5,6 +5,7 @@ import {
   listDisbursementReports, createDisbursementReport, updateDisbursementReport,
   setDisbursementStatus, deleteDisbursementReport as apiDeleteReport,
   listVouchers, getVoucher, listChecks, listAccounts, getSettings, listUsers, ApiError,
+  bankBalancesApi,
 } from '../../../lib/api.js';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 
@@ -529,9 +530,11 @@ export default function DisbursementsPage() {
       .catch(()=>{});
     // Company profile (logo, notedBy, etc.)
     getSettings().then(s => { if (s?.profile) setProfile(s.profile); }).catch(()=>{});
-    // Daily bank balances land with the Bank module (Phase 5); until then the
-    // report's bank-balance snapshot starts at zero and can be typed in.
-    setDailyBals([]);
+    bankBalancesApi.list()
+      .then(rows => setDailyBals(rows.map(b => ({
+        id: b.id, bankCode: b.bankCode, date: b.balanceDate, ending: (b.endingCents ?? 0) / 100,
+      }))))
+      .catch(() => setDailyBals([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

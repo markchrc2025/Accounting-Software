@@ -1,7 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
-import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, getDocs } from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { taxRatesApi, taxGroupsApi, listVouchers, getVoucher, listAccounts, ApiError } from '../../../lib/api.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
+
+const VTYPE_LABEL = { payment:'PAYMENT', receipt:'RECEIPT', payroll:'PAYROLL', final_pay:'FINAL_PAY', loan:'LOAN', check:'CHECK' };
+const VSTAT_LABEL = { draft:'Draft', pending:'Pending', for_verification:'For Verification', verified:'Verified', for_approval:'For Approval', approved:'Approved', for_disbursement:'For Disbursement', paid:'Paid', rejected:'Rejected', posted:'Approved', void:'Voided' };
 
 const fmt  = (n) => new Intl.NumberFormat('en-PH', { style:'currency', currency:'PHP' }).format(n || 0);
 const fmtP = (n) => `${(parseFloat(n)||0).toFixed(2)}%`;
@@ -68,14 +70,47 @@ export default function TaxPage() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
+  const loadRates  = useCallback(() => taxRatesApi.list().then(rs => setRates(rs.map(r => ({ ...r, rate: Number(r.rate) })))).catch(()=>{}), []);
+  const loadGroups = useCallback(() => taxGroupsApi.list().then(setGroups).catch(()=>{}), []);
   useEffect(() => {
-    const unsubV = onSnapshot(query(collection(db,'vouchers'), orderBy('createdAt','desc')), snap=>setVouchers(snap.docs.map(d=>({id:d.id,...d.data()}))));
-    const unsubR = onSnapshot(query(collection(db,'taxRates'),  orderBy('name')), snap=>setRates(snap.docs.map(d=>({id:d.id,...d.data()}))));
-    const unsubG = onSnapshot(query(collection(db,'taxGroups'), orderBy('name')), snap=>setGroups(snap.docs.map(d=>({id:d.id,...d.data()}))));
-    getDocs(collection(db,'accounts')).then(s =>
-      setAccounts(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.code||'').localeCompare(b.code||'')))
-    );
-    return () => { unsubV(); unsubR(); unsubG(); };
+    loadRates(); loadGroups();
+    // Tax entries derive from PAYMENT/CHECK voucher lines; lines live
+    // server-side now, so hydrate the 50 most recent such vouchers.
+    (async () => {
+      try {
+        const rows = await listVouchers({ limit: 500 });
+        const mapped = rows.map(v => {
+          const m = v.meta || {};
+          return {
+            id: v.id, voucherId: v.voucherNo,
+            voucherType: VTYPE_LABEL[v.voucherType] || 'PAYMENT',
+            status: VSTAT_LABEL[v.status] || v.status,
+            preparationDate: v.voucherDate || '',
+            contactSummary: m.contactSummary || v.contactName || '',
+            purposeCategory: v.purposeCategory || '',
+            lines: [],
+          };
+        });
+        setVouchers(mapped);
+        const targets = mapped.filter(v => ['PAYMENT','CHECK'].includes(v.voucherType)).slice(0, 50);
+        for (const v of targets) {
+          try {
+            const d = await getVoucher(v.id);
+            const lines = (d.lines || []).map(l => {
+              const lm = l.meta || {};
+              return {
+                lineNo: l.lineNo, contact: lm.contact || '', description: l.description || '',
+                amount: (l.amountCents ?? 0) / 100,
+                taxRateId: lm.taxRateId || '', taxType: lm.taxType || '',
+                taxRate: lm.taxRate || 0, taxAmt: lm.taxAmt || 0, inclusive: !!lm.inclusive,
+              };
+            });
+            setVouchers(cur => cur.map(x => x.id === v.id ? { ...x, lines } : x));
+          } catch { /* skip */ }
+        }
+      } catch { /* offline */ }
+    })();
+    listAccounts().then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })))).catch(()=>{});
   }, []);
 
   // Derive tax lines from all Payment/Check vouchers that have taxAmt > 0
@@ -114,14 +149,14 @@ export default function TaxPage() {
         name:               rForm.name.trim(),
         rate:               parseFloat(rForm.rate)||0,
         trackingType:       rForm.trackingType||'single',
-        taxAccountSingle:   rForm.taxAccountSingle||'',
-        taxAccountSales:    rForm.taxAccountSales||'',
-        taxAccountPurchases:rForm.taxAccountPurchases||'',
+        taxAccountSingle:   rForm.taxAccountSingle||null,
+        taxAccountSales:    rForm.taxAccountSales||null,
+        taxAccountPurchases:rForm.taxAccountPurchases||null,
         isActive:           rForm.isActive!==false,
-        updatedAt:          serverTimestamp(),
       };
-      if (editingR) { await updateDoc(doc(db,'taxRates',editingR), payload); showToast('Rate updated.'); }
-      else { await addDoc(collection(db,'taxRates'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email}); showToast('Rate added.'); }
+      if (editingR) { await taxRatesApi.update(editingR, payload); showToast('Rate updated.'); }
+      else { await taxRatesApi.create(payload); showToast('Rate added.'); }
+      await loadRates();
       setShowRateModal(false);
     } catch(e) { alert(e.message); }
     setSaving(false);
@@ -132,9 +167,10 @@ export default function TaxPage() {
     if (!gForm.rateNames?.length) return alert('Select at least one tax rate.');
     setSaving(true);
     try {
-      const payload = { name:gForm.name.trim(), rateNames:gForm.rateNames, isActive:gForm.isActive!==false, updatedAt:serverTimestamp() };
-      if (editingG) { await updateDoc(doc(db,'taxGroups',editingG), payload); showToast('Group updated.'); }
-      else { await addDoc(collection(db,'taxGroups'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email}); showToast('Group added.'); }
+      const payload = { name:gForm.name.trim(), rateNames:gForm.rateNames, isActive:gForm.isActive!==false };
+      if (editingG) { await taxGroupsApi.update(editingG, payload); showToast('Group updated.'); }
+      else { await taxGroupsApi.create(payload); showToast('Group added.'); }
+      await loadGroups();
       setShowGroupModal(false);
     } catch(e) { alert(e.message); }
     setSaving(false);

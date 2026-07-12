@@ -23,6 +23,7 @@ import {
   index,
   check,
   jsonb,
+  numeric,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -410,6 +411,117 @@ export const disbursementReports = pgTable(
     unique("disbursement_reports_org_no_key").on(t.orgId, t.reportNo),
     index("disbursement_reports_org_date_idx").on(t.orgId, t.reportDate),
   ],
+);
+
+// ── Tax subsystem (0014) ──
+export const taxRates = pgTable(
+  "tax_rates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    rate: numeric("rate", { precision: 9, scale: 4 }).notNull().default("0"),
+    trackingType: text("tracking_type").notNull().default("single"),
+    taxAccountSingle: text("tax_account_single"),
+    taxAccountSales: text("tax_account_sales"),
+    taxAccountPurchases: text("tax_account_purchases"),
+    isActive: boolean("is_active").notNull().default(true),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("tax_rates_org_name_key").on(t.orgId, t.name)],
+);
+
+export const taxGroups = pgTable(
+  "tax_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    rateNames: text("rate_names").array().notNull().default([]),
+    isActive: boolean("is_active").notNull().default(true),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("tax_groups_org_name_key").on(t.orgId, t.name)],
+);
+
+export const purposeCategories = pgTable(
+  "purpose_categories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("purpose_categories_org_name_key").on(t.orgId, t.name)],
+);
+
+// ── Bank management (0014) ──
+export const dailyBankBalances = pgTable(
+  "daily_bank_balances",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    bankCode: text("bank_code").notNull(),
+    balanceDate: date("balance_date").notNull(),
+    beginningCents: bigint("beginning_cents", { mode: "number" }).notNull().default(0),
+    endingCents: bigint("ending_cents", { mode: "number" }).notNull().default(0),
+    notes: text("notes"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("daily_bank_balances_org_bank_date_idx").on(t.orgId, t.bankCode, t.balanceDate)],
+);
+
+export const bankTransactions = pgTable(
+  "bank_transactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    bankCode: text("bank_code").notNull(),
+    txDate: date("tx_date").notNull(),
+    description: text("description"),
+    reference: text("reference"),
+    debitCents: bigint("debit_cents", { mode: "number" }).notNull().default(0),
+    creditCents: bigint("credit_cents", { mode: "number" }).notNull().default(0),
+    txType: text("tx_type"),
+    status: text("status"),
+    source: text("source").notNull().default("Manual"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("bank_transactions_org_bank_date_idx").on(t.orgId, t.bankCode, t.txDate)],
+);
+
+export const bankReconciliations = pgTable(
+  "bank_reconciliations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    reconNo: text("recon_no").notNull(),
+    bankCode: text("bank_code").notNull(),
+    beginningCents: bigint("beginning_cents", { mode: "number" }).notNull().default(0),
+    endingCents: bigint("ending_cents", { mode: "number" }).notNull().default(0),
+    periodEnding: date("period_ending"),
+    clearedCount: integer("cleared_count").notNull().default(0),
+    meta: jsonb("meta"),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("bank_reconciliations_org_no_key").on(t.orgId, t.reconNo)],
 );
 
 export type Organization = typeof organizations.$inferSelect;

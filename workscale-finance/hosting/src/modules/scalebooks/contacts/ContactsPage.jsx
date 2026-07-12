@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   listContacts, createContact, updateContact, deleteContact as apiDeleteContact,
-  listAccounts, ApiError,
+  listAccounts, ApiError, taxRatesApi, taxGroupsApi,
 } from '../../../lib/api.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 
@@ -207,10 +207,8 @@ export default function ContactsPage() {
     listAccounts()
       .then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' }))))
       .catch(() => {});
-    // Tax rates/groups move to the API with the tax subsystem; until then the
-    // default-tax dropdown offers only "None" (the stored ref still round-trips).
-    setTaxRates([]);
-    setTaxGroups([]);
+    taxRatesApi.list().then(rs => setTaxRates(rs.map(r => ({ ...r, rate: Number(r.rate) })).filter(r => r.isActive !== false))).catch(()=>{});
+    taxGroupsApi.list().then(gs => setTaxGroups(gs.filter(g => g.isActive !== false))).catch(()=>{});
   }, [loadContacts]);
 
   const arOptions = useMemo(() => accounts.filter(isReceivableAcct).map(a => ({ value:a.code, label:`(${a.code}) ${a.name}` })), [accounts]);

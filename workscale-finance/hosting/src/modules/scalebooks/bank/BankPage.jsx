@@ -1,11 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-import {
-  collection, query, orderBy, onSnapshot, where,
-  addDoc, updateDoc, doc, serverTimestamp, deleteDoc
-} from 'firebase/firestore';
-import { db, auth } from '../../../firebase.js';
-import { nextBankTransactionId, nextBankReconciliationId } from '../../../utils/documentIds.js';
+import { bankBalancesApi, bankTransactionsApi, bankReconciliationsApi, listAccounts, ApiError } from '../../../lib/api.js';
 
 const BANK_PALETTE = ['#1e40af','#15803d','#b91c1c','#a16207','#7e22ce','#0e7490','#9a3412','#64748b'];
 const fmtPHP = n => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
@@ -99,23 +94,38 @@ export default function BankPage() {
     if (location.state?.openCreate) { window.history.replaceState({}, ''); setModal({}); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // API row -> the portal's shapes (pesos, portal field names)
+  const balFromApi = (b) => ({
+    id: b.id, bankCode: b.bankCode, date: b.balanceDate,
+    beginning: (b.beginningCents ?? 0) / 100, ending: (b.endingCents ?? 0) / 100,
+    notes: b.notes || '',
+  });
+  const txFromApi = (t) => ({
+    id: t.id, bankCode: t.bankCode, date: t.txDate,
+    description: t.description || '', reference: t.reference || '',
+    debit: (t.debitCents ?? 0) / 100, credit: (t.creditCents ?? 0) / 100,
+    type: t.txType || '', status: t.status || '', source: t.source || 'Manual',
+  });
+  const reconFromApi = (r) => ({
+    id: r.id, reconId: r.reconNo, bankCode: r.bankCode,
+    beginningBalance: (r.beginningCents ?? 0) / 100, endingBalance: (r.endingCents ?? 0) / 100,
+    periodEnding: r.periodEnding || '', clearedCount: r.clearedCount || 0,
+    reconciledBy: '', reconciledAt: r.createdAt,
+  });
+  const loadBalances = () => bankBalancesApi.list().then(rs => setBalances(rs.map(balFromApi))).catch(()=>{});
+  const loadTxs = () => bankTransactionsApi.list().then(rs => setTransactions(rs.map(txFromApi))).catch(()=>{});
+  const loadRecons = () => bankReconciliationsApi.list().then(rs => setReconciliations(rs.map(reconFromApi))).catch(()=>{});
+
   useEffect(() => {
-    const u1 = onSnapshot(query(collection(db,'dailyBankBalances'),orderBy('date','desc')), snap => {
-      setBalances(snap.docs.map(d=>({id:d.id,...d.data()})));
-    });
-    const u2 = onSnapshot(query(collection(db,'creditLines'),orderBy('displayName','asc')), snap => {
-      setCreditLines(snap.docs.map(d=>({id:d.id,...d.data()})));
-    });
-    const u3 = onSnapshot(query(collection(db,'bankTransactions'),orderBy('date','desc')), snap => {
-      setTransactions(snap.docs.map(d=>({id:d.id,...d.data()})));
-    });
-    const u4 = onSnapshot(query(collection(db,'accounts'), where('subType','==','Bank')), snap => {
-      setBankAccounts(snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.code||'').localeCompare(b.code||'')));
-    });
-    const u5 = onSnapshot(query(collection(db,'bankReconciliations'),orderBy('reconciledAt','desc')), snap => {
-      setReconciliations(snap.docs.map(d=>({id:d.id,...d.data()})));
-    });
-    return () => { u1(); u2(); u3(); u4(); u5(); };
+    loadBalances(); loadTxs(); loadRecons();
+    listAccounts()
+      .then(rows => setBankAccounts(
+        rows.filter(a => (a.subtype||'') === 'Bank').map(a => ({ ...a, subType: a.subtype || '' }))
+            .sort((a,b)=>(a.code||'').localeCompare(b.code||''))))
+      .catch(()=>{});
+    // Credit lines arrive with the loans/credit domain (Phase 6).
+    setCreditLines([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* Latest balance per bank */
@@ -129,34 +139,44 @@ export default function BankPage() {
   async function saveBalance(form) {
     setSaving(true);
     try {
-      const payload = { bankCode:form.bankCode||'', date:form.date||'', beginning:parseFloat(form.beginning)||0, ending:parseFloat(form.ending)||0, notes:form.notes||'', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
-      if (form.id) await updateDoc(doc(db,'dailyBankBalances',form.id), payload);
-      else await addDoc(collection(db,'dailyBankBalances'), {...payload, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
+      const payload = {
+        bankCode: form.bankCode||'', balanceDate: form.date||'',
+        beginningCents: Math.round((parseFloat(form.beginning)||0)*100),
+        endingCents: Math.round((parseFloat(form.ending)||0)*100),
+        notes: form.notes||null,
+      };
+      if (form.id) await bankBalancesApi.update(form.id, payload);
+      else await bankBalancesApi.create(payload);
       setModal(null); showToast('Balance entry saved.');
+      await loadBalances();
     } catch(e) { console.error(e); alert('Save failed.'); }
     setSaving(false);
   }
 
   function deleteBalance(id) {
-    askConfirm('Delete this balance entry?', async () => { await deleteDoc(doc(db,'dailyBankBalances',id)); showToast('Deleted.'); });
+    askConfirm('Delete this balance entry?', async () => { await bankBalancesApi.remove(id); showToast('Deleted.'); await loadBalances(); });
   }
 
   async function saveTx(form) {
     setSaving(true);
     try {
-      const payload = { bankCode:form.bankCode||'', date:form.date||'', description:form.description||'', reference:form.reference||'', debit:parseFloat(form.debit)||0, credit:parseFloat(form.credit)||0, type:form.type||'', status:form.status||'', source:'Manual', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
-      if (form.id) await updateDoc(doc(db,'bankTransactions',form.id), payload);
-      else {
-        const txId = await nextBankTransactionId(form.date);
-        await addDoc(collection(db,'bankTransactions'), {...payload, txId, createdAt:serverTimestamp(), createdBy:auth.currentUser?.email||''});
-      }
+      const payload = {
+        bankCode: form.bankCode||'', txDate: form.date||'',
+        description: form.description||null, reference: form.reference||null,
+        debitCents: Math.round((parseFloat(form.debit)||0)*100),
+        creditCents: Math.round((parseFloat(form.credit)||0)*100),
+        txType: form.type||null, status: form.status||null, source: 'Manual',
+      };
+      if (form.id) await bankTransactionsApi.update(form.id, payload);
+      else await bankTransactionsApi.create(payload);
       setTxModal(null); showToast('Transaction saved.');
+      await loadTxs();
     } catch(e) { console.error(e); alert('Save failed.'); }
     setSaving(false);
   }
 
   function deleteTx(id) {
-    askConfirm('Delete this transaction?', async () => { await deleteDoc(doc(db,'bankTransactions',id)); showToast('Deleted.'); });
+    askConfirm('Delete this transaction?', async () => { await bankTransactionsApi.remove(id); showToast('Deleted.'); await loadTxs(); });
   }
 
   const filteredBalances = filterBank ? balances.filter(b=>b.bankCode===filterBank) : balances;
@@ -270,9 +290,9 @@ export default function BankPage() {
     async function saveCl(form) {
       setSaving2(true);
       try {
-        const payload = { displayName:form.displayName||'', bankCode:form.bankCode||'', creditLimit:parseFloat(form.creditLimit)||0, availableBalance:parseFloat(form.availableBalance)||0, interestRate:parseFloat(form.interestRate)||0, asOfDate:form.asOfDate||'', notes:form.notes||'', updatedAt:serverTimestamp(), updatedBy:auth.currentUser?.email||'' };
-        if (form.id) await updateDoc(doc(db,'creditLines',form.id),payload);
-        else await addDoc(collection(db,'creditLines'),{...payload,createdAt:serverTimestamp(),createdBy:auth.currentUser?.email||''});
+        // Credit lines move to the loans/credit domain in Phase 6.
+        showToast('Credit lines are coming back with the Loans module.', 'info');
+        if (false) console.log(form);
         setClModal(null); showToast('Credit line saved.');
       } catch(e) { console.error(e); alert('Save failed.'); }
       setSaving2(false);
@@ -344,7 +364,7 @@ export default function BankPage() {
                         <td onClick={e=>e.stopPropagation()}>
                           <div style={{display:'flex',gap:4}}>
                             <button className="btn btn-ghost btn-sm" onClick={()=>setClModal({...cl})}>Edit</button>
-                            <button onClick={()=>askConfirm('Delete this credit line?',async()=>{await deleteDoc(doc(db,'creditLines',cl.id));})} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
+                            <button onClick={()=>askConfirm('Delete this credit line?',async()=>{showToast('Credit lines are coming back with the Loans module.', 'info');})} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
                           </div>
                         </td>
                       </tr>
@@ -539,9 +559,15 @@ export default function BankPage() {
       if(!stmtDate)  return alert('Enter statement ending date.');
       setReconSaving(true);
       try {
-        const reconId = await nextBankReconciliationId(stmtDate);
-        await addDoc(collection(db,'bankReconciliations'),{reconId,bankCode:reconBank,beginningBalance:beginBal||0,endingBalance:parseFloat(stmtBal)||0,periodEnding:stmtDate,clearedCount:0,reconciledAt:serverTimestamp(),reconciledBy:auth.currentUser?.email||''});
+        await bankReconciliationsApi.create({
+          bankCode: reconBank,
+          beginningCents: Math.round((beginBal||0)*100),
+          endingCents: Math.round((parseFloat(stmtBal)||0)*100),
+          periodEnding: stmtDate,
+          clearedCount: 0,
+        });
         showToast('Reconciliation saved.'); setStmtBal(''); setStmtDate('');
+        await loadRecons();
       } catch(e) { console.error(e); alert('Save failed.'); }
       setReconSaving(false);
     }

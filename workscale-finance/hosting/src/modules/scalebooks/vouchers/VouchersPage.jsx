@@ -4,6 +4,7 @@ import {
   listVouchers, getVoucher, createVoucherDraft, updateVoucher, deleteVoucher as apiDeleteVoucher,
   transitionVoucher, voidVoucher as apiVoidVoucher,
   listAccounts, listContacts, createAccount, getJournalEntry, ApiError,
+  taxRatesApi, taxGroupsApi, purposeCategoriesApi,
 } from '../../../lib/api.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import ContactPicker from '../../../components/ContactPicker.jsx';
@@ -244,11 +245,10 @@ export default function VouchersPage() {
     loadVouchers();
     listAccounts().then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })))).catch(()=>{});
     listContacts().then(setContacts).catch(()=>{});
-    // Tax rates/groups + purpose categories move to the API with the tax
-    // subsystem (Phase 4); until then the pickers are empty but line tax config
-    // round-trips via voucher-line meta. Loans/check-linkage return with the
-    // loans domain (Phase 6).
-    setTaxRates([]); setTaxGroups([]); setPurposeCategories([]);
+    taxRatesApi.list().then(rs => setTaxRates(rs.map(r => ({ ...r, rate: Number(r.rate) })).filter(r => r.isActive !== false))).catch(()=>{});
+    taxGroupsApi.list().then(gs => setTaxGroups(gs.filter(g => g.isActive !== false))).catch(()=>{});
+    purposeCategoriesApi.list().then(cs => setPurposeCategories(cs.map(c => c.name))).catch(()=>{});
+    // Loans/check-linkage return with the loans domain (Phase 6).
     setLoans([]); setCvList([]);
   }, [loadVouchers]);
 
