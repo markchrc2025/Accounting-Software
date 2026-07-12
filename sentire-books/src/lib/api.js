@@ -144,6 +144,13 @@ export const deleteUser = (id) => apiFetch(`/users/${id}`, { method: 'DELETE' })
 export const setUserPassword = (id, password) =>
   apiFetch(`/users/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) });
 
+// ── data admin (export / reset / restore — admin only) ──────────────────────
+export const exportWorkspaceData = () => apiFetch('/settings/data/export');
+export const resetWorkspaceData = (opts) =>
+  apiFetch('/settings/data/reset', { method: 'POST', body: JSON.stringify({ confirm: 'RESET', ...opts }) });
+export const importWorkspaceData = (snapshot) =>
+  apiFetch('/settings/data/import', { method: 'POST', body: JSON.stringify(snapshot) });
+
 // ── document counters (admin inspection/override) ────────────────────────────
 export const listCounters = () => apiFetch('/settings/counters').then((r) => r.counters);
 export const overrideCounter = (periodKey, seq) =>
