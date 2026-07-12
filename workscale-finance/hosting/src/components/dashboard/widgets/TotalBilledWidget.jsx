@@ -30,7 +30,7 @@ export function TotalBilledWidget({ total = 0, loading = false }) {
           <p className="text-[12px] text-[#9CA3AF] mt-0.5">Billing statements</p>
         </div>
         <div className="h-10 mt-2">
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height={40} minWidth={0}>
             <BarChart data={STUB_MONTHS} barSize={8}>
               <Bar dataKey="v" fill="#F97316" radius={[3, 3, 0, 0]} isAnimationActive={false} />
               <Tooltip formatter={(v) => `₱${v.toLocaleString()}`} />

@@ -28,7 +28,7 @@ export function TotalVouchersWidget({ count = 0, loading = false }) {
           <p className="text-[12px] text-[#9CA3AF] mt-0.5">All-time</p>
         </div>
         <div className="h-10 mt-2">
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height={40} minWidth={0}>
             <LineChart data={STUB_SPARKLINE}>
               <Line
                 type="monotone" dataKey="v"
