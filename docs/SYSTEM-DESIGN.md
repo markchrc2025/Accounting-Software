@@ -1,7 +1,7 @@
 # Sentire Books — System Design, Requirements & Actors
 
 > **Status:** Living document · **Product:** Sentire Books (accounting) · **Platform codename:** `scalebooks`
-> **Sources of truth:** the running code in [`scalebooks/`](../scalebooks) (built) and the legacy app in [`workscale-finance/`](../workscale-finance) (scope to migrate). Everything marked **✅ Built** is verified against the code as of this writing; **🔜 Roadmap** items come from the legacy system's proven workflows or stated plans.
+> **Sources of truth:** the running code in [`scalebooks/`](../scalebooks) (built) and the portal in [`sentire-books/`](../sentire-books) (fully migrated). Everything marked **✅ Built** is verified against the code as of this writing; **🔜 Roadmap** items come from the legacy system's proven workflows or stated plans.
 
 ---
 
@@ -16,7 +16,7 @@
 | **Sentire Central** — cross-tenant operations portal (tenants, billing, releases, support) | Orange `#E8693A` | 🔜 Planned |
 | Sentire Tax / POS | — | 💤 Concept (glyphs exist in the brand system) |
 
-The current system replaces a legacy Firebase/Firestore app (`workscale-finance/`) whose audit found open security rules, client-side-only validation, non-atomic multi-document writes, and floating-point money. The rebuild strategy is a **strangler migration**: the ledger core is rebuilt on a relational, ACID, type-safe stack, and legacy modules are ported on top of it one at a time.
+The current system replaces a legacy Firebase/Firestore app (now the fully migrated portal in `sentire-books/`) whose audit found open security rules, client-side-only validation, non-atomic multi-document writes, and floating-point money. The rebuild strategy is a **strangler migration**: the ledger core is rebuilt on a relational, ACID, type-safe stack, and legacy modules are ported on top of it one at a time.
 
 ### Design principles
 
