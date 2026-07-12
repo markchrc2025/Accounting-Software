@@ -7,7 +7,6 @@
 **/.DS_Store
 .git
 .github
-workscale-finance
 docs
 design_handoff_books_login
 **/.env
