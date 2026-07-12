@@ -134,3 +134,7 @@ export const voidVoucher = (id) =>
   apiFetch(`/vouchers/${id}/void`, { method: 'POST', body: JSON.stringify({}) });
 export const getTrialBalance = (p) => apiFetch(`/reports/trial-balance${periodQuery(p)}`);
 export const getProfitAndLoss = (p) => apiFetch(`/reports/profit-and-loss${periodQuery(p)}`);
+export const getGeneralLedger = (p) => apiFetch(`/reports/general-ledger${periodQuery(p)}`);
+export const getIncomeStatement = (p) => apiFetch(`/reports/income-statement${periodQuery(p)}`);
+export const getBalanceSheet = (asOf) =>
+  apiFetch(`/reports/balance-sheet${asOf ? `?asOf=${asOf}` : ''}`);
