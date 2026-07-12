@@ -114,8 +114,23 @@ export const transitionJournalEntry = (id, to) =>
   apiFetch(`/journal-entries/${id}/status`, { method: 'POST', body: JSON.stringify({ to }) }).then((r) => r.entry);
 export const reverseJournalEntry = (id) =>
   apiFetch(`/journal-entries/${id}/reverse`, { method: 'POST', body: JSON.stringify({}) });
-export const listVouchers = () => apiFetch('/vouchers').then((r) => r.vouchers);
+export const listVouchers = (params) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== '') s.set(k, v);
+  const q = s.toString();
+  return apiFetch(`/vouchers${q ? `?${q}` : ''}`).then((r) => r.vouchers);
+};
+export const getVoucher = (id) => apiFetch(`/vouchers/${id}`);
 export const createVoucher = (payload) =>
   apiFetch('/vouchers', { method: 'POST', body: JSON.stringify(payload) });
+export const createVoucherDraft = (payload) =>
+  apiFetch('/vouchers', { method: 'POST', body: JSON.stringify({ ...payload, draft: true }) });
+export const updateVoucher = (id, payload) =>
+  apiFetch(`/vouchers/${id}`, { method: 'PUT', body: JSON.stringify(payload) }).then((r) => r.voucher);
+export const deleteVoucher = (id) => apiFetch(`/vouchers/${id}`, { method: 'DELETE' });
+export const transitionVoucher = (id, to) =>
+  apiFetch(`/vouchers/${id}/status`, { method: 'POST', body: JSON.stringify({ to }) });
+export const voidVoucher = (id) =>
+  apiFetch(`/vouchers/${id}/void`, { method: 'POST', body: JSON.stringify({}) });
 export const getTrialBalance = (p) => apiFetch(`/reports/trial-balance${periodQuery(p)}`);
 export const getProfitAndLoss = (p) => apiFetch(`/reports/profit-and-loss${periodQuery(p)}`);
