@@ -188,7 +188,18 @@ export async function reverseJournalEntry(
   entryId: string,
   ctx: { userId: string; orgId: string },
 ): Promise<PostJournalEntryResult> {
-  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, async (tx) => {
+  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, (tx) =>
+    reverseJournalEntryCore(tx, entryId, ctx),
+  );
+}
+
+/** Reverse inside an EXISTING transaction (e.g. voiding a voucher atomically). */
+export async function reverseJournalEntryCore(
+  tx: Tx,
+  entryId: string,
+  ctx: { userId: string; orgId: string },
+): Promise<PostJournalEntryResult> {
+  {
     const [original] = await tx
       .select()
       .from(journalEntries)
@@ -250,5 +261,5 @@ export async function reverseJournalEntry(
       .where(sql`${journalEntries.id} = ${original.id}`);
 
     return { id: rev!.id, entryNo, status: "posted" };
-  });
+  }
 }

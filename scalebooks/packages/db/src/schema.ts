@@ -59,9 +59,28 @@ export const userRole = pgEnum("user_role", [
 
 export const contactType = pgEnum("contact_type", ["vendor", "customer", "employee"]);
 
-export const voucherType = pgEnum("voucher_type", ["payment", "receipt"]);
+export const voucherType = pgEnum("voucher_type", [
+  "payment",
+  "receipt",
+  "payroll",
+  "final_pay",
+  "loan",
+  "check",
+]);
 
-export const voucherStatus = pgEnum("voucher_status", ["draft", "posted", "void"]);
+// Approval workflow (0012): the JE posts at 'approved'; 'void' reverses it.
+export const voucherStatus = pgEnum("voucher_status", [
+  "draft",
+  "pending",
+  "for_verification",
+  "verified",
+  "for_approval",
+  "approved",
+  "paid",
+  "rejected",
+  "posted",
+  "void",
+]);
 
 export const organizations = pgTable("organizations", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -253,6 +272,10 @@ export const vouchers = pgTable(
     status: voucherStatus("status").notNull().default("draft"),
     totalCents: bigint("total_cents", { mode: "number" }).notNull().default(0),
     journalEntryId: uuid("journal_entry_id").references(() => journalEntries.id),
+    purposeCategory: text("purpose_category"),
+    paymentFromAccountId: uuid("payment_from_account_id").references(() => accounts.id),
+    notes: text("notes"),
+    meta: jsonb("meta"),
     createdBy: text("created_by").references(() => appUsers.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     postedAt: timestamp("posted_at", { withTimezone: true }),
@@ -260,6 +283,29 @@ export const vouchers = pgTable(
   (t) => [
     unique("vouchers_org_no_key").on(t.orgId, t.voucherNo),
     index("vouchers_org_date_idx").on(t.orgId, t.voucherDate),
+  ],
+);
+
+/** The voucher's own persisted line items — they become journal_lines only at
+ * approval. `meta` round-trips client-side per-line config (tax selections). */
+export const voucherLines = pgTable(
+  "voucher_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    voucherId: uuid("voucher_id")
+      .notNull()
+      .references(() => vouchers.id, { onDelete: "cascade" }),
+    lineNo: integer("line_no").notNull(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    description: text("description"),
+    amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+    meta: jsonb("meta"),
+  },
+  (t) => [
+    unique("voucher_lines_voucher_line_key").on(t.voucherId, t.lineNo),
+    index("voucher_lines_voucher_idx").on(t.voucherId),
   ],
 );
 

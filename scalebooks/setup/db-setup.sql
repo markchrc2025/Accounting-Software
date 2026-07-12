@@ -591,6 +591,52 @@ JOIN journal_entries je ON je.id = jl.entry_id
 JOIN accounts        a  ON a.id  = jl.account_id
 WHERE je.status IN ('posted', 'reversed');
 
+-- ───────────────────────────── 0012_vouchers_workflow.sql ─────────────────────────────
+-- Voucher approval workflow + persisted voucher lines: the JE posts at
+-- 'approved' from the voucher's own lines; 'void' reverses it.
+ALTER TYPE voucher_type ADD VALUE IF NOT EXISTS 'payroll';
+ALTER TYPE voucher_type ADD VALUE IF NOT EXISTS 'final_pay';
+ALTER TYPE voucher_type ADD VALUE IF NOT EXISTS 'loan';
+ALTER TYPE voucher_type ADD VALUE IF NOT EXISTS 'check';
+
+ALTER TYPE voucher_status ADD VALUE IF NOT EXISTS 'pending';
+ALTER TYPE voucher_status ADD VALUE IF NOT EXISTS 'for_verification';
+ALTER TYPE voucher_status ADD VALUE IF NOT EXISTS 'verified';
+ALTER TYPE voucher_status ADD VALUE IF NOT EXISTS 'for_approval';
+ALTER TYPE voucher_status ADD VALUE IF NOT EXISTS 'approved';
+ALTER TYPE voucher_status ADD VALUE IF NOT EXISTS 'paid';
+ALTER TYPE voucher_status ADD VALUE IF NOT EXISTS 'rejected';
+
+ALTER TABLE vouchers
+  ADD COLUMN IF NOT EXISTS purpose_category        text,
+  ADD COLUMN IF NOT EXISTS payment_from_account_id uuid REFERENCES accounts(id),
+  ADD COLUMN IF NOT EXISTS notes                   text,
+  ADD COLUMN IF NOT EXISTS meta                    jsonb;
+
+CREATE TABLE IF NOT EXISTS voucher_lines (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  voucher_id  uuid NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE,
+  line_no     integer NOT NULL,
+  account_id  uuid NOT NULL REFERENCES accounts(id),
+  description text,
+  amount_cents bigint NOT NULL CHECK (amount_cents > 0),
+  meta        jsonb,
+  UNIQUE (voucher_id, line_no)
+);
+CREATE INDEX IF NOT EXISTS voucher_lines_voucher_idx ON voucher_lines (voucher_id);
+GRANT SELECT, INSERT, UPDATE, DELETE ON voucher_lines TO sentire_books_app;
+ALTER TABLE voucher_lines ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS voucher_lines_org ON voucher_lines;
+CREATE POLICY voucher_lines_org ON voucher_lines
+  USING (EXISTS (
+    SELECT 1 FROM vouchers v
+    WHERE v.id = voucher_lines.voucher_id AND v.org_id = current_org_id()
+  ))
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM vouchers v
+    WHERE v.id = voucher_lines.voucher_id AND v.org_id = current_org_id()
+  ));
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════
