@@ -61,17 +61,22 @@ export const zCheckStatusUpdate = z.object({
 export const DISBURSEMENT_STATUSES = [
   "Pending",
   "For Verification",
+  "Verified",
   "For Approval",
   "Approved",
   "Rejected",
   "In Disbursement",
   "Disbursed",
+  "Voided",
 ] as const;
 export type DisbursementStatus = (typeof DISBURSEMENT_STATUSES)[number];
 
 export const zDisbursementLine = z
   .object({
-    voucherId: z.string().uuid().nullable().optional(), // Postgres voucher id
+    // The portal keeps its human voucher number in voucherId and the Postgres
+    // uuid in voucherDocId; the server parks/reverts by whichever is uuid-shaped.
+    voucherId: z.string().max(80).nullable().optional(),
+    voucherDocId: z.string().uuid().nullable().optional(),
     voucherNo: optionalTrimmed(40),
     amountCents: z.number().int().nonnegative().optional(),
   })
