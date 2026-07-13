@@ -48,44 +48,57 @@ export interface VoucherDraftResult {
   status: string;
 }
 
+/**
+ * Create a workflow voucher (status 'draft', lines persisted, no JE) inside an
+ * existing transaction. Lets another module (e.g. loan payments) originate a
+ * voucher atomically alongside its own rows. `input` is already validated.
+ */
+export async function createVoucherDraftCore(
+  tx: Tx,
+  input: VoucherDraftInput,
+  ctx: { userId: string; orgId: string },
+): Promise<VoucherDraftResult> {
+  const voucherNo = await nextVoucherNo(tx, ctx.orgId, input.type, input.voucherDate);
+  const [voucher] = await tx
+    .insert(vouchers)
+    .values({
+      orgId: ctx.orgId,
+      voucherNo,
+      voucherType: input.type,
+      contactId: input.contactId ?? null,
+      voucherDate: input.voucherDate,
+      memo: input.memo ?? null,
+      notes: input.notes ?? null,
+      purposeCategory: input.purposeCategory ?? null,
+      paymentFromAccountId: input.paymentFromAccountId ?? null,
+      meta: input.meta ?? null,
+      status: "draft",
+      totalCents: voucherTotal(input.lines),
+      createdBy: ctx.userId,
+    })
+    .returning({ id: vouchers.id });
+  await tx.insert(voucherLines).values(
+    input.lines.map((l, i) => ({
+      voucherId: voucher!.id,
+      lineNo: i + 1,
+      accountId: l.accountId,
+      description: l.description ?? null,
+      amountCents: l.amountCents,
+      meta: l.meta ?? null,
+    })),
+  );
+  return { id: voucher!.id, voucherNo, status: "draft" };
+}
+
 /** Create a workflow voucher (status 'draft', lines persisted, no JE). */
 export async function createVoucherDraft(
   rawInput: unknown,
   ctx: { userId: string; orgId: string },
 ): Promise<VoucherDraftResult> {
   const input: VoucherDraftInput = zVoucherDraftInput.parse(rawInput);
-  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, async (tx) => {
-    const voucherNo = await nextVoucherNo(tx, ctx.orgId, input.type, input.voucherDate);
-    const [voucher] = await tx
-      .insert(vouchers)
-      .values({
-        orgId: ctx.orgId,
-        voucherNo,
-        voucherType: input.type,
-        contactId: input.contactId ?? null,
-        voucherDate: input.voucherDate,
-        memo: input.memo ?? null,
-        notes: input.notes ?? null,
-        purposeCategory: input.purposeCategory ?? null,
-        paymentFromAccountId: input.paymentFromAccountId ?? null,
-        meta: input.meta ?? null,
-        status: "draft",
-        totalCents: voucherTotal(input.lines),
-        createdBy: ctx.userId,
-      })
-      .returning({ id: vouchers.id });
-    await tx.insert(voucherLines).values(
-      input.lines.map((l, i) => ({
-        voucherId: voucher!.id,
-        lineNo: i + 1,
-        accountId: l.accountId,
-        description: l.description ?? null,
-        amountCents: l.amountCents,
-        meta: l.meta ?? null,
-      })),
-    );
-    return { id: voucher!.id, voucherNo, status: "draft" };
-  });
+  return withOrgContext({ userId: ctx.userId, orgId: ctx.orgId }, (tx) =>
+    createVoucherDraftCore(tx, input, ctx),
+  );
 }
 
 /** Post the JE for a voucher reaching 'approved' (runs inside the transition tx). */

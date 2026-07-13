@@ -52,6 +52,35 @@ export const zLoanBook = z.object({
 });
 export type LoanBook = z.infer<typeof zLoanBook>;
 
+/**
+ * Record a loan payment — FM is the source of truth and originates the
+ * disbursement instrument. Bank Transfer / Cash / Online / Auto-Debit produce a
+ * Payment Voucher (JE posts at approval); Check produces a Check Voucher + a
+ * Check Registry entry (JE posts when the check clears). The payment JE is
+ * DR Loans Payable + DR Finance Cost / CR Cash — the detail lines the voucher
+ * carries. Amounts are peso-centavos; interest and penalty both hit Finance Cost.
+ */
+export const LOAN_PAYMENT_METHODS = ["Check", "Auto-Debit", "Bank Transfer", "Cash", "Online"] as const;
+export const zLoanPay = z.object({
+  payDate: isoDate,
+  method: z.enum(LOAN_PAYMENT_METHODS).default("Bank Transfer"),
+  interestCents: z.number().int().nonnegative().default(0),
+  principalCents: z.number().int().nonnegative().default(0),
+  penaltyCents: z.number().int().nonnegative().default(0),
+  cashAccountCode: nullableTrimmed(40),   // overrides the loan's cash account for this payment
+  bank: nullableTrimmed(120),
+  referenceNo: nullableTrimmed(120),      // transaction ref (or check no. for non-PDC)
+  // Post-dated check (method 'Check') specifics — the physical check that clears later.
+  checkNumber: nullableTrimmed(40),
+  checkDate: nullableDate,                // check maturity date
+  checkbookId: uuidOrNull,
+  payeeName: nullableTrimmed(200),
+  notes: nullableTrimmed(2000),
+  allocations: z.array(z.record(z.unknown())).nullable().optional(),
+  voucherDate: isoDate.optional(),        // defaults to payDate
+});
+export type LoanPay = z.infer<typeof zLoanPay>;
+
 export const zLoanPaymentInput = z.object({
   loanId: uuidOrNull,
   loanName: nullableTrimmed(200),
