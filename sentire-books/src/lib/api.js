@@ -220,6 +220,8 @@ export const unbookLoan = (id) =>
 // or Check Voucher + registry entry for PDC) and links it to the loan payment.
 export const payLoan = (id, opts) =>
   apiFetch(`/loans/${id}/pay`, { method: 'POST', body: JSON.stringify(opts || {}) });
+// Reconcile the loan sub-ledger against the GL Loans Payable control account.
+export const loanReconciliation = () => apiFetch('/loans/reconciliation');
 export const loanPaymentsApi = crud('/loan-payments', 'payments', 'payment');
 export const assetTypesApi = crud('/asset-types', 'types', 'type');
 export const fixedAssetsApi = crud('/fixed-assets', 'assets', 'asset');
