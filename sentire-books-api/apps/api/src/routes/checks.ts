@@ -157,7 +157,7 @@ checkbookRoutes.delete("/:id", async (c) => {
 export const checkRoutes = new Hono();
 checkRoutes.use("*", requireAuth);
 
-async function nextCheckNo(tx: Tx, orgId: string): Promise<string> {
+export async function nextCheckNo(tx: Tx, orgId: string): Promise<string> {
   const now = new Date();
   const periodKey = `CHKR${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   const counter = (await tx.execute(sql`
