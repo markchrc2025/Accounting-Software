@@ -4,7 +4,7 @@ import { recomputeLoanState, daysBetween, buildScheduleWithDueDates } from './lo
 import RecordPaymentModal from './RecordPaymentModal.jsx';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import {
-  loansApi, loanPaymentsApi, bookLoan, unbookLoan, listAccounts, listVouchers, listCheckbooks, listChecks,
+  loansApi, loanPaymentsApi, bookLoan, unbookLoan, loanReconciliation, listAccounts, listVouchers, listCheckbooks, listChecks,
   createVoucherDraft, transitionVoucher, ApiError,
 } from '../../../lib/api.js';
 
@@ -378,6 +378,8 @@ export default function FinancialPage() {
   const [payments,      setPayments]      = useState([]);
   const [voucherDocs,   setVoucherDocs]   = useState([]);
   const [checkbooks,    setCheckbooks]    = useState([]);
+  const [reconciliation, setReconciliation] = useState(null);
+  const [reconLoading,   setReconLoading]   = useState(false);
   const [payModal,      setPayModal]      = useState(null);  // loan.id
   const [pmForm, setPmForm] = useState({
     paymentMethod: 'Check', checkbookId: '', checks: [],
@@ -422,6 +424,13 @@ export default function FinancialPage() {
     () => listVouchers().then(rs => setVoucherDocs(rs.map(finVoucherFromApi))).catch(e => console.error('vouchers load failed:', e)),
     [],
   );
+  const loadReconciliation = useCallback(() => {
+    setReconLoading(true);
+    return loanReconciliation()
+      .then(setReconciliation)
+      .catch(e => console.error('reconciliation load failed:', e))
+      .finally(() => setReconLoading(false));
+  }, []);
   useEffect(() => {
     loadLoans();
     listAccounts()
@@ -429,8 +438,9 @@ export default function FinancialPage() {
       .catch(() => {});
     loadPayments();
     loadVoucherDocs();
+    loadReconciliation();
     listCheckbooks().then(setCheckbooks).catch(() => {});
-  }, [loadLoans, loadPayments, loadVoucherDocs]);
+  }, [loadLoans, loadPayments, loadVoucherDocs, loadReconciliation]);
 
   // Load already-issued check numbers when selected checkbook changes
   const [issuedNums, setIssuedNums] = useState(new Set());
@@ -542,9 +552,10 @@ export default function FinancialPage() {
           const r = await bookLoan(loan.id, { mode });
           showToast(`Booked to ledger — ${r.journalEntryNo}.`);
           await loadLoans();
+          loadReconciliation();
         } catch (e) { showToast('Book failed: ' + (e instanceof ApiError ? e.detail : e.message)); }
       });
-  }, [loadLoans]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadLoans, loadReconciliation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doUnbookLoan = useCallback((loan) => {
     askConfirm(`Unbook "${loan.name}"? This reverses its booking journal entry.`, async () => {
@@ -552,9 +563,10 @@ export default function FinancialPage() {
         await unbookLoan(loan.id);
         showToast('Loan unbooked — booking entry reversed.');
         await loadLoans();
+        loadReconciliation();
       } catch (e) { showToast('Unbook failed: ' + (e instanceof ApiError ? e.detail : e.message)); }
     });
-  }, [loadLoans]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadLoans, loadReconciliation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeLoans    = loans.filter(l => l.status === 'Active');
   const totalPrincipal = activeLoans.reduce((s, l) => s + (parseFloat(l.principal) || 0), 0);
@@ -990,6 +1002,75 @@ export default function FinancialPage() {
     );
   }
 
+  /* ── Sub-ledger ⇄ GL reconciliation tile ───────────────────────── */
+  function ReconciliationTile() {
+    const r = reconciliation;
+    const peso = (c) => fmtCur((c || 0) / 100);
+    const ok = r?.reconciled;
+    const hasResidual = !!r && r.residualCents !== 0;
+    const accent = !r ? '#64748b' : ok ? '#16a34a' : hasResidual ? '#dc2626' : '#d97706';
+    const bg     = !r ? '#f8fafc' : ok ? '#f0fdf4' : hasResidual ? '#fef2f2' : '#fffbeb';
+    const border = !r ? '#e5e7eb' : ok ? '#bbf7d0' : hasResidual ? '#fecaca' : '#fde68a';
+
+    return (
+      <div style={{ background:bg, border:`1px solid ${border}`, borderLeft:`4px solid ${accent}`, borderRadius:14, padding:'14px 18px' }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:9 }}>
+            <span style={{ fontSize:15 }}>{!r ? '📘' : ok ? '✅' : hasResidual ? '⛔' : '⚠️'}</span>
+            <div>
+              <div style={{ fontSize:12, fontWeight:900, color:'#0f172a', letterSpacing:'.02em' }}>Loans Payable — Sub-ledger ⇄ GL</div>
+              <div style={{ fontSize:11, color:accent, fontWeight:700, marginTop:1 }}>
+                {!r ? 'Loading reconciliation…'
+                   : ok ? 'In balance — the loan sub-ledger ties to the GL control account.'
+                   : hasResidual ? 'Unexplained drift — investigate.'
+                   : 'Reconciling items outstanding.'}
+              </div>
+            </div>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={() => loadReconciliation()} disabled={reconLoading} title="Refresh reconciliation">
+            {reconLoading ? '…' : '↻ Refresh'}
+          </button>
+        </div>
+
+        {r && (
+          <>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:10, marginTop:12 }}>
+              <div style={{ background:'#fff', border:'1px solid #e5e7eb', borderRadius:10, padding:'9px 12px' }}>
+                <div style={{ fontSize:9.5, fontWeight:800, color:'#64748b', letterSpacing:'.06em', textTransform:'uppercase' }}>GL Control (posted)</div>
+                <div style={{ fontSize:17, fontWeight:900, color:'#0f172a', marginTop:2 }}>{peso(r.glControlCents)}</div>
+              </div>
+              <div style={{ background:'#fff', border:'1px solid #e5e7eb', borderRadius:10, padding:'9px 12px' }}>
+                <div style={{ fontSize:9.5, fontWeight:800, color:'#64748b', letterSpacing:'.06em', textTransform:'uppercase' }}>FM Sub-ledger</div>
+                <div style={{ fontSize:17, fontWeight:900, color:'#0f172a', marginTop:2 }}>{peso(r.fmOutstandingCents)}</div>
+              </div>
+            </div>
+
+            {!ok && (
+              <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:6 }}>
+                {r.unbookedCents !== 0 && (
+                  <div style={{ fontSize:11.5, color:'#7c2d12' }}>
+                    <strong>{peso(r.unbookedCents)}</strong> in <strong>{r.unbookedLoans.length}</strong> loan{r.unbookedLoans.length!==1?'s':''} not yet booked
+                    {r.unbookedLoans.length ? ` (${r.unbookedLoans.slice(0,3).map(l => l.loanNo || l.name).join(', ')}${r.unbookedLoans.length>3?'…':''})` : ''} — <em>Book them to post the liability.</em>
+                  </div>
+                )}
+                {r.unpostedCents !== 0 && (
+                  <div style={{ fontSize:11.5, color:'#7c2d12' }}>
+                    <strong>{peso(r.unpostedCents)}</strong> in <strong>{r.unpostedPayments.length}</strong> payment{r.unpostedPayments.length!==1?'s':''} recorded but not in the GL — <em>approve the voucher / clear the check.</em>
+                  </div>
+                )}
+                {hasResidual && (
+                  <div style={{ fontSize:11.5, color:'#991b1b', fontWeight:700 }}>
+                    Unexplained drift of <strong>{peso(r.residualCents)}</strong> — a GL movement the sub-ledger can’t account for (e.g. a manual entry to Loans Payable).
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
   /* ── Tab: Dashboard (Phase 4a) ─────────────────────────────────── */
   function DashboardTab() {
     if (loans.length === 0) return <div className="empty">No loans yet. Add loans in the Loan Registry tab to see dashboard insights.</div>;
@@ -1056,6 +1137,9 @@ export default function FinancialPage() {
 
     return (
       <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+        {/* ── Sub-ledger ⇄ GL reconciliation (Loans → GL, part 3) ─── */}
+        {ReconciliationTile()}
+
         {/* ── KPI Scorecards ─────────────────────────────────────── */}
         <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:14 }}>
 
@@ -3225,7 +3309,7 @@ export default function FinancialPage() {
             onSaved={(res) => {
               const v = res?.voucher;
               showToast(v ? `Payment recorded · ${v.type === 'check' ? 'Check Voucher' : 'Payment Voucher'} ${v.voucherNo} created.` : 'Payment recorded.');
-              loadPayments(); loadVoucherDocs();
+              loadPayments(); loadVoucherDocs(); loadReconciliation();
             }}
           />
         );

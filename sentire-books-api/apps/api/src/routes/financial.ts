@@ -26,7 +26,7 @@ import {
   zLoanBook,
   zLoanPay,
 } from "@sentire-books/domain";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { ZodError } from "zod";
 import {
   withOrgContext,
@@ -311,6 +311,92 @@ loanRoutes.post("/:id/pay", requireAuth, async (c) => {
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
     console.error("[payLoan]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Reconcile the loan sub-ledger against the GL Loans Payable control account.
+// GL control = posted credit balance of the loans' liability accounts. FM's
+// principal outstanding = Σ loan principal − Σ recorded principal payments. The
+// gap is explained by (a) loans not yet booked and (b) payments whose voucher
+// isn't approved / check isn't cleared; anything left over is unexplained drift.
+loanRoutes.get("/reconciliation", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  try {
+    const result = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const loanRows = await tx.select().from(loans).where(eq(loans.orgId, auth.orgId));
+        const payRows = await tx.select().from(loanPayments).where(eq(loanPayments.orgId, auth.orgId));
+
+        // GL control: posted balance of the distinct liability accounts loans use.
+        const liabilityCodes = [...new Set(loanRows.map((l) => l.liabilityAccountCode).filter((x): x is string => !!x))];
+        let glControlCents = 0;
+        if (liabilityCodes.length) {
+          const codeList = sql.join(liabilityCodes.map((code) => sql`${code}`), sql`, `);
+          const rows = (await tx.execute(sql`
+            SELECT COALESCE(SUM(credit_cents - debit_cents), 0)::bigint AS control
+            FROM v_account_postings
+            WHERE org_id = ${auth.orgId} AND account_code IN (${codeList})
+          `)) as unknown as Array<{ control: string }>;
+          glControlCents = Number(rows[0]?.control ?? 0);
+        }
+
+        // Which payments have actually reached the GL: PV approved/paid/posted,
+        // or a linked check that has cleared.
+        const docIds = [...new Set(payRows.map((p) => p.voucherDocId).filter((x): x is string => !!x))];
+        const vs = docIds.length
+          ? await tx.select({ id: vouchers.id, status: vouchers.status }).from(vouchers)
+              .where(and(eq(vouchers.orgId, auth.orgId), inArray(vouchers.id, docIds)))
+          : [];
+        const vStatus = new Map(vs.map((v) => [v.id, v.status]));
+        const clearedVoucherIds = docIds.length
+          ? new Set((await tx.select({ voucherId: checkRegistry.voucherId }).from(checkRegistry)
+              .where(and(eq(checkRegistry.orgId, auth.orgId), eq(checkRegistry.status, "Cleared"), inArray(checkRegistry.voucherId, docIds))))
+              .map((r) => r.voucherId))
+          : new Set<string>();
+        const POSTED_V = new Set(["approved", "paid", "posted"]);
+        const isPosted = (p: typeof payRows[number]) => {
+          if (!p.voucherDocId) return false;
+          if (POSTED_V.has(vStatus.get(p.voucherDocId) ?? "")) return true;
+          return clearedVoucherIds.has(p.voucherDocId);
+        };
+
+        const fmOutstandingCents =
+          loanRows.reduce((s, l) => s + (l.principalCents ?? 0), 0) -
+          payRows.reduce((s, p) => s + (p.principalCents ?? 0), 0);
+
+        const unbooked = loanRows.filter((l) => !l.bookingJournalEntryId);
+        const unbookedLoans = unbooked.map((l) => ({ id: l.id, name: l.name, loanNo: l.loanNo, principalCents: l.principalCents ?? 0 }));
+        const unbookedCents = unbookedLoans.reduce((s, l) => s + l.principalCents, 0);
+
+        const unposted = payRows.filter((p) => !isPosted(p));
+        const unpostedPayments = unposted.map((p) => ({
+          id: p.id, loanName: p.loanName, principalCents: p.principalCents ?? 0,
+          method: p.method, state: p.voucherDocId ? ("in_flight" as const) : ("unlinked" as const),
+        }));
+        const unpostedCents = unpostedPayments.reduce((s, p) => s + p.principalCents, 0);
+
+        // Identity: fmOutstanding = glControl + unbooked − unposted. Residual ≠ 0
+        // means the GL moved in a way the sub-ledger can't explain (investigate).
+        const residualCents = glControlCents - (fmOutstandingCents - unbookedCents + unpostedCents);
+        const reconciled = unbookedCents === 0 && unpostedCents === 0 && residualCents === 0;
+
+        return {
+          glControlCents,
+          fmOutstandingCents,
+          unbookedCents,
+          unpostedCents,
+          residualCents,
+          reconciled,
+          unbookedLoans,
+          unpostedPayments,
+        };
+      },
+    );
+    return c.json(result);
+  } catch (err) {
+    console.error("[loanReconciliation]", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
