@@ -43,11 +43,13 @@ import {
 
 const app = new Hono();
 
-// The browser-facing web app is a different origin (scalebooks-web vs
-// scalebooks-api), so cross-origin requests need CORS. Allowed origins come from
-// CORS_ORIGIN (comma-separated); defaults cover the Render web app + local Vite.
+// The browser-facing web app is a different origin (the portal vs this API), so
+// cross-origin requests need CORS. Allowed origins come from CORS_ORIGIN
+// (comma-separated) and OVERRIDE these defaults when set; the defaults cover the
+// custom domain, the Sliplane portal host, and local Vite.
 const allowedOrigins = (
-  process.env.CORS_ORIGIN ?? "https://sentire-books.sliplane.app,http://localhost:5173"
+  process.env.CORS_ORIGIN ??
+  "https://books.sentire.solutions,https://sentire-books.sliplane.app,http://localhost:5173"
 )
   .split(",")
   .map((s) => s.trim())
