@@ -216,6 +216,10 @@ export const bookLoan = (id, opts) =>
   apiFetch(`/loans/${id}/book`, { method: 'POST', body: JSON.stringify(opts || {}) });
 export const unbookLoan = (id) =>
   apiFetch(`/loans/${id}/unbook`, { method: 'POST', body: JSON.stringify({}) });
+// Record a payment: FM originates the disbursement instrument (Payment Voucher,
+// or Check Voucher + registry entry for PDC) and links it to the loan payment.
+export const payLoan = (id, opts) =>
+  apiFetch(`/loans/${id}/pay`, { method: 'POST', body: JSON.stringify(opts || {}) });
 export const loanPaymentsApi = crud('/loan-payments', 'payments', 'payment');
 export const assetTypesApi = crud('/asset-types', 'types', 'type');
 export const fixedAssetsApi = crud('/fixed-assets', 'assets', 'asset');

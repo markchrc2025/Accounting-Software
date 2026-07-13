@@ -3212,12 +3212,21 @@ export default function FinancialPage() {
         const l  = loans.find(x => x.id === payModal);
         if (!l) return null;
         const st = loanStates[l.id] || {};
+        const bankAccounts = calAccounts.filter(a =>
+          ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) ||
+          /cash in bank/i.test(a.name||'')
+        );
         return (
           <RecordPaymentModal
             loan={l}
             loanState={st}
+            bankAccounts={bankAccounts}
             onClose={() => setPayModal(null)}
-            onSaved={() => { showToast('Payment recorded.'); loadPayments(); loadVoucherDocs(); }}
+            onSaved={(res) => {
+              const v = res?.voucher;
+              showToast(v ? `Payment recorded · ${v.type === 'check' ? 'Check Voucher' : 'Payment Voucher'} ${v.voucherNo} created.` : 'Payment recorded.');
+              loadPayments(); loadVoucherDocs();
+            }}
           />
         );
       })()}
