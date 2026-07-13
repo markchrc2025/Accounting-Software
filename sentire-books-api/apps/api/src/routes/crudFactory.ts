@@ -38,7 +38,7 @@ export interface CrudOptions {
   adminWrites?: boolean;
 }
 
-async function nextDocNo(
+export async function nextDocNo(
   tx: Tx,
   orgId: string,
   prefix: string,

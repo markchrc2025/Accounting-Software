@@ -4,7 +4,7 @@ import { recomputeLoanState, daysBetween, buildScheduleWithDueDates } from './lo
 import RecordPaymentModal from './RecordPaymentModal.jsx';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import {
-  loansApi, loanPaymentsApi, bookLoan, unbookLoan, loanReconciliation, listAccounts, listVouchers, listCheckbooks, listChecks,
+  loansApi, loanPaymentsApi, bookLoan, registerLoan, cancelLoan, loanReconciliation, listAccounts, listVouchers, listCheckbooks, listChecks,
   createVoucherDraft, transitionVoucher, ApiError,
 } from '../../../lib/api.js';
 
@@ -519,57 +519,72 @@ export default function FinancialPage() {
         payDaysPerMonth: {}, intervalDays: 15, paymentMethod: 'Check', pmChecks: [],
         pmAdaDay: '', pmAdaBank: '', pmBtBank: '', cycleCount: 1,
         // GL accounts (defaults: Loans Payable / Finance Cost; bank picked by user)
-        liabilityAccountCode: '2001002', financeCostAccountCode: '5004001', cashAccountCode: ''
+        liabilityAccountCode: '2001002', financeCostAccountCode: '5004001', cashAccountCode: '',
+        bookingBasis: 'disbursement'  // how registration posts to the ledger
       }
     });
   }, [])
 
-  const deleteLoan = useCallback((id) => {
-    askConfirm('Delete this loan?', async () => {
-      try {
-        await loansApi.remove(id);
-        await loadLoans();
-      } catch (e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
-    });
-  }, [loadLoans, setConfirmModal]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const saveLoanFromModal = useCallback(async (data) => {
-    try {
-      if (data.id == null) await loansApi.create(loanToApi(data));
-      else                 await loansApi.update(data.id, loanToApi(data));
-      setLoanFormModal(null);
-      await loadLoans();
-    } catch (e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
-  }, [loadLoans]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Book a loan to the ledger (posts its origination JE). New loans = real
-  // disbursement (DR Cash + Finance Cost, CR Loans Payable); pre-existing loans
-  // = opening balance (DR Opening Balance Offset, CR Loans Payable).
-  const doBookLoan = useCallback((loan, mode) => {
+  // Loans are never deleted — only cancelled (reverses the ledger entry, marks
+  // Cancelled). Blocked server-side while the loan still has recorded payments.
+  const doCancelLoan = useCallback((loan) => {
     askConfirm(
-      mode === 'opening_balance'
-        ? `Book "${loan.name}" as an opening balance? This posts CR Loans Payable / DR Opening Balance Offset for ${fmtCur(parseFloat(loan.principal)||0)}.`
-        : `Book "${loan.name}" to the ledger? This posts the loan disbursement (DR Cash + Finance Cost, CR Loans Payable).`,
+      `Cancel loan "${loan.name}"? This reverses its journal entry and marks it Cancelled. Loans can't be deleted, only cancelled.`,
       async () => {
         try {
-          const r = await bookLoan(loan.id, { mode });
-          showToast(`Booked to ledger — ${r.journalEntryNo}.`);
+          await cancelLoan(loan.id);
+          showToast('Loan cancelled — ledger entry reversed.');
           await loadLoans();
           loadReconciliation();
-        } catch (e) { showToast('Book failed: ' + (e instanceof ApiError ? e.detail : e.message)); }
+        } catch (e) { showToast('Cancel failed: ' + (e instanceof ApiError ? e.detail : e.message)); }
       });
   }, [loadLoans, loadReconciliation]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const doUnbookLoan = useCallback((loan) => {
-    askConfirm(`Unbook "${loan.name}"? This reverses its booking journal entry.`, async () => {
-      try {
-        await unbookLoan(loan.id);
-        showToast('Loan unbooked — booking entry reversed.');
+  const saveLoanFromModal = useCallback(async (data) => {
+    try {
+      if (data.id == null) {
+        // New loan → register + auto-book atomically. Disbursement needs a cash account.
+        const basis = data.bookingBasis || 'disbursement';
+        if (basis === 'disbursement' && !data.cashAccountCode) {
+          showToast('Select a Cash / Bank account — the disbursement posts there.');
+          return;
+        }
+        if (!data.liabilityAccountCode) {
+          showToast('Select a Loan Liability account.');
+          return;
+        }
+        const res = await registerLoan({ ...loanToApi(data), bookingMode: basis });
+        showToast(res?.journalEntryNo ? `Loan registered & posted — ${res.journalEntryNo}.` : 'Loan registered.');
+      } else {
+        await loansApi.update(data.id, loanToApi(data));
+        showToast('Loan updated.');
+      }
+      setLoanFormModal(null);
+      await loadLoans();
+      loadReconciliation();
+    } catch (e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
+  }, [loadLoans, loadReconciliation]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // New loans auto-book at registration. This is the transitional path for any
+  // legacy loans registered before that: book the unbooked ones (as a
+  // disbursement) straight from the reconciliation tile. A loan missing its cash
+  // account will fail — set it via Edit, then Book again.
+  const doBookUnbookedLoans = useCallback(() => {
+    const items = reconciliation?.unbookedLoans || [];
+    if (!items.length) return;
+    askConfirm(
+      `Book ${items.length} unbooked loan${items.length > 1 ? 's' : ''} to the ledger as a disbursement (DR Cash + Finance Cost / CR Loans Payable)?`,
+      async () => {
+        let okc = 0, failc = 0;
+        for (const it of items) {
+          try { await bookLoan(it.id, { mode: 'disbursement' }); okc++; }
+          catch { failc++; }
+        }
+        showToast(failc ? `Booked ${okc}; ${failc} need a Cash account set (Edit the loan).` : `Booked ${okc} loan${okc > 1 ? 's' : ''}.`);
         await loadLoans();
         loadReconciliation();
-      } catch (e) { showToast('Unbook failed: ' + (e instanceof ApiError ? e.detail : e.message)); }
-    });
-  }, [loadLoans, loadReconciliation]); // eslint-disable-line react-hooks/exhaustive-deps
+      });
+  }, [reconciliation, loadLoans, loadReconciliation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeLoans    = loans.filter(l => l.status === 'Active');
   const totalPrincipal = activeLoans.reduce((s, l) => s + (parseFloat(l.principal) || 0), 0);
@@ -911,9 +926,11 @@ export default function FinancialPage() {
                             'Current':   { bg:'#eff6ff', border:'#bfdbfe', color:'#1d4ed8' },
                             'Active':    { bg:'#fff7ed', border:'#fed7aa', color:'#c2410c' },
                             'Disposed':  { bg:'#f8fafc', border:'#e2e8f0', color:'#94a3b8' },
+                            'Cancelled': { bg:'#f1f5f9', border:'#e2e8f0', color:'#64748b' },
                           };
-                          const s = smap[st.derivedStatus || 'Active'] || smap.Active;
-                          return <span className="pill" style={{ background:s.bg, borderColor:s.border, color:s.color }}>{st.derivedStatus || 'Active'}</span>;
+                          const disp = l.status === 'Cancelled' ? 'Cancelled' : (st.derivedStatus || 'Active');
+                          const s = smap[disp] || smap.Active;
+                          return <span className="pill" style={{ background:s.bg, borderColor:s.border, color:s.color }}>{disp}</span>;
                         })()}
                       </td>
                       <td style={{ textAlign:'center' }} onClick={e => e.stopPropagation()}>
@@ -933,11 +950,13 @@ export default function FinancialPage() {
                                 title="Edit loan"
                                 onClick={() => { setPdFillD1(''); setPdFillD2(''); setLoanFormModal({ mode:'edit', data:{ ...l } }); }}
                               >✎</button>
-                              <button
-                                className="lr-del-btn"
-                                title="Delete loan"
-                                onClick={() => deleteLoan(l.id)}
-                              >✕</button>
+                              {l.status !== 'Cancelled' && (
+                                <button
+                                  className="lr-del-btn"
+                                  title="Cancel loan (reverses its ledger entry; loans can't be deleted)"
+                                  onClick={() => doCancelLoan(l)}
+                                >⊘</button>
+                              )}
                             </>
                           ) : (
                             <span title="Admin access required" style={{ fontSize:13, color:'#cbd5e1' }}>🔒</span>
@@ -1051,9 +1070,15 @@ export default function FinancialPage() {
             {!ok && (
               <div style={{ marginTop:10, display:'flex', flexDirection:'column', gap:6 }}>
                 {r.unbookedCents !== 0 && (
-                  <div style={{ fontSize:11.5, color:'#7c2d12' }}>
-                    <strong>{peso(r.unbookedCents)}</strong> in <strong>{r.unbookedLoans.length}</strong> loan{r.unbookedLoans.length!==1?'s':''} not yet booked
-                    {r.unbookedLoans.length ? ` (${r.unbookedLoans.slice(0,3).map(l => l.loanNo || l.name).join(', ')}${r.unbookedLoans.length>3?'…':''})` : ''} — <em>Book them to post the liability.</em>
+                  <div style={{ fontSize:11.5, color:'#7c2d12', display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                    <span>
+                      <strong>{peso(r.unbookedCents)}</strong> in <strong>{r.unbookedLoans.length}</strong> legacy loan{r.unbookedLoans.length!==1?'s':''} not yet booked
+                      {r.unbookedLoans.length ? ` (${r.unbookedLoans.slice(0,3).map(l => l.loanNo || l.name).join(', ')}${r.unbookedLoans.length>3?'…':''})` : ''}.
+                    </span>
+                    {isAdmin && (
+                      <button className="btn btn-sm" style={{ background:'#f59e0b', color:'#fff', border:'none', fontWeight:700, padding:'3px 10px' }}
+                        onClick={doBookUnbookedLoans}>📒 Book now</button>
+                    )}
                   </div>
                 )}
                 {r.unpostedCents !== 0 && (
@@ -1081,8 +1106,8 @@ export default function FinancialPage() {
     const todayStr = new Date().toISOString().slice(0, 10);
     const yearStart = todayStr.slice(0, 4) + '-01-01';
 
-    // Portfolio aggregates
-    const portfolio = loans.reduce((acc, l) => {
+    // Portfolio aggregates (cancelled loans are excluded — they carry no balance)
+    const portfolio = loans.filter(l => l.status !== 'Cancelled').reduce((acc, l) => {
       const st = loanStates[l.id] || {};
       acc.totalBorrowed       += Number(l.principal) || 0;
       acc.totalOutstanding    += st.outstandingTotal || 0;
@@ -1110,7 +1135,7 @@ export default function FinancialPage() {
     const alerts = [];
     loans.forEach(l => {
       const st = loanStates[l.id] || {};
-      if (st.derivedStatus === 'Paid-Off' || l.status === 'Disposed') return;
+      if (st.derivedStatus === 'Paid-Off' || l.status === 'Disposed' || l.status === 'Cancelled') return;
       if ((st.overdueAmount || 0) > 0) {
         alerts.push({ loan: l, type: 'overdue', amount: st.overdueAmount,
           dueDate: st.nextDueDate, missedCount: st.missedCount || 0 });
@@ -1391,6 +1416,7 @@ export default function FinancialPage() {
         'Current':   { bg:'#eff6ff', border:'#bfdbfe', color:'#1d4ed8' },
         'Active':    { bg:'#fff7ed', border:'#fed7aa', color:'#c2410c' },
         'Disposed':  { bg:'#f8fafc', border:'#e2e8f0', color:'#94a3b8' },
+        'Cancelled': { bg:'#f1f5f9', border:'#e2e8f0', color:'#64748b' },
       };
       const s = map[status] || map.Active;
       return <span className="pill" style={{ background:s.bg, borderColor:s.border, color:s.color }}>{status}</span>;
@@ -1531,7 +1557,7 @@ export default function FinancialPage() {
                         ) : <span style={{ color:'#cbd5e1' }}>—</span>}
                       </td>
                       <td style={{ textAlign:'right' }}>{st.nextDueAmount ? fmtCur(st.nextDueAmount) : '—'}</td>
-                      <td><StatusPill status={st.derivedStatus || 'Active'} /></td>
+                      <td><StatusPill status={l.status === 'Cancelled' ? 'Cancelled' : (st.derivedStatus || 'Active')} /></td>
                       <td style={{ textAlign:'right' }}>
                         {!st.isPaidOff && l.status !== 'Disposed' && (
                           <button className="btn btn-primary btn-sm" onClick={()=>setPayModal(l.id)}>
@@ -2893,18 +2919,13 @@ export default function FinancialPage() {
                     🔒 <span>Editing requires <strong>Admin</strong> access</span>
                   </span>
                 )}
-                {/* Ledger booking status / action */}
-                {l.bookedAt ? (
-                  <span style={{ display:'inline-flex', alignItems:'center', gap:8, fontSize:12, fontWeight:700, color:'#15803d' }}>
-                    <span style={{ background:'#f0fdf4', border:'1px solid #bbf7d0', borderRadius:999, padding:'3px 10px' }}>✓ Booked to Ledger</span>
-                    {isAdmin && <button className="btn btn-ghost btn-sm" onClick={() => doUnbookLoan(l)}>Unbook</button>}
-                  </span>
-                ) : isAdmin && (
-                  <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
-                    <button className="btn btn-sm" style={{ background:'#eff6ff', color:'#1d4ed8', border:'1.5px solid #bfdbfe', fontWeight:700 }}
-                      onClick={() => doBookLoan(l, 'disbursement')} title="Post the loan disbursement entry">📒 Book to Ledger</button>
-                    <button className="btn btn-ghost btn-sm" onClick={() => doBookLoan(l, 'opening_balance')} title="Book as an opening balance (pre-existing loan)">Opening Bal.</button>
-                  </span>
+                {/* Ledger booking status (posting is automatic at registration) */}
+                {l.status === 'Cancelled' ? (
+                  <span style={{ fontSize:12, fontWeight:700, color:'#64748b', background:'#f1f5f9', border:'1px solid #e2e8f0', borderRadius:999, padding:'3px 10px' }}>⊘ Cancelled</span>
+                ) : l.bookedAt ? (
+                  <span style={{ fontSize:12, fontWeight:700, color:'#15803d', background:'#f0fdf4', border:'1px solid #bbf7d0', borderRadius:999, padding:'3px 10px' }}>✓ Posted to Ledger</span>
+                ) : (
+                  <span style={{ fontSize:12, fontWeight:700, color:'#92400e', background:'#fffbeb', border:'1px solid #fde68a', borderRadius:999, padding:'3px 10px' }} title="Legacy loan — book it from the reconciliation tile on the Dashboard">⚠ Not yet posted</span>
                 )}
                 <div style={{ display:'flex', gap:8, marginLeft:'auto' }}>
                   <button className="btn btn-ghost" onClick={() => { setLoanDetailModal(null); setLoanDetailTab('details'); }}>Close</button>
@@ -3065,6 +3086,22 @@ export default function FinancialPage() {
                 <div style={{ fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase', marginBottom:10, paddingBottom:6, borderBottom:'1px solid #f1f5f9' }}>
                   Accounting — GL Accounts
                 </div>
+                {isNew && (
+                  <div style={{ marginBottom:12, padding:'10px 12px', background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:8 }}>
+                    <div className="field" style={{ marginBottom:0 }}>
+                      <label>Booking Basis · posts automatically when you save</label>
+                      <select value={fd.bookingBasis||'disbursement'} onChange={e => set('bookingBasis', e.target.value)}>
+                        <option value="disbursement">New disbursement — DR Cash + Finance Cost / CR Loans Payable</option>
+                        <option value="opening_balance">Opening balance (pre-existing loan) — DR Opening Balance Offset / CR Loans Payable</option>
+                      </select>
+                      <span style={{ fontSize:10, color:'#1e40af', marginTop:3 }}>
+                        {(fd.bookingBasis||'disbursement')==='opening_balance'
+                          ? 'Brings an existing loan onto the books — no cash movement.'
+                          : 'Records the loan proceeds into the cash account below.'}
+                      </span>
+                    </div>
+                  </div>
+                )}
                 <div className="lr-form-grid">
                   <div className="field">
                     <label>Loan Liability Account</label>

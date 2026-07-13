@@ -53,6 +53,18 @@ export const zLoanBook = z.object({
 export type LoanBook = z.infer<typeof zLoanBook>;
 
 /**
+ * Register a loan AND post its origination entry in one step — booking is
+ * automatic, the basis just picks the accounting (new disbursement vs. bringing
+ * a pre-existing loan on as an opening balance).
+ */
+export const zLoanRegister = zLoanInput.extend({
+  bookingMode: z.enum(["disbursement", "opening_balance"]).default("disbursement"),
+  openingEquityAccountCode: nullableTrimmed(40),      // opening_balance: default 2004002
+  outstandingCents: z.number().int().nonnegative().optional(), // opening_balance: default principal
+});
+export type LoanRegister = z.infer<typeof zLoanRegister>;
+
+/**
  * Record a loan payment — FM is the source of truth and originates the
  * disbursement instrument. Bank Transfer / Cash / Online / Auto-Debit produce a
  * Payment Voucher (JE posts at approval); Check produces a Check Voucher + a
