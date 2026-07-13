@@ -151,9 +151,33 @@ export const zFixedAssetInput = z.object({
   installmentAmortizationAccount: nullableTrimmed(40),
   paymentMethod: nullableTrimmed(40),
   pmConfig: jsonBag,
+  cashAccountCode: nullableTrimmed(40),   // cash/bank credited on a cash purchase or installment down payment
 });
 export type FixedAssetInput = z.infer<typeof zFixedAssetInput>;
 export const zFixedAssetUpdate = zFixedAssetInput.partial();
+
+/**
+ * Register a fixed asset AND post its acquisition entry in one step — booking is
+ * automatic, the basis picks the accounting:
+ *   • cash            → DR Fixed Asset / CR Cash
+ *   • installment     → DR Fixed Asset / CR Fixed Assets Payable (financed) + CR Cash (down payment)
+ *   • opening_balance → DR Fixed Asset / CR Accumulated Depreciation (prior) + CR Opening Balance Offset (NBV)
+ */
+export const zFixedAssetRegister = zFixedAssetInput.extend({
+  bookingMode: z.enum(["cash", "installment", "opening_balance"]).default("cash"),
+  openingEquityAccountCode: nullableTrimmed(40),               // opening_balance: default 2004002
+  accumDepreciationToDateCents: z.number().int().nonnegative().optional(), // opening_balance: prior depreciation
+});
+export type FixedAssetRegister = z.infer<typeof zFixedAssetRegister>;
+
+/** Book an existing (unbooked) fixed asset to the ledger. */
+export const zFixedAssetBook = z.object({
+  mode: z.enum(["cash", "installment", "opening_balance"]).default("cash"),
+  date: isoDate.optional(),
+  openingEquityAccountCode: nullableTrimmed(40),
+  accumDepreciationToDateCents: z.number().int().nonnegative().optional(),
+});
+export type FixedAssetBook = z.infer<typeof zFixedAssetBook>;
 
 export const zAssetInstallmentPaymentInput = z.object({
   assetId: uuidOrNull,

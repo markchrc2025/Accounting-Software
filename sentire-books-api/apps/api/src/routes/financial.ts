@@ -15,6 +15,8 @@ import {
   zAssetTypeUpdate,
   zFixedAssetInput,
   zFixedAssetUpdate,
+  zFixedAssetRegister,
+  zFixedAssetBook,
   zAssetInstallmentPaymentInput,
   zAssetInstallmentPaymentUpdate,
   zAssetDeprPostingInput,
@@ -517,6 +519,197 @@ export const fixedAssetRoutes = makeCrudRoutes({
   createSchema: zFixedAssetInput,
   updateSchema: zFixedAssetUpdate,
   orderBy: [{ column: fixedAssets.assetNo, dir: "asc" }],
+});
+
+// ── Fixed asset acquisition booking ─────────────────────────────────────────
+class AssetBookError extends Error {
+  constructor(public code: "already_booked" | "accounts_unset" | "nothing_to_book") { super(code); }
+}
+type AssetBookInput = { mode: "cash" | "installment" | "opening_balance"; date?: string | undefined; openingEquityAccountCode?: string | null | undefined; accumDepreciationToDateCents?: number | undefined };
+type AssetBookResult =
+  | { ok: true; asset: typeof fixedAssets.$inferSelect; journalEntryNo: string }
+  | { ok: false; error: "already_booked" | "accounts_unset" | "nothing_to_book" };
+
+// Post a fixed asset's acquisition entry inside an existing transaction and
+// stamp it. Cash: DR Fixed Asset / CR Cash. Installment: DR Fixed Asset /
+// CR Fixed Assets Payable (financed) + CR Cash (down payment). Opening balance:
+// DR Fixed Asset / CR Accumulated Depreciation (prior) + CR Opening Balance
+// Offset (net book value). Shared by /register (auto-book) and /:id/book.
+async function bookAssetTx(tx: Tx, asset: typeof fixedAssets.$inferSelect, input: AssetBookInput, orgId: string, userId: string): Promise<AssetBookResult> {
+  if (asset.bookingJournalEntryId) return { ok: false, error: "already_booked" };
+  const cost = asset.costCents;
+  if (cost <= 0) return { ok: false, error: "nothing_to_book" };
+
+  const codes = [
+    asset.fixedAssetAccount,
+    asset.cashAccountCode,
+    asset.accumDeprecAccount,
+    asset.installmentPayableAccount,
+    input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT,
+  ].filter((x): x is string => !!x);
+  const accs = codes.length
+    ? await tx.select({ id: accounts.id, code: accounts.code }).from(accounts)
+        .where(and(eq(accounts.orgId, orgId), inArray(accounts.code, codes)))
+    : [];
+  const byCode = new Map(accs.map((a) => [a.code, a.id]));
+  const assetId = asset.fixedAssetAccount ? byCode.get(asset.fixedAssetAccount) : undefined;
+  if (!assetId) return { ok: false, error: "accounts_unset" };
+  const cashId = asset.cashAccountCode ? byCode.get(asset.cashAccountCode) : undefined;
+
+  let lines: { accountId: string; debitCents: number; creditCents: number }[];
+  if (input.mode === "opening_balance") {
+    const eqCode = input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT;
+    const equityId = byCode.get(eqCode);
+    const accumId = asset.accumDeprecAccount ? byCode.get(asset.accumDeprecAccount) : undefined;
+    const accum = input.accumDepreciationToDateCents ?? 0;
+    if (!equityId || (accum > 0 && !accumId)) return { ok: false, error: "accounts_unset" };
+    const nbv = cost - accum;
+    lines = [
+      { accountId: assetId, debitCents: cost, creditCents: 0 },
+      ...(accum > 0 && accumId ? [{ accountId: accumId, debitCents: 0, creditCents: accum }] : []),
+      { accountId: equityId, debitCents: 0, creditCents: nbv },
+    ];
+  } else if (input.mode === "installment") {
+    const payableId = asset.installmentPayableAccount ? byCode.get(asset.installmentPayableAccount) : undefined;
+    const financed = asset.installmentPrincipalCents > 0 ? asset.installmentPrincipalCents : cost;
+    const down = cost - financed;
+    if (!payableId || financed <= 0 || financed > cost || (down > 0 && !cashId)) return { ok: false, error: "accounts_unset" };
+    lines = [
+      { accountId: assetId, debitCents: cost, creditCents: 0 },
+      { accountId: payableId, debitCents: 0, creditCents: financed },
+      ...(down > 0 && cashId ? [{ accountId: cashId, debitCents: 0, creditCents: down }] : []),
+    ];
+  } else {
+    if (!cashId) return { ok: false, error: "accounts_unset" };
+    lines = [
+      { accountId: assetId, debitCents: cost, creditCents: 0 },
+      { accountId: cashId, debitCents: 0, creditCents: cost },
+    ];
+  }
+
+  const date = input.date ?? asset.purchaseDate ?? asset.deprecStartDate ?? new Date().toISOString().slice(0, 10);
+  const je = await postJournalEntryCore(
+    tx,
+    {
+      orgId,
+      entryDate: date,
+      memo: `Asset acquisition — ${asset.name}${asset.assetNo ? ` (${asset.assetNo})` : ""}`,
+      entryType: "Manual",
+      reference: asset.assetNo ?? null,
+      sourceType: "fixed_asset",
+      sourceId: asset.id,
+      post: true,
+      lines,
+    },
+    { userId, orgId },
+  );
+  const [updated] = await tx.update(fixedAssets)
+    .set({ bookingJournalEntryId: je.id, bookedAt: new Date(), bookingMode: input.mode })
+    .where(eq(fixedAssets.id, asset.id)).returning();
+  return { ok: true, asset: updated!, journalEntryNo: je.entryNo };
+}
+
+const assetBookErrorResponse = (error: "accounts_unset" | "nothing_to_book") =>
+  error === "accounts_unset"
+    ? { body: { error, detail: "Set the asset's Fixed Asset account (and the cash / payable account for its basis) before booking." }, status: 400 as const }
+    : { body: { error, detail: "Asset cost must be greater than zero." }, status: 400 as const };
+
+// Register a fixed asset and post its acquisition entry atomically — booking is
+// automatic. Rolls back entirely if the entry can't post, so a registered asset
+// is always on the books.
+fixedAssetRoutes.post("/register", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  let body: unknown;
+  try { body = await c.req.json(); } catch { body = {}; }
+  try {
+    const { bookingMode, openingEquityAccountCode, accumDepreciationToDateCents, ...assetFields } = zFixedAssetRegister.parse(body ?? {});
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const [asset] = await tx.insert(fixedAssets)
+          .values({ ...assetFields, orgId: auth.orgId, createdBy: auth.userId } as never)
+          .returning();
+        const booked = await bookAssetTx(tx, asset!, { mode: bookingMode, openingEquityAccountCode, accumDepreciationToDateCents }, auth.orgId, auth.userId);
+        if (!booked.ok) throw new AssetBookError(booked.error);
+        return { asset: booked.asset, journalEntryNo: booked.journalEntryNo };
+      },
+    );
+    return c.json(outcome, 201);
+  } catch (err) {
+    if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof AssetBookError && err.code !== "already_booked") {
+      const { body: b, status } = assetBookErrorResponse(err.code);
+      return c.json(b, status);
+    }
+    if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "23505") {
+      return c.json({ error: "duplicate", detail: "That asset number already exists." }, 409);
+    }
+    console.error("[registerAsset]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Book an existing (legacy / unbooked) fixed asset to the ledger.
+fixedAssetRoutes.post("/:id/book", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  const id = c.req.param("id") ?? "";
+  let body: unknown;
+  try { body = await c.req.json(); } catch { body = {}; }
+  try {
+    const input = zFixedAssetBook.parse(body ?? {});
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const [asset] = await tx.select().from(fixedAssets).where(and(eq(fixedAssets.orgId, auth.orgId), eq(fixedAssets.id, id)));
+        if (!asset) return { error: "not_found" as const };
+        return bookAssetTx(tx, asset, { mode: input.mode, date: input.date, openingEquityAccountCode: input.openingEquityAccountCode, accumDepreciationToDateCents: input.accumDepreciationToDateCents }, auth.orgId, auth.userId);
+      },
+    );
+    if (!("ok" in outcome)) return c.json({ error: "not_found" }, 404);
+    if (outcome.ok) return c.json({ asset: outcome.asset, journalEntryNo: outcome.journalEntryNo });
+    if (outcome.error === "already_booked") return c.json({ error: "already_booked", detail: "This asset is already booked to the ledger." }, 409);
+    const { body: b, status } = assetBookErrorResponse(outcome.error);
+    return c.json(b, status);
+  } catch (err) {
+    if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    console.error("[bookAsset]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Cancel a fixed asset — never deleted, only cancelled. Reverses its acquisition
+// entry (if booked) and marks it Cancelled. Blocked while it still has recorded
+// installment payments, so nothing is orphaned.
+fixedAssetRoutes.post("/:id/cancel", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  const id = c.req.param("id") ?? "";
+  try {
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const [asset] = await tx.select().from(fixedAssets).where(and(eq(fixedAssets.orgId, auth.orgId), eq(fixedAssets.id, id)));
+        if (!asset) return { error: "not_found" as const };
+        if (asset.status === "Cancelled") return { error: "already_cancelled" as const };
+        const payCount = await tx.select({ count: sql<number>`count(*)::int` }).from(assetInstallmentPayments)
+          .where(and(eq(assetInstallmentPayments.orgId, auth.orgId), eq(assetInstallmentPayments.assetId, id)));
+        if ((payCount[0]?.count ?? 0) > 0) return { error: "has_payments" as const };
+        if (asset.bookingJournalEntryId) {
+          await reverseJournalEntryCore(tx, asset.bookingJournalEntryId, { userId: auth.userId, orgId: auth.orgId });
+        }
+        const [updated] = await tx.update(fixedAssets)
+          .set({ status: "Cancelled", bookingJournalEntryId: null, bookedAt: null, bookingMode: null })
+          .where(eq(fixedAssets.id, id)).returning();
+        return { asset: updated };
+      },
+    );
+    if (outcome.error === "not_found") return c.json({ error: "not_found" }, 404);
+    if (outcome.error === "already_cancelled") return c.json({ error: "already_cancelled", detail: "This asset is already cancelled." }, 409);
+    if (outcome.error === "has_payments") return c.json({ error: "has_payments", detail: "This asset has recorded installment payments — void those before cancelling." }, 409);
+    return c.json(outcome);
+  } catch (err) {
+    console.error("[cancelAsset]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
 });
 
 export const assetInstallmentPaymentRoutes = makeCrudRoutes({
