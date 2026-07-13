@@ -220,6 +220,12 @@ export const unbookLoan = (id) =>
 // or Check Voucher + registry entry for PDC) and links it to the loan payment.
 export const payLoan = (id, opts) =>
   apiFetch(`/loans/${id}/pay`, { method: 'POST', body: JSON.stringify(opts || {}) });
+// Register a loan and post its origination entry atomically (booking is automatic).
+export const registerLoan = (payload) =>
+  apiFetch('/loans/register', { method: 'POST', body: JSON.stringify(payload) });
+// Cancel a loan (reverses its ledger entry, marks it Cancelled). Loans are never deleted.
+export const cancelLoan = (id) =>
+  apiFetch(`/loans/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) });
 // Reconcile the loan sub-ledger against the GL Loans Payable control account.
 export const loanReconciliation = () => apiFetch('/loans/reconciliation');
 export const loanPaymentsApi = crud('/loan-payments', 'payments', 'payment');

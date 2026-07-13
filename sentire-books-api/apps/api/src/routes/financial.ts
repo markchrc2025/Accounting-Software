@@ -24,6 +24,7 @@ import {
   zCreditLineInput,
   zCreditLineUpdate,
   zLoanBook,
+  zLoanRegister,
   zLoanPay,
 } from "@sentire-books/domain";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -41,8 +42,9 @@ import {
   assetDeprPostings,
   weeklyProjections,
   creditLines,
+  type Tx,
 } from "@sentire-books/db";
-import { makeCrudRoutes } from "./crudFactory";
+import { makeCrudRoutes, nextDocNo } from "./crudFactory";
 import { requireAuth } from "../auth";
 import { postJournalEntryCore, reverseJournalEntryCore } from "../ledger/postJournalEntry";
 import { createVoucherDraftCore } from "../ledger/voucherWorkflow";
@@ -60,10 +62,124 @@ export const loanRoutes = makeCrudRoutes({
 
 const OPENING_EQUITY_DEFAULT = "2004002"; // Opening Balance Offset
 
-// Book a loan to the ledger — posts its origination journal entry once and
-// stamps the loan. Disbursement mode books the real proceeds (DR Cash + DR
-// Finance Cost, CR Loans Payable); opening-balance mode brings a pre-existing
-// loan onto the books (DR Opening Balance Offset, CR Loans Payable).
+// Thrown to roll a registration transaction back when its auto-booking can't post.
+class LoanBookError extends Error {
+  constructor(public code: "already_booked" | "accounts_unset" | "nothing_to_book") { super(code); }
+}
+
+type BookInput = { mode: "disbursement" | "opening_balance"; date?: string | undefined; openingEquityAccountCode?: string | null | undefined; outstandingCents?: number | undefined };
+type BookResult =
+  | { ok: true; loan: typeof loans.$inferSelect; journalEntryNo: string }
+  | { ok: false; error: "already_booked" | "accounts_unset" | "nothing_to_book" };
+
+// Post a loan's origination entry inside an existing transaction and stamp the
+// loan. Disbursement books real proceeds (DR Cash + DR Finance Cost, CR Loans
+// Payable); opening-balance brings a pre-existing loan on (DR Opening Balance
+// Offset, CR Loans Payable). Shared by /register (auto-book) and /:id/book.
+async function bookLoanTx(tx: Tx, loan: typeof loans.$inferSelect, input: BookInput, orgId: string, userId: string): Promise<BookResult> {
+  if (loan.bookingJournalEntryId) return { ok: false, error: "already_booked" };
+
+  const codes = [
+    loan.liabilityAccountCode,
+    loan.financeCostAccountCode,
+    loan.cashAccountCode,
+    input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT,
+  ].filter((x): x is string => !!x);
+  const accs = codes.length
+    ? await tx.select({ id: accounts.id, code: accounts.code }).from(accounts)
+        .where(and(eq(accounts.orgId, orgId), inArray(accounts.code, codes)))
+    : [];
+  const byCode = new Map(accs.map((a) => [a.code, a.id]));
+
+  const principal = loan.principalCents;
+  const fee = loan.processingFeeCents ?? 0;
+  const liabilityId = loan.liabilityAccountCode ? byCode.get(loan.liabilityAccountCode) : undefined;
+  if (!liabilityId) return { ok: false, error: "accounts_unset" };
+
+  let lines: { accountId: string; debitCents: number; creditCents: number }[];
+  if (input.mode === "opening_balance") {
+    const eqCode = input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT;
+    const equityId = byCode.get(eqCode);
+    if (!equityId) return { ok: false, error: "accounts_unset" };
+    const outstanding = input.outstandingCents ?? principal;
+    if (outstanding <= 0) return { ok: false, error: "nothing_to_book" };
+    lines = [
+      { accountId: equityId, debitCents: outstanding, creditCents: 0 },
+      { accountId: liabilityId, debitCents: 0, creditCents: outstanding },
+    ];
+  } else {
+    const cashId = loan.cashAccountCode ? byCode.get(loan.cashAccountCode) : undefined;
+    const financeId = loan.financeCostAccountCode ? byCode.get(loan.financeCostAccountCode) : undefined;
+    if (!cashId || (fee > 0 && !financeId) || principal <= 0) return { ok: false, error: "accounts_unset" };
+    const netProceeds = principal - fee;
+    lines = [
+      { accountId: cashId, debitCents: netProceeds, creditCents: 0 },
+      ...(fee > 0 && financeId ? [{ accountId: financeId, debitCents: fee, creditCents: 0 }] : []),
+      { accountId: liabilityId, debitCents: 0, creditCents: principal },
+    ];
+  }
+
+  const date = input.date ?? loan.disbursementDate ?? new Date().toISOString().slice(0, 10);
+  const je = await postJournalEntryCore(
+    tx,
+    {
+      orgId,
+      entryDate: date,
+      memo: `Loan booking — ${loan.name}${loan.loanNo ? ` (${loan.loanNo})` : ""}`,
+      entryType: "Manual",
+      reference: loan.loanNo ?? null,
+      sourceType: "loan",
+      sourceId: loan.id,
+      post: true,
+      lines,
+    },
+    { userId, orgId },
+  );
+  const [updated] = await tx.update(loans)
+    .set({ bookingJournalEntryId: je.id, bookedAt: new Date(), bookingMode: input.mode })
+    .where(eq(loans.id, loan.id)).returning();
+  return { ok: true, loan: updated!, journalEntryNo: je.entryNo };
+}
+
+const bookErrorResponse = (error: "accounts_unset" | "nothing_to_book") =>
+  error === "accounts_unset"
+    ? { body: { error, detail: "Set the loan's liability, finance-cost and cash accounts before booking." }, status: 400 as const }
+    : { body: { error, detail: "Outstanding amount must be greater than zero." }, status: 400 as const };
+
+// Register a loan and post its origination entry atomically — booking is
+// automatic (no separate step). Rolls back entirely if the entry can't post, so
+// a registered loan is always on the books.
+loanRoutes.post("/register", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  let body: unknown;
+  try { body = await c.req.json(); } catch { body = {}; }
+  try {
+    const { bookingMode, openingEquityAccountCode, outstandingCents, ...loanFields } = zLoanRegister.parse(body ?? {});
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const loanNo = loanFields.loanNo || (await nextDocNo(tx, auth.orgId, "LN", loanFields.disbursementDate ?? undefined));
+        const [loan] = await tx.insert(loans)
+          .values({ ...loanFields, orgId: auth.orgId, loanNo, createdBy: auth.userId } as never)
+          .returning();
+        const booked = await bookLoanTx(tx, loan!, { mode: bookingMode, openingEquityAccountCode, outstandingCents }, auth.orgId, auth.userId);
+        if (!booked.ok) throw new LoanBookError(booked.error);
+        return { loan: booked.loan, journalEntryNo: booked.journalEntryNo };
+      },
+    );
+    return c.json(outcome, 201);
+  } catch (err) {
+    if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof LoanBookError && err.code !== "already_booked") {
+      const { body: b, status } = bookErrorResponse(err.code);
+      return c.json(b, status);
+    }
+    console.error("[registerLoan]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Book an existing (legacy / unbooked) loan to the ledger.
 loanRoutes.post("/:id/book", requireAuth, async (c) => {
   const auth = c.get("auth");
   const id = c.req.param("id") ?? "";
@@ -76,75 +192,14 @@ loanRoutes.post("/:id/book", requireAuth, async (c) => {
       async (tx) => {
         const [loan] = await tx.select().from(loans).where(and(eq(loans.orgId, auth.orgId), eq(loans.id, id)));
         if (!loan) return { error: "not_found" as const };
-        if (loan.bookingJournalEntryId) return { error: "already_booked" as const };
-
-        const codes = [
-          loan.liabilityAccountCode,
-          loan.financeCostAccountCode,
-          loan.cashAccountCode,
-          input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT,
-        ].filter((x): x is string => !!x);
-        const accs = codes.length
-          ? await tx.select({ id: accounts.id, code: accounts.code }).from(accounts)
-              .where(and(eq(accounts.orgId, auth.orgId), inArray(accounts.code, codes)))
-          : [];
-        const byCode = new Map(accs.map((a) => [a.code, a.id]));
-
-        const principal = loan.principalCents;
-        const fee = loan.processingFeeCents ?? 0;
-        const liabilityId = loan.liabilityAccountCode ? byCode.get(loan.liabilityAccountCode) : undefined;
-        if (!liabilityId) return { error: "accounts_unset" as const };
-
-        let lines: { accountId: string; debitCents: number; creditCents: number }[];
-        if (input.mode === "opening_balance") {
-          const eqCode = input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT;
-          const equityId = byCode.get(eqCode);
-          if (!equityId) return { error: "accounts_unset" as const };
-          const outstanding = input.outstandingCents ?? principal;
-          if (outstanding <= 0) return { error: "nothing_to_book" as const };
-          lines = [
-            { accountId: equityId, debitCents: outstanding, creditCents: 0 },
-            { accountId: liabilityId, debitCents: 0, creditCents: outstanding },
-          ];
-        } else {
-          const cashId = loan.cashAccountCode ? byCode.get(loan.cashAccountCode) : undefined;
-          const financeId = loan.financeCostAccountCode ? byCode.get(loan.financeCostAccountCode) : undefined;
-          if (!cashId || (fee > 0 && !financeId) || principal <= 0) return { error: "accounts_unset" as const };
-          const netProceeds = principal - fee;
-          lines = [
-            { accountId: cashId, debitCents: netProceeds, creditCents: 0 },
-            ...(fee > 0 && financeId ? [{ accountId: financeId, debitCents: fee, creditCents: 0 }] : []),
-            { accountId: liabilityId, debitCents: 0, creditCents: principal },
-          ];
-        }
-
-        const date = input.date ?? loan.disbursementDate ?? new Date().toISOString().slice(0, 10);
-        const je = await postJournalEntryCore(
-          tx,
-          {
-            orgId: auth.orgId,
-            entryDate: date,
-            memo: `Loan booking — ${loan.name}${loan.loanNo ? ` (${loan.loanNo})` : ""}`,
-            entryType: "Manual",
-            reference: loan.loanNo ?? null,
-            sourceType: "loan",
-            sourceId: loan.id,
-            post: true,
-            lines,
-          },
-          { userId: auth.userId, orgId: auth.orgId },
-        );
-        const [updated] = await tx.update(loans)
-          .set({ bookingJournalEntryId: je.id, bookedAt: new Date(), bookingMode: input.mode })
-          .where(eq(loans.id, id)).returning();
-        return { loan: updated, journalEntryNo: je.entryNo };
+        return bookLoanTx(tx, loan, { mode: input.mode, date: input.date, openingEquityAccountCode: input.openingEquityAccountCode, outstandingCents: input.outstandingCents }, auth.orgId, auth.userId);
       },
     );
-    if (outcome.error === "not_found") return c.json({ error: "not_found" }, 404);
+    if (!("ok" in outcome)) return c.json({ error: "not_found" }, 404);
+    if (outcome.ok) return c.json({ loan: outcome.loan, journalEntryNo: outcome.journalEntryNo });
     if (outcome.error === "already_booked") return c.json({ error: "already_booked", detail: "This loan is already booked to the ledger." }, 409);
-    if (outcome.error === "accounts_unset") return c.json({ error: "accounts_unset", detail: "Set the loan's liability, finance-cost and cash accounts before booking." }, 400);
-    if (outcome.error === "nothing_to_book") return c.json({ error: "nothing_to_book", detail: "Outstanding amount must be greater than zero." }, 400);
-    return c.json(outcome);
+    const { body: b, status } = bookErrorResponse(outcome.error);
+    return c.json(b, status);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
     console.error("[bookLoan]", err);
@@ -175,6 +230,41 @@ loanRoutes.post("/:id/unbook", requireAuth, async (c) => {
     return c.json(outcome);
   } catch (err) {
     console.error("[unbookLoan]", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+// Cancel a loan — a registered loan is never deleted, only cancelled. Reverses
+// its booking entry (if booked) and marks it Cancelled. Blocked while it still
+// has recorded payments, so nothing is left orphaned.
+loanRoutes.post("/:id/cancel", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  const id = c.req.param("id") ?? "";
+  try {
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const [loan] = await tx.select().from(loans).where(and(eq(loans.orgId, auth.orgId), eq(loans.id, id)));
+        if (!loan) return { error: "not_found" as const };
+        if (loan.status === "Cancelled") return { error: "already_cancelled" as const };
+        const payCount = await tx.select({ count: sql<number>`count(*)::int` }).from(loanPayments)
+          .where(and(eq(loanPayments.orgId, auth.orgId), eq(loanPayments.loanId, id)));
+        if ((payCount[0]?.count ?? 0) > 0) return { error: "has_payments" as const };
+        if (loan.bookingJournalEntryId) {
+          await reverseJournalEntryCore(tx, loan.bookingJournalEntryId, { userId: auth.userId, orgId: auth.orgId });
+        }
+        const [updated] = await tx.update(loans)
+          .set({ status: "Cancelled", bookingJournalEntryId: null, bookedAt: null, bookingMode: null })
+          .where(eq(loans.id, id)).returning();
+        return { loan: updated };
+      },
+    );
+    if (outcome.error === "not_found") return c.json({ error: "not_found" }, 404);
+    if (outcome.error === "already_cancelled") return c.json({ error: "already_cancelled", detail: "This loan is already cancelled." }, 409);
+    if (outcome.error === "has_payments") return c.json({ error: "has_payments", detail: "This loan has recorded payments — void or remove them before cancelling." }, 409);
+    return c.json(outcome);
+  } catch (err) {
+    console.error("[cancelLoan]", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
