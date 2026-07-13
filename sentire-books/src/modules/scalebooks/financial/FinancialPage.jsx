@@ -438,9 +438,12 @@ export default function FinancialPage() {
       .catch(() => {});
     loadPayments();
     loadVoucherDocs();
-    loadReconciliation();
     listCheckbooks().then(setCheckbooks).catch(() => {});
-  }, [loadLoans, loadPayments, loadVoucherDocs, loadReconciliation]);
+  }, [loadLoans, loadPayments, loadVoucherDocs]);
+  // Keep the reconciliation current as loans/payments change, so the tile — shown
+  // only when out of balance — always reflects the latest state (adding a loan,
+  // recording/deleting a payment, booking, etc.).
+  useEffect(() => { loadReconciliation(); }, [loans, payments, loadReconciliation]);
 
   // Load already-issued check numbers when selected checkbook changes
   const [issuedNums, setIssuedNums] = useState(new Set());
@@ -1137,8 +1140,8 @@ export default function FinancialPage() {
 
     return (
       <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
-        {/* ── Sub-ledger ⇄ GL reconciliation (Loans → GL, part 3) ─── */}
-        {ReconciliationTile()}
+        {/* ── Sub-ledger ⇄ GL reconciliation — only shown when out of balance ─── */}
+        {reconciliation && !reconciliation.reconciled && ReconciliationTile()}
 
         {/* ── KPI Scorecards ─────────────────────────────────────── */}
         <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:14 }}>
