@@ -722,6 +722,13 @@ export const loans = pgTable(
   intervalDays: integer("interval_days").notNull().default(15),
   paymentMethod: text("payment_method"),
   pmConfig: jsonb("pm_config"),
+  // ── GL integration (0020) ──
+  liabilityAccountCode: text("liability_account_code"),
+  financeCostAccountCode: text("finance_cost_account_code"),
+  cashAccountCode: text("cash_account_code"),
+  bookingMode: text("booking_mode"),
+  bookingJournalEntryId: uuid("booking_journal_entry_id"),
+  bookedAt: timestamp("booked_at", { withTimezone: true }),
   createdBy: text("created_by").references(() => appUsers.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

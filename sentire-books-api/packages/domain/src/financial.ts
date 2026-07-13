@@ -35,9 +35,22 @@ export const zLoanInput = z.object({
   intervalDays: z.number().int().min(1).max(365).default(15),
   paymentMethod: nullableTrimmed(40),
   pmConfig: jsonBag,
+  // GL account mappings (codes; resolved to account ids when booking/paying).
+  liabilityAccountCode: nullableTrimmed(40),
+  financeCostAccountCode: nullableTrimmed(40),
+  cashAccountCode: nullableTrimmed(40),
 });
 export type LoanInput = z.infer<typeof zLoanInput>;
 export const zLoanUpdate = zLoanInput.partial();
+
+/** Book a loan to the ledger — posts its origination journal entry. */
+export const zLoanBook = z.object({
+  mode: z.enum(["disbursement", "opening_balance"]).default("disbursement"),
+  date: isoDate.optional(),                          // defaults to disbursement date / today
+  openingEquityAccountCode: nullableTrimmed(40),     // opening_balance: default 2004002
+  outstandingCents: z.number().int().nonnegative().optional(), // opening_balance: default principal
+});
+export type LoanBook = z.infer<typeof zLoanBook>;
 
 export const zLoanPaymentInput = z.object({
   loanId: uuidOrNull,
