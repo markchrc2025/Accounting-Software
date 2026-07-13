@@ -2940,6 +2940,10 @@ export default function FinancialPage() {
         const isSemiMonthly = fd.paymentFrequency === 'Semi-Monthly';
         const canSave = !!(fd.name?.trim());
         const typeColor = LOAN_TYPE_COLORS[fd.loanType] || LOAN_TYPE_COLORS['Other'];
+        const bankAccounts = calAccounts.filter(a =>
+          ['Bank','Cash Equivalents','Cash','Cash and Cash Equivalents'].includes(a.subType) ||
+          /cash in bank/i.test(a.name||'')
+        );
         return (
           <div className="backdrop" onClick={e => { if (e.target === e.currentTarget) setLoanFormModal(null); }}>
             <div className="modal" style={{ width:'min(1200px,98vw)', height:'88vh' }}>
