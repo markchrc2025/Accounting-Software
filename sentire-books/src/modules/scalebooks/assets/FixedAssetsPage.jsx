@@ -3,13 +3,19 @@ import { useLocation } from 'react-router-dom';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 import { issueCheck, getActiveCheckbook } from '../../../utils/issueCheck.js';
 import {
-  fixedAssetsApi, assetTypesApi, assetInstallmentPaymentsApi, assetDeprPostingsApi,
+  fixedAssetsApi, registerAsset, cancelAsset, assetTypesApi, assetInstallmentPaymentsApi, assetDeprPostingsApi,
   listAccounts, createJournalEntry, createVoucherDraft, transitionVoucher, ApiError,
 } from '../../../lib/api.js';
 
 const DEP_METHODS  = ['Straight Line','Declining Balance','150 Declining Balance','200 Declining Balance'];
 const COMP_TYPES   = ['Non Pro Rata','Pro Rata'];
 const STATUSES     = ['Active','Disposed'];
+// How registering an asset posts to the ledger (the acquisition entry).
+const BOOKING_BASES = [
+  { key:'cash',            label:'Cash / Bank — DR Fixed Asset / CR Cash' },
+  { key:'installment',     label:'Installment — CR Fixed Assets Payable (+ CR Cash for any down payment)' },
+  { key:'opening_balance', label:'Opening balance (pre-existing) — CR Opening Balance Offset' },
+];
 const INST_METHODS = ['Reducing Balance','Straight-Line','Fixed','Balloon'];
 const PM_METHODS   = ['Check','Auto-Debit','Bank Transfer'];
 const MONTH_NAMES  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -52,6 +58,9 @@ const assetFromApi = (r) => ({
   installmentPayableAccount: r.installmentPayableAccount || '',
   installmentAmortizationAccount: r.installmentAmortizationAccount || '',
   paymentMethod: r.paymentMethod || 'Check',
+  cashAccountCode: r.cashAccountCode || '',
+  bookingMode: r.bookingMode || '',
+  bookedAt: r.bookedAt || null,
   pmChecks: [], pmAdaDay: '', pmAdaBank: '', pmBtBank: '', pmAutoVoucher: false,
   ...(r.pmConfig && typeof r.pmConfig === 'object' ? r.pmConfig : {}),
 });
@@ -88,6 +97,7 @@ const assetToApi = (a) => ({
   installmentPayableAccount: a.installmentPayableAccount || null,
   installmentAmortizationAccount: a.installmentAmortizationAccount || null,
   paymentMethod: a.paymentMethod || null,
+  cashAccountCode: a.cashAccountCode || null,
   pmConfig: assetPmConfig(a),
 });
 // Asset types: UI id is the human "FAT-001" number; uuid stays as _rowId.
@@ -367,9 +377,25 @@ export default function FixedAssetsPage() {
 
   const saveAsset = useCallback(async asset => {
     try {
-      if (asset._rowId) await fixedAssetsApi.update(asset._rowId, assetToApi(asset));
-      else await fixedAssetsApi.create(assetToApi(asset));
-      setAssetModal(null); showToast('Asset saved.');
+      if (asset._rowId) {
+        await fixedAssetsApi.update(asset._rowId, assetToApi(asset));
+        showToast('Asset saved.');
+      } else {
+        // New asset → register + auto-book the acquisition atomically.
+        const basis = asset.bookingBasis || 'cash';
+        if (!asset.fixedAssetAccount) { alert('Select a Fixed Asset account (the acquisition debits it).'); return; }
+        if ((basis === 'cash' || (basis === 'installment' && Number(asset.cost) > Number(asset.installmentPrincipal || 0))) && !asset.cashAccountCode) {
+          alert('Select a Cash / Bank account — the purchase (or its down payment) credits it.'); return;
+        }
+        if (basis === 'installment' && !asset.installmentPayableAccount) { alert('Set the Payable account for an installment purchase.'); return; }
+        const res = await registerAsset({
+          ...assetToApi(asset),
+          bookingMode: basis,
+          ...(basis === 'opening_balance' ? { accumDepreciationToDateCents: toCents(asset.accumDeprToDate) } : {}),
+        });
+        showToast(res?.journalEntryNo ? `Asset registered & posted — ${res.journalEntryNo}.` : 'Asset registered.');
+      }
+      setAssetModal(null);
       await loadAssets();
     } catch (e) {
       console.error(e);
@@ -380,14 +406,17 @@ export default function FixedAssetsPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Assets are never deleted — only cancelled (reverses the acquisition entry,
+  // marks Cancelled). Blocked server-side while installment payments exist.
   const deleteAsset = useCallback(id => {
-    askConfirm('Delete this asset?', async () => {
-      const a = assets.find(x => x.id === id);
-      if (!a?._rowId) return;
+    const a = assets.find(x => x.id === id);
+    if (!a?._rowId) return;
+    askConfirm(`Cancel asset "${a.name || a.id}"? This reverses its acquisition journal entry and marks it Cancelled. Assets can't be deleted, only cancelled.`, async () => {
       try {
-        await fixedAssetsApi.remove(a._rowId);
+        await cancelAsset(a._rowId);
+        showToast('Asset cancelled — acquisition entry reversed.');
         await loadAssets();
-      } catch (e) { alert('Delete failed: ' + (e?.detail || e?.message || e)); }
+      } catch (e) { alert('Cancel failed: ' + (e?.detail || e?.message || e)); }
     });
   }, [assets]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -435,8 +464,8 @@ export default function FixedAssetsPage() {
     } catch (e) { console.error(e); alert('Save failed: ' + (e?.detail || e?.message || e)); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const activeAssets = assets.filter(a=>a.status!=='Disposed');
-  const instAssets   = assets.filter(a=>a.isInstallment==='Yes'&&a.status!=='Disposed');
+  const activeAssets = assets.filter(a=>a.status!=='Disposed'&&a.status!=='Cancelled');
+  const instAssets   = assets.filter(a=>a.isInstallment==='Yes'&&a.status!=='Disposed'&&a.status!=='Cancelled');
   const totalCost    = activeAssets.reduce((s,a)=>s+(parseFloat(a.cost)||0),0);
 
   // Collision-safe ID: find the highest existing numeric suffix and add 1
@@ -744,12 +773,12 @@ export default function FixedAssetsPage() {
                     <td style={{textAlign:'center'}}>{a.usefulLifeMonths||'—'}</td>
                     <td><span style={{fontSize:10,background:'#eff6ff',border:'1px solid #bfdbfe',color:'#1d4ed8',borderRadius:999,padding:'2px 7px',fontWeight:700}}>{a.depreciationMethod||'Straight Line'}</span></td>
                     <td style={{color:'#64748b',fontSize:10}}>{a.computationType||'Non Pro Rata'}</td>
-                    <td><span className={`pill ${a.status==='Disposed'?'pill-disposed':'pill-active'}`}>{a.status||'Active'}</span></td>
+                    <td><span className={`pill ${a.status==='Cancelled'?'pill-disposed':a.status==='Disposed'?'pill-disposed':'pill-active'}`}>{a.status||'Active'}</span>{a.bookedAt&&a.status!=='Cancelled'&&<span title="Acquisition posted to the general ledger" style={{marginLeft:6,fontSize:9,fontWeight:800,color:'#15803d',background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:999,padding:'1px 5px'}}>✓ GL</span>}</td>
                     <td>{a.isInstallment==='Yes'?<span className="pill pill-inst">Installment</span>:<span style={{color:'#e5e7eb'}}>—</span>}</td>
                     <td>
                       <div style={{display:'flex',gap:4}}>
                         <button className="btn btn-ghost btn-sm" onClick={()=>setAssetModal({...a})}>Edit</button>
-                        <button onClick={()=>deleteAsset(a.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>
+                        {a.status!=='Cancelled'&&<button title="Cancel asset (reverses its ledger entry; assets can't be deleted)" onClick={()=>deleteAsset(a.id)} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>⊘</button>}
                       </div>
                     </td>
                   </tr>
@@ -1162,7 +1191,7 @@ export default function FixedAssetsPage() {
   function AssetModal() {
     const isEdit=!!(assetModal&&assetModal.id);
     const nextId=nextAssetId();
-    const [form,setForm]=useState({id:nextId,name:'',assetType:'',purchaseDate:'',deprecStartDate:'',cost:'',residualValue:'',usefulLifeMonths:'',depreciationMethod:'Straight Line',computationType:'Non Pro Rata',fixedAssetAccount:'',accumDeprecAccount:'',deprecExpenseAccount:'',status:'Active',disposalDate:'',notes:'',isInstallment:'No',installmentPrincipal:'',installmentStartDate:'',installmentTermMonths:'',installmentAnnualRate:'',installmentMethod:'Reducing Balance',installmentPayableAccount:'',installmentAmortizationAccount:'',paymentMethod:'Check',pmChecks:[],pmAdaDay:'',pmAdaBank:'',pmBtBank:'',pmAutoVoucher:false,...assetModal});
+    const [form,setForm]=useState({id:nextId,name:'',assetType:'',purchaseDate:'',deprecStartDate:'',cost:'',residualValue:'',usefulLifeMonths:'',depreciationMethod:'Straight Line',computationType:'Non Pro Rata',fixedAssetAccount:'',accumDeprecAccount:'',deprecExpenseAccount:'',status:'Active',disposalDate:'',notes:'',isInstallment:'No',installmentPrincipal:'',installmentStartDate:'',installmentTermMonths:'',installmentAnnualRate:'',installmentMethod:'Reducing Balance',installmentPayableAccount:'',installmentAmortizationAccount:'',paymentMethod:'Check',pmChecks:[],pmAdaDay:'',pmAdaBank:'',pmBtBank:'',pmAutoVoucher:false,bookingBasis:'cash',cashAccountCode:'',accumDeprToDate:'',...assetModal});
     const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
     const onTypeChg=v=>{
       upd('assetType',v);
@@ -1219,6 +1248,28 @@ export default function FixedAssetsPage() {
                 <div className="field col2"><label>Payable Account</label><AccountCombobox rawAccounts={coaAccounts} value={form.installmentPayableAccount} onChange={v=>upd('installmentPayableAccount',v)} placeholder="— Select Account —" /></div>
                 <div className="field col2"><label>Amortization Expense Account</label><AccountCombobox rawAccounts={coaAccounts} value={form.installmentAmortizationAccount} onChange={v=>upd('installmentAmortizationAccount',v)} placeholder="— Select Account —" /></div>
               </div>
+            )}
+            {!isEdit && (
+              <>
+                <div className="sec-hdr">Ledger — Acquisition Booking</div>
+                <div style={{fontSize:11,color:'#64748b',marginBottom:10}}>Registering the asset posts its acquisition entry automatically (it debits the Fixed Asset account above).</div>
+                <div className="grid4">
+                  <div className="field col2"><label>Booking Basis</label>
+                    <select value={form.bookingBasis||'cash'} onChange={e=>upd('bookingBasis',e.target.value)}>
+                      {BOOKING_BASES.map(b=><option key={b.key} value={b.key}>{b.label}</option>)}
+                    </select>
+                  </div>
+                  {form.bookingBasis!=='opening_balance' && (
+                    <div className="field col2"><label>Cash / Bank Account{form.bookingBasis==='installment'?' (down payment)':''}</label>
+                      <AccountCombobox rawAccounts={coaAccounts} value={form.cashAccountCode} onChange={v=>upd('cashAccountCode',v)} placeholder="— Select Account —" /></div>
+                  )}
+                  {form.bookingBasis==='opening_balance' && (
+                    <div className="field col2"><label>Accum. Depreciation to date</label>
+                      <input type="number" value={form.accumDeprToDate} onChange={e=>upd('accumDeprToDate',e.target.value)} placeholder="0.00" />
+                      <span style={{fontSize:10,color:'#94a3b8'}}>Prior depreciation already taken; the remaining net book value books to Opening Balance Offset.</span></div>
+                  )}
+                </div>
+              </>
             )}
           </div>
           <div className="modal-f">

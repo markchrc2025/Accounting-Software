@@ -820,6 +820,11 @@ export const fixedAssets = pgTable(
     installmentAmortizationAccount: text("installment_amortization_account"),
     paymentMethod: text("payment_method"),
     pmConfig: jsonb("pm_config"),
+    // ── GL integration (0021) — acquisition booking ──
+    cashAccountCode: text("cash_account_code"),
+    bookingMode: text("booking_mode"),                 // 'cash' | 'installment' | 'opening_balance'
+    bookingJournalEntryId: uuid("booking_journal_entry_id"),
+    bookedAt: timestamp("booked_at", { withTimezone: true }),
     createdBy: text("created_by").references(() => appUsers.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

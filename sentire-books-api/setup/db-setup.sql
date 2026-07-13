@@ -1277,6 +1277,13 @@ ALTER TABLE loans
   ADD COLUMN IF NOT EXISTS booking_journal_entry_id  uuid,
   ADD COLUMN IF NOT EXISTS booked_at                 timestamptz;
 
+-- ───────────────────────────── 0021_fixed_asset_accounting.sql ─────────────────────────────
+ALTER TABLE fixed_assets
+  ADD COLUMN IF NOT EXISTS cash_account_code         text,
+  ADD COLUMN IF NOT EXISTS booking_mode              text,   -- 'cash' | 'installment' | 'opening_balance'
+  ADD COLUMN IF NOT EXISTS booking_journal_entry_id  uuid,
+  ADD COLUMN IF NOT EXISTS booked_at                 timestamptz;
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════

@@ -231,6 +231,14 @@ export const loanReconciliation = () => apiFetch('/loans/reconciliation');
 export const loanPaymentsApi = crud('/loan-payments', 'payments', 'payment');
 export const assetTypesApi = crud('/asset-types', 'types', 'type');
 export const fixedAssetsApi = crud('/fixed-assets', 'assets', 'asset');
+// Register an asset and post its acquisition entry atomically (booking is automatic).
+export const registerAsset = (payload) =>
+  apiFetch('/fixed-assets/register', { method: 'POST', body: JSON.stringify(payload) });
+// Book an existing (unbooked) asset; cancel reverses its entry and marks it Cancelled.
+export const bookAsset = (id, opts) =>
+  apiFetch(`/fixed-assets/${id}/book`, { method: 'POST', body: JSON.stringify(opts || {}) });
+export const cancelAsset = (id) =>
+  apiFetch(`/fixed-assets/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) });
 export const assetInstallmentPaymentsApi = crud('/asset-installment-payments', 'payments', 'payment');
 export const assetDeprPostingsApi = crud('/asset-depr-postings', 'postings', 'posting');
 export const weeklyProjectionsApi = crud('/weekly-projections', 'projections', 'projection');
