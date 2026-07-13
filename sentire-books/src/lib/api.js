@@ -212,6 +212,10 @@ export const bankReconciliationsApi = crud('/bank-reconciliations', 'reconciliat
 
 // ── loans / assets / projections / credit lines ─────────────────────────────
 export const loansApi = crud('/loans', 'loans', 'loan');
+export const bookLoan = (id, opts) =>
+  apiFetch(`/loans/${id}/book`, { method: 'POST', body: JSON.stringify(opts || {}) });
+export const unbookLoan = (id) =>
+  apiFetch(`/loans/${id}/unbook`, { method: 'POST', body: JSON.stringify({}) });
 export const loanPaymentsApi = crud('/loan-payments', 'payments', 'payment');
 export const assetTypesApi = crud('/asset-types', 'types', 'type');
 export const fixedAssetsApi = crud('/fixed-assets', 'assets', 'asset');

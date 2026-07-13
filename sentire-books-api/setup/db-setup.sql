@@ -1268,6 +1268,15 @@ DO UPDATE SET seq = GREATEST(document_counters.seq, EXCLUDED.seq);
 -- before every row is backfilled).
 CREATE UNIQUE INDEX IF NOT EXISTS loans_org_no_key ON loans (org_id, loan_no);
 
+-- ───────────────────────────── 0020_loan_accounting.sql ─────────────────────────────
+ALTER TABLE loans
+  ADD COLUMN IF NOT EXISTS liability_account_code    text,
+  ADD COLUMN IF NOT EXISTS finance_cost_account_code text,
+  ADD COLUMN IF NOT EXISTS cash_account_code         text,
+  ADD COLUMN IF NOT EXISTS booking_mode              text,   -- 'disbursement' | 'opening_balance'
+  ADD COLUMN IF NOT EXISTS booking_journal_entry_id  uuid,
+  ADD COLUMN IF NOT EXISTS booked_at                 timestamptz;
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP — app role login, your organization, and chart of accounts
 -- ════════════════════════════════════════════════════════════════════════════

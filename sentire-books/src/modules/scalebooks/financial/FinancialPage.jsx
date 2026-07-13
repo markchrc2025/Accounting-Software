@@ -4,7 +4,7 @@ import { recomputeLoanState, daysBetween, buildScheduleWithDueDates } from './lo
 import RecordPaymentModal from './RecordPaymentModal.jsx';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
 import {
-  loansApi, loanPaymentsApi, listAccounts, listVouchers, listCheckbooks, listChecks,
+  loansApi, loanPaymentsApi, bookLoan, unbookLoan, listAccounts, listVouchers, listCheckbooks, listChecks,
   createVoucherDraft, transitionVoucher, ApiError,
 } from '../../../lib/api.js';
 
@@ -40,6 +40,12 @@ const loanFromApi = (r) => ({
   principal: toPesos(r.principalCents),
   interestMethod: r.interestMethod || 'Reducing Balance',
   processingFee: toPesos(r.processingFeeCents),
+  liabilityAccountCode: r.liabilityAccountCode || '',
+  financeCostAccountCode: r.financeCostAccountCode || '',
+  cashAccountCode: r.cashAccountCode || '',
+  bookingMode: r.bookingMode || '',
+  bookingJournalEntryId: r.bookingJournalEntryId || null,
+  bookedAt: r.bookedAt || null,
   status: r.status || 'Active',
   paymentFrequency: r.paymentFrequency || 'Monthly',
   payDayMode: r.payDayMode || 'Fixed',
@@ -62,6 +68,9 @@ const loanToApi = (l) => ({
   principalCents: toCents(l.principal),
   interestMethod: l.interestMethod || 'Reducing Balance',
   processingFeeCents: toCents(l.processingFee),
+  liabilityAccountCode: l.liabilityAccountCode || null,
+  financeCostAccountCode: l.financeCostAccountCode || null,
+  cashAccountCode: l.cashAccountCode || null,
   status: l.status || 'Active',
   paymentFrequency: l.paymentFrequency || 'Monthly',
   payDayMode: l.payDayMode || 'Fixed',
@@ -495,7 +504,9 @@ export default function FinancialPage() {
         status: 'Active', paymentFrequency: 'Monthly',
         payDayMode: 'Fixed', payDays: '', payDay1: '', payDay2: '',
         payDaysPerMonth: {}, intervalDays: 15, paymentMethod: 'Check', pmChecks: [],
-        pmAdaDay: '', pmAdaBank: '', pmBtBank: '', cycleCount: 1
+        pmAdaDay: '', pmAdaBank: '', pmBtBank: '', cycleCount: 1,
+        // GL accounts (defaults: Loans Payable / Finance Cost; bank picked by user)
+        liabilityAccountCode: '2001002', financeCostAccountCode: '5004001', cashAccountCode: ''
       }
     });
   }, [])
@@ -516,6 +527,33 @@ export default function FinancialPage() {
       setLoanFormModal(null);
       await loadLoans();
     } catch (e) { showToast('Error: ' + (e instanceof ApiError ? e.detail : e.message)); }
+  }, [loadLoans]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Book a loan to the ledger (posts its origination JE). New loans = real
+  // disbursement (DR Cash + Finance Cost, CR Loans Payable); pre-existing loans
+  // = opening balance (DR Opening Balance Offset, CR Loans Payable).
+  const doBookLoan = useCallback((loan, mode) => {
+    askConfirm(
+      mode === 'opening_balance'
+        ? `Book "${loan.name}" as an opening balance? This posts CR Loans Payable / DR Opening Balance Offset for ${fmtCur(parseFloat(loan.principal)||0)}.`
+        : `Book "${loan.name}" to the ledger? This posts the loan disbursement (DR Cash + Finance Cost, CR Loans Payable).`,
+      async () => {
+        try {
+          const r = await bookLoan(loan.id, { mode });
+          showToast(`Booked to ledger — ${r.journalEntryNo}.`);
+          await loadLoans();
+        } catch (e) { showToast('Book failed: ' + (e instanceof ApiError ? e.detail : e.message)); }
+      });
+  }, [loadLoans]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const doUnbookLoan = useCallback((loan) => {
+    askConfirm(`Unbook "${loan.name}"? This reverses its booking journal entry.`, async () => {
+      try {
+        await unbookLoan(loan.id);
+        showToast('Loan unbooked — booking entry reversed.');
+        await loadLoans();
+      } catch (e) { showToast('Unbook failed: ' + (e instanceof ApiError ? e.detail : e.message)); }
+    });
   }, [loadLoans]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeLoans    = loans.filter(l => l.status === 'Active');
@@ -1361,6 +1399,7 @@ export default function FinancialPage() {
                     <tr key={l.id}>
                       <td style={{ fontWeight:700 }}>
                         {l.name || `Loan ${l.id}`}
+                        {l.bookedAt && <span title="Booked to the general ledger" style={{ marginLeft:6, fontSize:10, fontWeight:800, color:'#15803d', background:'#f0fdf4', border:'1px solid #bbf7d0', borderRadius:999, padding:'1px 6px', verticalAlign:'middle' }}>✓ GL</span>}
                         {l.loanNo && <div style={{ fontFamily:'monospace', fontSize:11, fontWeight:600, color:'#94a3b8' }}>{l.loanNo}</div>}
                       </td>
                       <td style={{ color:'#64748b' }}>{l.loanType || '—'}</td>
@@ -2767,6 +2806,19 @@ export default function FinancialPage() {
                     🔒 <span>Editing requires <strong>Admin</strong> access</span>
                   </span>
                 )}
+                {/* Ledger booking status / action */}
+                {l.bookedAt ? (
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:8, fontSize:12, fontWeight:700, color:'#15803d' }}>
+                    <span style={{ background:'#f0fdf4', border:'1px solid #bbf7d0', borderRadius:999, padding:'3px 10px' }}>✓ Booked to Ledger</span>
+                    {isAdmin && <button className="btn btn-ghost btn-sm" onClick={() => doUnbookLoan(l)}>Unbook</button>}
+                  </span>
+                ) : isAdmin && (
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                    <button className="btn btn-sm" style={{ background:'#eff6ff', color:'#1d4ed8', border:'1.5px solid #bfdbfe', fontWeight:700 }}
+                      onClick={() => doBookLoan(l, 'disbursement')} title="Post the loan disbursement entry">📒 Book to Ledger</button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => doBookLoan(l, 'opening_balance')} title="Book as an opening balance (pre-existing loan)">Opening Bal.</button>
+                  </span>
+                )}
                 <div style={{ display:'flex', gap:8, marginLeft:'auto' }}>
                   <button className="btn btn-ghost" onClick={() => { setLoanDetailModal(null); setLoanDetailTab('details'); }}>Close</button>
                   {!st.isPaidOff && l.status !== 'Disposed' && (
@@ -2915,6 +2967,34 @@ export default function FinancialPage() {
                     <select value={fd.interestMethod||'Reducing Balance'} onChange={e => set('interestMethod', e.target.value)}>
                       {INTEREST_METHODS.map(m => <option key={m}>{m}</option>)}
                     </select>
+                  </div>
+                </div>
+
+                {/* Section: GL Accounts (used when booking the loan to the ledger) */}
+                <div style={{ fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase', marginBottom:10, paddingBottom:6, borderBottom:'1px solid #f1f5f9' }}>
+                  Accounting — GL Accounts
+                </div>
+                <div className="lr-form-grid">
+                  <div className="field">
+                    <label>Loan Liability Account</label>
+                    <AccountCombobox
+                      options={calAccounts.filter(a=>a.type==='liability').map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`}))}
+                      value={fd.liabilityAccountCode||''} onChange={v=>set('liabilityAccountCode',v)} placeholder="— Loans Payable —" />
+                  </div>
+                  <div className="field">
+                    <label>Finance Cost Account</label>
+                    <AccountCombobox
+                      options={calAccounts.filter(a=>a.type==='expense').map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`}))}
+                      value={fd.financeCostAccountCode||''} onChange={v=>set('financeCostAccountCode',v)} placeholder="— Finance Cost —" />
+                  </div>
+                  <div className="field lr-form-full">
+                    <label>Cash / Bank Account (proceeds & payments)</label>
+                    <AccountCombobox
+                      options={[
+                        ...bankAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`})),
+                        ...(bankAccounts.length===0 ? calAccounts.map(a=>({value:a.code||a.id,label:`${a.code} — ${a.name}`})) : []),
+                      ]}
+                      value={fd.cashAccountCode||''} onChange={v=>set('cashAccountCode',v)} placeholder="— Select bank account —" />
                   </div>
                 </div>
 
