@@ -22,6 +22,63 @@ const MONTH_NAMES   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oc
 const fmtPHP = (n) => new Intl.NumberFormat('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n||0);
 const fmtCur = (n) => '₱' + fmtPHP(n);
 
+/* ─── Dashboard scorecards (user-customizable) ───────────────────────
+ * A catalog of available metrics; the user picks which to show and a date range
+ * that drives the period metrics (payments within the window). Portfolio/count
+ * metrics are as-of-now. Selection + range persist in localStorage. */
+const DASH_METRICS = [
+  { key:'totalBorrowed',    label:'Total Borrowed',            group:'Portfolio', kind:'money', accent:'#0284c7', get:c=>c.p.totalBorrowed },
+  { key:'totalOutstanding', label:'Total Outstanding',         group:'Portfolio', kind:'money', accent:'#ea580c', get:c=>c.p.totalOutstanding },
+  { key:'paidToDate',       label:'Paid to Date',              group:'Portfolio', kind:'money', accent:'#16a34a', get:c=>c.p.totalPaidPrincipal + c.p.totalPaidInterest },
+  { key:'atRisk',           label:'At Risk · Overdue',         group:'Portfolio', kind:'money', accent:'#dc2626', get:c=>c.p.atRiskAmount },
+  { key:'paidPrincipalAll', label:'Principal Paid (all-time)', group:'Portfolio', kind:'money', accent:'#2563eb', get:c=>c.p.totalPaidPrincipal },
+  { key:'paidInterestAll',  label:'Interest Paid (all-time)',  group:'Portfolio', kind:'money', accent:'#db2777', get:c=>c.p.totalPaidInterest },
+  { key:'scheduledInterest',label:'Scheduled Interest',        group:'Portfolio', kind:'money', accent:'#7c3aed', get:c=>c.p.totalScheduledInt },
+  { key:'activeCount',      label:'Active Loans',              group:'Counts',    kind:'count', accent:'#1d4ed8', get:c=>c.p.activeCount },
+  { key:'paidOffCount',     label:'Paid Off',                  group:'Counts',    kind:'count', accent:'#15803d', get:c=>c.p.paidOffCount },
+  { key:'overdueCount',     label:'Overdue',                   group:'Counts',    kind:'count', accent:'#dc2626', get:c=>c.p.overdueCount },
+  { key:'disposedCount',    label:'Disposed',                  group:'Counts',    kind:'count', accent:'#64748b', get:c=>c.p.disposedCount },
+  { key:'loanCount',        label:'Total Loans',               group:'Counts',    kind:'count', accent:'#0f172a', get:c=>c.loanCount },
+  { key:'interestPaid',     label:'Interest Paid',             group:'Period',    kind:'money', accent:'#dc2626', period:true, get:c=>c.period.interest },
+  { key:'principalPaid',    label:'Principal Paid',            group:'Period',    kind:'money', accent:'#2563eb', period:true, get:c=>c.period.principal },
+  { key:'totalPaid',        label:'Total Paid',                group:'Period',    kind:'money', accent:'#16a34a', period:true, get:c=>c.period.total },
+  { key:'paymentCount',     label:'Payments',                  group:'Period',    kind:'count', accent:'#0891b2', period:true, get:c=>c.period.count },
+];
+const DASH_GROUPS = ['Portfolio', 'Counts', 'Period'];
+const DASH_RANGE_PRESETS = [
+  { key:'ytd',    label:'Year to date' },
+  { key:'mtd',    label:'Month to date' },
+  { key:'last30', label:'Last 30 days' },
+  { key:'last90', label:'Last 90 days' },
+  { key:'all',    label:'All time' },
+  { key:'custom', label:'Custom range' },
+];
+const DEFAULT_DASH_PREFS = {
+  metrics: ['totalBorrowed','totalOutstanding','paidToDate','atRisk','activeCount','paidOffCount','disposedCount','interestPaid','principalPaid'],
+  range: { preset:'ytd', from:'', to:'' },
+};
+const DASH_PREFS_KEY = 'sb.fm.dashboard.v1';
+function loadDashPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DASH_PREFS_KEY) || 'null');
+    if (!raw || !Array.isArray(raw.metrics)) return DEFAULT_DASH_PREFS;
+    const valid = raw.metrics.filter(k => DASH_METRICS.some(m => m.key === k));
+    return { metrics: valid.length ? valid : DEFAULT_DASH_PREFS.metrics, range: raw.range || DEFAULT_DASH_PREFS.range };
+  } catch { return DEFAULT_DASH_PREFS; }
+}
+function resolveDashRange(range) {
+  const today = new Date().toISOString().slice(0, 10);
+  const shift = (days) => { const d = new Date(); d.setDate(d.getDate() - days); return d.toISOString().slice(0, 10); };
+  switch (range?.preset) {
+    case 'all':    return { from:'', to:today, label:'All time' };
+    case 'mtd':    return { from:today.slice(0,7)+'-01', to:today, label:'Month to date' };
+    case 'last30': return { from:shift(29), to:today, label:'Last 30 days' };
+    case 'last90': return { from:shift(89), to:today, label:'Last 90 days' };
+    case 'custom': return { from:range.from||'', to:range.to||today, label:`${range.from||'…'} → ${range.to||'today'}` };
+    default:       return { from:today.slice(0,4)+'-01-01', to:today, label:`${today.slice(0,4)} year to date` };
+  }
+}
+
 /* ─── API <-> UI mapping ─────────────────────────────────────────── */
 // API rows carry integer centavos + a pm_config blob; the amortization engine
 // and every tab keep the original pesos/flattened shape, so the mapping
@@ -380,6 +437,12 @@ export default function FinancialPage() {
   const [checkbooks,    setCheckbooks]    = useState([]);
   const [reconciliation, setReconciliation] = useState(null);
   const [reconLoading,   setReconLoading]   = useState(false);
+  const [dashPrefs,      setDashPrefs]      = useState(loadDashPrefs);   // customizable scorecards
+  const [dashCustomize,  setDashCustomize]  = useState(false);
+  const saveDashPrefs = (next) => {
+    setDashPrefs(next);
+    try { localStorage.setItem(DASH_PREFS_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+  };
   const [payModal,      setPayModal]      = useState(null);  // loan.id
   const [pmForm, setPmForm] = useState({
     paymentMethod: 'Check', checkbookId: '', checks: [],
@@ -1104,7 +1167,6 @@ export default function FinancialPage() {
     if (loans.length === 0) return <div className="empty">No loans yet. Add loans in the Loan Registry tab to see dashboard insights.</div>;
 
     const todayStr = new Date().toISOString().slice(0, 10);
-    const yearStart = todayStr.slice(0, 4) + '-01-01';
 
     // Portfolio aggregates (cancelled loans are excluded — they carry no balance)
     const portfolio = loans.filter(l => l.status !== 'Cancelled').reduce((acc, l) => {
@@ -1123,13 +1185,18 @@ export default function FinancialPage() {
     }, { totalBorrowed:0, totalOutstanding:0, totalPaidPrincipal:0, totalPaidInterest:0,
          totalScheduledInt:0, atRiskAmount:0, paidOffCount:0, overdueCount:0, activeCount:0, disposedCount:0 });
 
-    // Interest paid this year (YTD)
-    const ytdInterest = payments
-      .filter(p => (p.date||'') >= yearStart)
-      .reduce((s, p) => s + (Number(p.interest)||0), 0);
-    const ytdPrincipal = payments
-      .filter(p => (p.date||'') >= yearStart)
-      .reduce((s, p) => s + (Number(p.principal)||0), 0);
+    // Period metrics — payments within the chosen date range (drives the
+    // customizable "Interest/Principal/Total Paid" + "Payments" scorecards).
+    const dr = resolveDashRange(dashPrefs.range);
+    const inRange = (d) => !!d && (!dr.from || d >= dr.from) && (!dr.to || d <= dr.to);
+    const period = payments.filter(p => inRange(p.date)).reduce((a, p) => ({
+      interest:  a.interest  + (Number(p.interest)  || 0),
+      principal: a.principal + (Number(p.principal) || 0),
+      total:     a.total     + (Number(p.total)     || 0),
+      count:     a.count + 1,
+    }), { interest:0, principal:0, total:0, count:0 });
+    const metricCtx = { p: portfolio, period, dr, loanCount: loans.filter(l => l.status !== 'Cancelled').length };
+    const selectedMetrics = (dashPrefs.metrics || []).map(k => DASH_METRICS.find(m => m.key === k)).filter(Boolean);
 
     // Build alert rows: overdue first, then due in next 14 days
     const alerts = [];
@@ -1168,130 +1235,93 @@ export default function FinancialPage() {
         {/* ── Sub-ledger ⇄ GL reconciliation — only shown when out of balance ─── */}
         {reconciliation && !reconciliation.reconciled && ReconciliationTile()}
 
-        {/* ── KPI Scorecards ─────────────────────────────────────── */}
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:14 }}>
-
-          {/* Total Borrowed */}
-          <div style={{
-            background:'linear-gradient(135deg,#0369a1 0%,#0284c7 100%)',
-            borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
-          }}>
-            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
-              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 21h20M4 21V8l8-5 8 5v13M10 21V12h4v9"/></svg>
-            </div>
-            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Borrowed</div>
-            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.totalBorrowed)}</div>
-            <div style={{marginTop:10,fontSize:11,opacity:.75}}>Across {loans.length} loan{loans.length!==1?'s':''}</div>
-            <div style={{marginTop:8,display:'flex',gap:16,fontSize:11}}>
-              <span style={{display:'flex',alignItems:'center',gap:5}}>
-                <svg width="7" height="7" viewBox="0 0 7 7"><circle cx="3.5" cy="3.5" r="3.5" fill="currentColor"/></svg>
-                {portfolio.activeCount} active
-              </span>
-              <span style={{display:'flex',alignItems:'center',gap:5,opacity:.7}}>
-                <svg width="7" height="7" viewBox="0 0 7 7" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="3.5" cy="3.5" r="2.8"/></svg>
-                {portfolio.paidOffCount} paid off
-              </span>
-            </div>
+        {/* ── Scorecards (user-customizable) ───────────────────────── */}
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, flexWrap:'wrap' }}>
+          <div style={{ fontSize:12, color:'#64748b', fontWeight:700 }}>
+            Period metrics: <strong style={{ color:'#0f172a' }}>{dr.label}</strong>
           </div>
-
-          {/* Total Outstanding */}
-          {(() => {
-            const totalPayable = portfolio.totalBorrowed + portfolio.totalScheduledInt;
-            const repaidAmt = portfolio.totalPaidPrincipal + portfolio.totalPaidInterest;
-            const repaidPct = totalPayable > 0 ? Math.min(100, (repaidAmt / totalPayable) * 100) : 0;
-            const outPct    = totalPayable > 0 ? Math.min(100, (portfolio.totalOutstanding / totalPayable) * 100) : 0;
-            return (
-              <div style={{
-                background:'linear-gradient(135deg,#c2410c 0%,#ea580c 100%)',
-                borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
-              }}>
-                <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
-                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-                </div>
-                <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Total Outstanding</div>
-                <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.totalOutstanding)}</div>
-                <div style={{fontSize:11,opacity:.7,marginBottom:6}}>principal + interest</div>
-                <div style={{marginTop:4,height:5,background:'rgba(255,255,255,.25)',borderRadius:99}}>
-                  <div style={{height:'100%',width:`${repaidPct}%`,background:'#fff',borderRadius:99,transition:'width .6s'}} />
-                </div>
-                <div style={{marginTop:5,fontSize:11,opacity:.8,display:'flex',justifyContent:'space-between'}}>
-                  <span>{outPct.toFixed(1)}% of total payable</span>
-                  <span>{repaidPct.toFixed(1)}% repaid</span>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Paid to Date */}
-          <div style={{
-            background:'linear-gradient(135deg,#166534 0%,#16a34a 100%)',
-            borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
-          }}>
-            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
-              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-            </div>
-            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>Paid to Date</div>
-            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.totalPaidPrincipal + portfolio.totalPaidInterest)}</div>
-            <div style={{marginTop:10,display:'flex',gap:6,flexWrap:'wrap',fontSize:11}}>
-              <span style={{background:'rgba(255,255,255,.18)',borderRadius:6,padding:'2px 8px'}}>Pri {fmtCur(portfolio.totalPaidPrincipal)}</span>
-              <span style={{background:'rgba(255,255,255,.18)',borderRadius:6,padding:'2px 8px'}}>Int {fmtCur(portfolio.totalPaidInterest)}</span>
-            </div>
-          </div>
-
-          {/* At Risk */}
-          <div style={{
-            background: portfolio.atRiskAmount > 0
-              ? 'linear-gradient(135deg,#991b1b 0%,#dc2626 100%)'
-              : 'linear-gradient(135deg,#166534 0%,#16a34a 100%)',
-            borderRadius:14, padding:'18px 20px', color:'#fff', position:'relative', overflow:'hidden',
-          }}>
-            <div style={{position:'absolute',right:-8,top:-8,opacity:.13}}>
-              {portfolio.atRiskAmount > 0
-                ? <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                : <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
-              }
-            </div>
-            <div style={{fontSize:10,fontWeight:800,letterSpacing:'.08em',textTransform:'uppercase',opacity:.8,marginBottom:6}}>At Risk · Overdue</div>
-            <div style={{fontSize:22,fontWeight:900,letterSpacing:'-.5px'}}>{fmtCur(portfolio.atRiskAmount)}</div>
-            <div style={{marginTop:10,fontSize:11,opacity:.8}}>
-              {portfolio.atRiskAmount > 0
-                ? `${portfolio.overdueCount} loan${portfolio.overdueCount!==1?'s':''} with missed payments`
-                : 'All payments current'}
-            </div>
-          </div>
+          <button className="btn btn-ghost btn-sm" onClick={() => setDashCustomize(true)} title="Choose metrics and date range">⚙ Customize</button>
         </div>
 
-        {/* ── Secondary KPI Row ──────────────────────────────────────── */}
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:10 }}>
-          {[
-            { label:'Active Loans',
-              value: portfolio.activeCount, sub: 'carrying balance', color:'#1d4ed8', bg:'#eff6ff', border:'#bfdbfe',
-              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2M9 12h6M9 16h4"/></svg> },
-            { label:'Paid Off',
-              value: portfolio.paidOffCount, sub: 'fully settled', color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0',
-              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M5 13l4 4L19 7"/></svg> },
-            { label:'Disposed',
-              value: portfolio.disposedCount, sub: 'written-off / closed', color:'#64748b', bg:'#f8fafc', border:'#e2e8f0',
-              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M20 7H4a2 2 0 000 4h16a2 2 0 000-4zM8 11v8M12 11v8M16 11v8"/></svg> },
-            { label:'Interest Paid YTD',
-              value: fmtCur(ytdInterest), sub: new Date().getFullYear()+' year to date', color:'#dc2626', bg:'#fef2f2', border:'#fecaca',
-              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg> },
-            { label:'Principal Paid YTD',
-              value: fmtCur(ytdPrincipal), sub: new Date().getFullYear()+' year to date', color:'#2563eb', bg:'#eff6ff', border:'#bfdbfe',
-              icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg> },
-          ].map(({ label, value, sub, color, bg, border, icon }) => (
-            <div key={label} style={{
-              background: bg, border:`1px solid ${border}`, borderRadius:12, padding:'14px 15px',
-            }}>
-              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
-                <span style={{color,display:'flex'}}>{icon}</span>
-                <span style={{fontSize:9,fontWeight:800,color:'#64748b',letterSpacing:'.07em',textTransform:'uppercase'}}>{label}</span>
+        {selectedMetrics.length === 0 ? (
+          <div className="empty" style={{ padding:'22px' }}>No metrics selected — click <strong>⚙ Customize</strong> to choose what to show.</div>
+        ) : (
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:12 }}>
+            {selectedMetrics.map(m => {
+              const raw = m.get(metricCtx);
+              const val = m.kind === 'money' ? fmtCur(raw) : new Intl.NumberFormat('en-PH').format(raw || 0);
+              return (
+                <div key={m.key} style={{ background:'#fff', border:'1px solid #e5e7eb', borderLeft:`4px solid ${m.accent}`, borderRadius:12, padding:'14px 16px' }}>
+                  <div style={{ fontSize:9.5, fontWeight:800, color:'#64748b', letterSpacing:'.06em', textTransform:'uppercase', marginBottom:6 }}>{m.label}</div>
+                  <div style={{ fontSize:21, fontWeight:900, color:m.accent, lineHeight:1 }}>{val}</div>
+                  <div style={{ fontSize:10, color:'#94a3b8', marginTop:6 }}>{m.period ? dr.label : m.group}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Customize panel */}
+        {dashCustomize && (
+          <div className="backdrop" onClick={e => { if (e.target === e.currentTarget) setDashCustomize(false); }}>
+            <div className="modal" style={{ width:'min(680px,96vw)', maxHeight:'88vh', display:'flex', flexDirection:'column' }}>
+              <div className="modal-h">
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <div style={{ width:32, height:32, borderRadius:9, background:'#fff7ed', border:'1px solid #fed7aa', display:'flex', alignItems:'center', justifyContent:'center', fontSize:15 }}>⚙</div>
+                  <strong style={{ fontSize:14 }}>Customize Dashboard</strong>
+                </div>
+                <button onClick={() => setDashCustomize(false)} style={{ background:'#f1f5f9', border:'none', borderRadius:8, width:28, height:28, cursor:'pointer', fontWeight:900 }}>✕</button>
               </div>
-              <div style={{fontSize:20,fontWeight:900,color,lineHeight:1}}>{value}</div>
-              <div style={{fontSize:10,color:'#94a3b8',marginTop:5}}>{sub}</div>
+              <div className="modal-b" style={{ overflowY:'auto' }}>
+                <div style={{ fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase', marginBottom:8 }}>Date Range · drives the Period metrics</div>
+                <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:10 }}>
+                  {DASH_RANGE_PRESETS.map(pr => {
+                    const on = (dashPrefs.range?.preset || 'ytd') === pr.key;
+                    return (
+                      <button key={pr.key} className="btn btn-sm"
+                        onClick={() => saveDashPrefs({ ...dashPrefs, range: { ...dashPrefs.range, preset: pr.key } })}
+                        style={{ background: on ? '#f97316' : '#f1f5f9', color: on ? '#fff' : '#334155', border:'none', fontWeight:700 }}>
+                        {pr.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {(dashPrefs.range?.preset === 'custom') && (
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:14 }}>
+                    <div className="field"><label>From</label><input type="date" value={dashPrefs.range.from || ''} onChange={e => saveDashPrefs({ ...dashPrefs, range: { ...dashPrefs.range, from: e.target.value } })} /></div>
+                    <div className="field"><label>To</label><input type="date" value={dashPrefs.range.to || ''} onChange={e => saveDashPrefs({ ...dashPrefs, range: { ...dashPrefs.range, to: e.target.value } })} /></div>
+                  </div>
+                )}
+
+                <div style={{ fontSize:10, fontWeight:800, color:'#94a3b8', letterSpacing:'.06em', textTransform:'uppercase', margin:'6px 0 8px' }}>Metrics · {dashPrefs.metrics.length} shown</div>
+                {DASH_GROUPS.map(g => (
+                  <div key={g} style={{ marginBottom:12 }}>
+                    <div style={{ fontSize:11, fontWeight:800, color:'#334155', marginBottom:6 }}>{g}{g==='Period' ? ' (uses the date range)' : ''}</div>
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(210px,1fr))', gap:6 }}>
+                      {DASH_METRICS.filter(m => m.group === g).map(m => {
+                        const on = dashPrefs.metrics.includes(m.key);
+                        return (
+                          <label key={m.key} style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', border:`1px solid ${on ? '#fed7aa' : '#e5e7eb'}`, background: on ? '#fff7ed' : '#fff', borderRadius:8, cursor:'pointer', fontSize:12 }}>
+                            <input type="checkbox" checked={on} onChange={() => {
+                              const metrics = on ? dashPrefs.metrics.filter(k => k !== m.key) : [...dashPrefs.metrics, m.key];
+                              saveDashPrefs({ ...dashPrefs, metrics });
+                            }} />
+                            <span style={{ width:9, height:9, borderRadius:2, background:m.accent, flexShrink:0 }} />
+                            {m.label}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="modal-f" style={{ display:'flex', alignItems:'center' }}>
+                <button className="btn btn-ghost" onClick={() => saveDashPrefs(DEFAULT_DASH_PREFS)}>Reset to default</button>
+                <button className="btn btn-primary" style={{ marginLeft:'auto' }} onClick={() => setDashCustomize(false)}>Done</button>
+              </div>
             </div>
-          ))}
-        </div>
+          </div>
+        )}
 
         {/* Alerts feed */}
         <div className="card" style={{padding:0}}>
