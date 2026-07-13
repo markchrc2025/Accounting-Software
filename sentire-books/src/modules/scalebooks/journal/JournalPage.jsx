@@ -20,6 +20,8 @@ const STATUS_LABEL = {
   posted:'Posted', rejected:'Rejected', voided:'Voided', reversed:'Reversed',
 };
 const LABEL_STATUS = Object.fromEntries(Object.entries(STATUS_LABEL).map(([k,v])=>[v,k]));
+// In-flight statuses that "Void" (reject) applies to — not Draft (delete) or Posted (reverse).
+const REJECTABLE_LABELS = ['Pending Review', 'Pending Approval', 'For Clearing', 'Cleared', 'For Posting'];
 
 // API entry row -> the shape this screen renders (pesos, labels, flat lines).
 const fromApi = (e) => ({
@@ -328,6 +330,33 @@ export default function JournalPage() {
   const bulkSubmitForPosting  = () => bulkMove('Cleared', 'for_posting', 'Submit');
   const bulkPost              = () => bulkMove('For Posting', 'posted', 'Post');
 
+  // Reverse applies to POSTED entries (posts a balanced reversing entry — GL
+  // history is immutable, so this is how a posted entry is "undone").
+  async function bulkReverse() {
+    const ids = [...selected].filter(id => entries.find(e => e.id === id && e.status === 'Posted'));
+    if (!ids.length) return showToast('Select one or more Posted entries to reverse.');
+    askConfirm(`Reverse ${ids.length} posted journal entr${ids.length > 1 ? 'ies' : 'y'}? Each posts a balanced reversing entry; the originals stay as audit records (marked Reversed).`, async () => {
+      const results = await Promise.allSettled(ids.map(id => apiReverseJE(id)));
+      const okCount = results.filter(r => r.status === 'fulfilled').length;
+      setSelected(new Set());
+      showToast(okCount === ids.length ? `${okCount} reversed.` : `${okCount}/${ids.length} reversed (${ids.length - okCount} failed).`);
+      await loadEntries();
+    });
+  }
+  // Void = reject an in-flight (unposted) entry out of the approval route. A
+  // POSTED entry can't be voided (Reverse it); a DRAFT is deleted instead.
+  async function bulkVoid() {
+    const ids = [...selected].filter(id => entries.find(e => e.id === id && REJECTABLE_LABELS.includes(e.status)));
+    if (!ids.length) return showToast('Void applies to in-flight entries. Reverse a Posted entry; delete a Draft.');
+    askConfirm(`Void ${ids.length} journal entr${ids.length > 1 ? 'ies' : 'y'}? This rejects them out of the workflow (they return to the maker as Rejected).`, async () => {
+      const results = await Promise.allSettled(ids.map(id => transitionJournalEntry(id, 'rejected')));
+      const okCount = results.filter(r => r.status === 'fulfilled').length;
+      setSelected(new Set());
+      showToast(okCount === ids.length ? `${okCount} voided.` : `${okCount}/${ids.length} voided (${ids.length - okCount} failed).`);
+      await loadEntries();
+    });
+  }
+
   async function reverseEntry(e) {
     try {
       const res = await apiReverseJE(e.id);
@@ -490,6 +519,12 @@ export default function JournalPage() {
             {[...selected].some(id=>entries.find(e=>e.id===id&&e.status==='For Posting'))&&canApprovePost&&(
               <button className="btn btn-ghost btn-sm" style={{borderColor:'#bbf7d0',color:'#15803d'}} onClick={bulkPost}>Batch Post</button>
             )}
+            {[...selected].some(id=>entries.find(e=>e.id===id&&e.status==='Posted'))&&canApprovePost&&(
+              <button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={bulkReverse}>Bulk Reverse</button>
+            )}
+            {[...selected].some(id=>entries.find(e=>e.id===id&&REJECTABLE_LABELS.includes(e.status)))&&canPost&&(
+              <button className="btn btn-ghost btn-sm" style={{borderColor:'#fecaca',color:'#b91c1c'}} onClick={bulkVoid}>Bulk Void</button>
+            )}
             <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}} onClick={()=>setSelected(new Set())}>Deselect All</button>
           </div>
         )}
@@ -517,7 +552,7 @@ export default function JournalPage() {
                       {e.status==='Draft'&&canSubmit&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fde68a',color:'#92400e'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for approval?',()=>postEntry(e.id));}}>Submit for Approval</button>}
                       {e.status==='Cleared'&&canPost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#bfdbfe',color:'#1d4ed8'}} onClick={ev=>{ev.stopPropagation();askConfirm('Submit this Journal Entry for posting?',()=>requestPost(e.id));}}>Submit for Posting</button>}
                       {e.status==='For Posting'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#6ee7b7',color:'#065f46'}} onClick={ev=>{ev.stopPropagation();askConfirm('Approve and post this Journal Entry?',()=>approvePost(e.id));}}>Approve &amp; Post</button>}
-                      {e.status==='Posted'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();reverseEntry(e);}}>Reverse</button>}
+                      {e.status==='Posted'&&canApprovePost&&<button className="btn btn-ghost btn-sm" style={{borderColor:'#fed7aa',color:'#c2410c'}} onClick={ev=>{ev.stopPropagation();askConfirm(`Reverse ${e.jeId}? This posts a balanced reversing entry that backs it out; the original stays as an audit record (marked Reversed).`,()=>reverseEntry(e));}}>Reverse</button>}
                       {e.status==='Draft'&&<button onClick={ev=>{ev.stopPropagation();deleteEntry(e.id);}} style={{background:'none',border:'none',color:'#dc2626',cursor:'pointer',fontWeight:900,fontSize:13,padding:'3px 5px'}}>✕</button>}
                       <span style={{color:'#94a3b8',fontSize:14}}>{isOpen?'▲':'▼'}</span>
                     </div>
