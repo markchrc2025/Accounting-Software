@@ -416,10 +416,13 @@ Being candid here is more useful than a clean scorecard.
    one-per-month unique lock is claimed, so a duplicate or concurrent post creates a real
    depreciation entry, then catches the 409 and reports "Already posted" — **leaving an orphan
    entry on the ledger.**
-7. **The loan and fixed-asset ledger endpoints carry no poster/approver role check** — unlike
-   `/journal-entries/:id/status` and `/vouchers/:id/status`.
-8. **The generic `DELETE /:id` is still reachable on `/loans` and `/fixed-assets`**, bypassing the
-   "never deleted, only cancelled" + JE-reversal semantics the UI enforces.
+7. ~~**The loan and fixed-asset ledger endpoints carry no poster/approver role check**~~ — **fixed in
+   M0.5.** All eight (`/register`, `/:id/book`, `/:id/unbook`, `/:id/cancel`, `/:id/pay` on loans;
+   `/register`, `/:id/book`, `/:id/cancel` on fixed assets) now require poster/approver, mirroring
+   `/journal-entries/:id/status`.
+8. ~~**The generic `DELETE /:id` is still reachable on `/loans` and `/fixed-assets`**~~ — **fixed in
+   M0.5.** Both routers set `disableDelete`, returning `405 method_not_allowed`; cancel (which
+   reverses the journal entry) is the only removal path.
 9. Depreciation and check-clearing entries are **posted from the browser**, not the server.
 10. The tax entries view **truncates at the 50 most recent vouchers**.
 

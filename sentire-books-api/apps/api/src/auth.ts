@@ -134,3 +134,29 @@ const POSTERS: readonly UserRole[] = ["poster", "admin"];
 export function canPost(role: UserRole): boolean {
   return POSTERS.includes(role);
 }
+
+/**
+ * Roles allowed to drive a document through clearing/posting — the same set
+ * `POST /journal-entries/:id/status` enforces.
+ */
+export const WORKFLOW_POSTERS: readonly UserRole[] = ["poster", "approver", "admin"];
+
+export function canWorkflowPost(role: UserRole): boolean {
+  return WORKFLOW_POSTERS.includes(role);
+}
+
+/**
+ * Middleware form of the workflow-poster gate, for endpoints that post or
+ * reverse journal entries outside the journal router (loan and fixed-asset
+ * booking). Must run AFTER `requireAuth`, which resolves the caller's role.
+ */
+export async function requireWorkflowPoster(c: Context, next: Next) {
+  const auth = c.get("auth");
+  if (!auth || !canWorkflowPost(auth.role)) {
+    return c.json(
+      { error: "forbidden", detail: "Poster or approver role required to post to the ledger" },
+      403,
+    );
+  }
+  await next();
+}

@@ -36,6 +36,14 @@ export interface CrudOptions {
   docNo?: { field: string; prefix: string; dateField?: string };
   /** Mutations require the admin role (reads stay open to members). */
   adminWrites?: boolean;
+  /**
+   * Seal the generic `DELETE /:id` with 405.
+   *
+   * For resources whose corrections are reversals, a hard delete would bypass
+   * the ledger entirely — leaving the journal entry it posted orphaned. Those
+   * resources expose an explicit `/:id/cancel` instead, which reverses first.
+   */
+  disableDelete?: boolean;
 }
 
 export async function nextDocNo(
@@ -170,6 +178,15 @@ export function makeCrudRoutes(opts: CrudOptions): Hono {
   });
 
   app.delete("/:id", async (c) => {
+    if (opts.disableDelete) {
+      return c.json(
+        {
+          error: "method_not_allowed",
+          detail: `A ${singular} is never deleted — cancel it instead, which reverses its journal entry and keeps the audit trail.`,
+        },
+        405,
+      );
+    }
     const auth = c.get("auth");
     if (opts.adminWrites && auth.role !== "admin") {
       return c.json({ error: "forbidden", detail: "Admin role required" }, 403);

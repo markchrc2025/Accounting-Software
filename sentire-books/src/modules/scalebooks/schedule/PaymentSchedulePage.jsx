@@ -11,6 +11,7 @@ import {
   taxRatesApi, taxGroupsApi, purposeCategoriesApi, listVouchers, listCheckbooks,
   listChecks, createVoucherDraft, transitionVoucher, ApiError,
 } from '../../../lib/api.js';
+import { isDeferredModule } from '../../../config/deferredModules.js';
 
 const CATEGORIES = ['Rent','Utilities','Insurance','Salaries','Loan Payment','Subscription','Tax','Other'];
 const FREQS = ['Monthly','Quarterly','Semi-Annual','Annual','One-Time'];
@@ -761,9 +762,12 @@ export default function PaymentSchedulePage() {
                                 ), document.body)}
                               </div>
                             )}
-                            {hasAccess('Financial Management')
+                            {/* Financial Management is deferred (M0.5) — the
+                                cross-link is hidden rather than sending the
+                                user to an Access Denied screen. */}
+                            {!isDeferredModule('Financial Management') && hasAccess('Financial Management')
                               ? <button className="btn btn-ghost btn-sm" onClick={()=>navigate('/financial')} title="Manage in Financial Management">View</button>
-                              : <span title="You do not have access to Financial Management" style={{fontSize:11,color:'#94a3b8',cursor:'not-allowed',padding:'3px 8px',border:'1px solid #e5e7eb',borderRadius:6,display:'inline-block'}}>No access</span>
+                              : <span title="Loan obligations are managed outside this MVP" style={{fontSize:11,color:'#94a3b8',cursor:'not-allowed',padding:'3px 8px',border:'1px solid #e5e7eb',borderRadius:6,display:'inline-block'}}>—</span>
                             }
                           </div>
                         </td>

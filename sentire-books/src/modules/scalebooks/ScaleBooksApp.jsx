@@ -46,6 +46,9 @@ export default function ScaleBooksApp() {
 // ── Route-level permission guard ──────────────────────────
 function ModuleGuard({ module: moduleName, children }) {
   const { hasAccess, loading } = usePermissions();
+  // Deferred modules (M0.5) are unreachable even by direct URL. The route stays
+  // registered so the code is exercised by the build, not deleted.
+  if (isDeferredModule(moduleName)) return <AccessDenied module={moduleName} />;
   if (loading) {
     return (
       <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%', color:'#94a3b8', fontFamily:'Inter,sans-serif', fontSize:13 }}>

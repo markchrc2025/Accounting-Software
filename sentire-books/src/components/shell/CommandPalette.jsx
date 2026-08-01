@@ -15,8 +15,6 @@ const ROUTES = [
   { label: 'Bank',                path: '/bank',         group: 'Pages' },
   { label: 'Chart of Accounts',   path: '/coa',          group: 'Pages' },
   { label: 'Tax',                 path: '/tax',          group: 'Pages' },
-  { label: 'Financial Management',path: '/financial',    group: 'Pages' },
-  { label: 'Fixed Assets',        path: '/assets',       group: 'Pages' },
   { label: 'Billing Book',        path: '/billing',      group: 'Pages' },
   { label: 'Service Invoices',    path: '/invoices',     group: 'Pages' },
   { label: 'Collections',         path: '/collections',  group: 'Pages' },

@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as Popover from '@radix-ui/react-popover';
 import { ChevronDown } from 'lucide-react';
+import { withoutDeferred } from '../../config/deferredModules.js';
 
 const QUICK_ACTIONS = [
   { label: 'Create voucher',         path: '/vouchers' },
@@ -12,7 +13,7 @@ const QUICK_ACTIONS = [
   { label: 'Add journal entry',      path: '/journal' },
 ];
 
-const ALL_ACTIONS = [
+const ALL_ACTIONS_RAW = [
   ...QUICK_ACTIONS,
   { label: 'Payment Schedule entry', path: '/pay-schedule' },
   { label: 'Bank Transaction',       path: '/bank' },
@@ -20,6 +21,9 @@ const ALL_ACTIONS = [
   { label: 'Service Invoice',        path: '/invoices' },
   { label: 'Collection entry',       path: '/collections' },
 ];
+
+// Deferred modules (M0.5) are not offered as create actions.
+const ALL_ACTIONS = withoutDeferred(ALL_ACTIONS_RAW);
 
 export function CreateActions() {
   const navigate = useNavigate();

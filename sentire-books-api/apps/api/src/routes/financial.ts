@@ -47,7 +47,7 @@ import {
   type Tx,
 } from "@sentire-books/db";
 import { makeCrudRoutes, nextDocNo } from "./crudFactory";
-import { requireAuth } from "../auth";
+import { requireAuth, requireWorkflowPoster } from "../auth";
 import { postJournalEntryCore, reverseJournalEntryCore } from "../ledger/postJournalEntry";
 import { createVoucherDraftCore } from "../ledger/voucherWorkflow";
 import { nextCheckNo } from "./checks";
@@ -60,6 +60,9 @@ export const loanRoutes = makeCrudRoutes({
   updateSchema: zLoanUpdate,
   orderBy: [{ column: loans.createdAt, dir: "asc" }],
   docNo: { field: "loanNo", prefix: "LN", dateField: "disbursementDate" },
+  // Reverse-only: a booked loan must be cancelled (which reverses its JE), never
+  // hard-deleted out from under the ledger entry it posted.
+  disableDelete: true,
 });
 
 const OPENING_EQUITY_DEFAULT = "2004002"; // Opening Balance Offset
@@ -151,7 +154,7 @@ const bookErrorResponse = (error: "accounts_unset" | "nothing_to_book") =>
 // Register a loan and post its origination entry atomically — booking is
 // automatic (no separate step). Rolls back entirely if the entry can't post, so
 // a registered loan is always on the books.
-loanRoutes.post("/register", requireAuth, async (c) => {
+loanRoutes.post("/register", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   let body: unknown;
   try { body = await c.req.json(); } catch { body = {}; }
@@ -182,7 +185,7 @@ loanRoutes.post("/register", requireAuth, async (c) => {
 });
 
 // Book an existing (legacy / unbooked) loan to the ledger.
-loanRoutes.post("/:id/book", requireAuth, async (c) => {
+loanRoutes.post("/:id/book", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   const id = c.req.param("id") ?? "";
   let body: unknown;
@@ -210,7 +213,7 @@ loanRoutes.post("/:id/book", requireAuth, async (c) => {
 });
 
 // Unbook — reverse the origination entry and clear the stamps so it can be re-booked.
-loanRoutes.post("/:id/unbook", requireAuth, async (c) => {
+loanRoutes.post("/:id/unbook", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   const id = c.req.param("id") ?? "";
   try {
@@ -239,7 +242,7 @@ loanRoutes.post("/:id/unbook", requireAuth, async (c) => {
 // Cancel a loan — a registered loan is never deleted, only cancelled. Reverses
 // its booking entry (if booked) and marks it Cancelled. Blocked while it still
 // has recorded payments, so nothing is left orphaned.
-loanRoutes.post("/:id/cancel", requireAuth, async (c) => {
+loanRoutes.post("/:id/cancel", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   const id = c.req.param("id") ?? "";
   try {
@@ -277,7 +280,7 @@ loanRoutes.post("/:id/cancel", requireAuth, async (c) => {
 // → a Check Voucher + a Check Registry entry whose JE posts when the check
 // clears. Both carry the same detail lines (DR Loans Payable + DR Finance Cost),
 // with cash credited for the total — the loan payment's GL footprint.
-loanRoutes.post("/:id/pay", requireAuth, async (c) => {
+loanRoutes.post("/:id/pay", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   const id = c.req.param("id") ?? "";
   let body: unknown;
@@ -519,6 +522,8 @@ export const fixedAssetRoutes = makeCrudRoutes({
   createSchema: zFixedAssetInput,
   updateSchema: zFixedAssetUpdate,
   orderBy: [{ column: fixedAssets.assetNo, dir: "asc" }],
+  // Reverse-only, same as loans — cancel reverses the acquisition entry.
+  disableDelete: true,
 });
 
 // ── Fixed asset acquisition booking ─────────────────────────────────────────
@@ -617,7 +622,7 @@ const assetBookErrorResponse = (error: "accounts_unset" | "nothing_to_book") =>
 // Register a fixed asset and post its acquisition entry atomically — booking is
 // automatic. Rolls back entirely if the entry can't post, so a registered asset
 // is always on the books.
-fixedAssetRoutes.post("/register", requireAuth, async (c) => {
+fixedAssetRoutes.post("/register", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   let body: unknown;
   try { body = await c.req.json(); } catch { body = {}; }
@@ -650,7 +655,7 @@ fixedAssetRoutes.post("/register", requireAuth, async (c) => {
 });
 
 // Book an existing (legacy / unbooked) fixed asset to the ledger.
-fixedAssetRoutes.post("/:id/book", requireAuth, async (c) => {
+fixedAssetRoutes.post("/:id/book", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   const id = c.req.param("id") ?? "";
   let body: unknown;
@@ -680,7 +685,7 @@ fixedAssetRoutes.post("/:id/book", requireAuth, async (c) => {
 // Cancel a fixed asset — never deleted, only cancelled. Reverses its acquisition
 // entry (if booked) and marks it Cancelled. Blocked while it still has recorded
 // installment payments, so nothing is orphaned.
-fixedAssetRoutes.post("/:id/cancel", requireAuth, async (c) => {
+fixedAssetRoutes.post("/:id/cancel", requireAuth, requireWorkflowPoster, async (c) => {
   const auth = c.get("auth");
   const id = c.req.param("id") ?? "";
   try {
