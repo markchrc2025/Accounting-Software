@@ -381,7 +381,7 @@ Retention schedule: **Open**.
 | Default chart seeding | **Partial** — 158 accounts, idempotent via the seed script; the reset path reinstalls them with a bare insert and no conflict handling |
 | One email → many workspaces | **Partial** — membership substrate, workspace resolution and sign-in picker are real; every admin surface is still per-workspace |
 | Connection pooling | **Built** — `prepare:false` makes a transaction pooler safe (the current deployment connects directly, with no pooler) |
-| Workspace data admin | **Built** — export / import / factory reset across 30 tables. **⚠ The kill-switch is fail-open:** only the exact string `false` blocks reset, so leaving `ALLOW_WORKSPACE_RESET` unset means a full workspace wipe is live in production |
+| Workspace data admin | **Built** — export / import / factory reset across 30 tables. ✅ **Fixed in M0.1:** the reset switch is now fail-closed (enabled only when `ALLOW_WORKSPACE_RESET` is exactly `"true"`), confirmation is the caller's own workspace code, and the boot log always states whether reset is enabled |
 | Region co-location | **Partial** — achieved de facto (API and Postgres on the same Sliplane host over a private network); the checked-in Render blueprint is dead config |
 | HA / multi-instance | **Partial** — the app is stateless so it *could* scale out today, but nothing declares >1 instance and there is no shared rate-limit store |
 | Vendor-exit note | **Open** — unwritten, though the migration off Supabase already happened |
@@ -425,9 +425,10 @@ Being candid here is more useful than a clean scorecard.
 
 **Operational risks**
 
-11. **`ALLOW_WORKSPACE_RESET` is fail-open** — the guard blocks only on the exact string `false`, so
-    leaving it unset (the example env ships `true`) means a full workspace wipe is **live in
-    production**, with no backup posture behind it.
+11. ~~**`ALLOW_WORKSPACE_RESET` is fail-open**~~ — **fixed in M0.1.** Reset is now enabled only when
+    the variable is exactly `"true"`; unset, blank, `"1"`, `"yes"` and `"TRUE"` all disable it.
+    Confirmation is the caller's own workspace code (not a static `"RESET"`), and boot logs the
+    state. Note the underlying risk it amplified — **no backup/DR posture** (item 14) — is still open.
 12. No rate limiting on the public sign-in endpoint; no lockout. Online password guessing is unbounded.
 13. No error tracking or structured logging — an incident is invisible.
 14. No backup/DR posture written or drilled.
@@ -462,9 +463,9 @@ Being candid here is more useful than a clean scorecard.
 
 Ordered by leverage, given everything above.
 
-1. **Make the destructive switches fail-closed.** Invert the `ALLOW_WORKSPACE_RESET` guard (block
-   unless explicitly enabled) and assert it at boot. Smallest possible change, largest downside
-   avoided — today an unset variable leaves a full production wipe one click away.
+1. ~~**Make the destructive switches fail-closed.**~~ ✅ **Done — M0.1.** The reset guard is an
+   allowlist (`ALLOW_WORKSPACE_RESET === "true"`), confirmation is the workspace code, and boot
+   states the switch position. Covered by unit tests plus an RLS-bound integration test.
 2. **Make approval routing actually govern.** Have the voucher/journal transition handlers consult
    `org_settings.approval_routing`, and block self-approval in the same change. This is the
    difference between having a workflow and having a *control* — and it is the feature SMEs and

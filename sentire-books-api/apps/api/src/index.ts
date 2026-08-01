@@ -40,6 +40,7 @@ import {
   weeklyProjectionRoutes,
   creditLineRoutes,
 } from "./routes/financial";
+import { workspaceResetBootNotice } from "./config";
 
 const app = new Hono();
 
@@ -112,6 +113,8 @@ app.route("/credit-lines", creditLineRoutes);
  * server still starts even if this fails, so /health stays up.
  */
 async function boot(): Promise<void> {
+  // Never let a destructive switch be silently on.
+  console.log(workspaceResetBootNotice());
   await ensureAuthTables();
   const adminEmail = process.env.BOOKS_ADMIN_EMAIL?.trim().toLowerCase();
   const adminPassword = process.env.BOOKS_ADMIN_INITIAL_PASSWORD;
