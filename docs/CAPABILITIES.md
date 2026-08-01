@@ -300,11 +300,11 @@ The six roadmap phase documents were written earlier in the build and are **stal
 places**. All 53 claims below were independently and adversarially verified against the source —
 "Open" means absence was *proven by search*, not assumed.
 
-**Tally: 10 Built · 21 Partial · 22 Open.** (Updated as Milestone 0 lands.)
+**Tally: 11 Built · 20 Partial · 22 Open.** (Updated as Milestone 0 lands.)
 
 | Phase | Built | Partial | Open | Verdict |
 |---|---|---|---|---|
-| 1 · Pre-Launch Hardening | 1 | 3 | 5 | Mostly open — the real gate |
+| 1 · Pre-Launch Hardening | 2 | 2 | 5 | Mostly open — the real gate |
 | 2 · AI Layer | 0 | 0 | 7 | Greenfield |
 | 3 · Approvals & Controls | 0 | 7 | 2 | Machinery built, governance not |
 | 4 · Sellable MVP Modules | 7 | 4 | 2 | Mostly built |
@@ -318,7 +318,7 @@ places**. All 53 claims below were independently and adversarially verified agai
 | Observability / error tracking / structured logs | **Open** | No Sentry/OTel/pino; ~30 raw `console.error` calls with no org/user/request id |
 | Rate limiting / abuse protection | **Open** | Zero matches for rate-limit/429/throttle. `POST /auth/password` has **no middleware at all** |
 | Login lockout / backoff | **Open** | `credentials` has no attempt/lock columns; no counter on failure |
-| CORS tight | **Partial** | List is explicit with no wildcards, **but** `CORS_ORIGIN=""` yields `allowedOrigins=[]` → falls back to literal `"*"`. Blast radius limited (no `credentials: true`; Bearer tokens) |
+| CORS tight | **Built** | ✅ **M0.3.** Production refuses to boot when the allow-list resolves empty; a configured `"*"` is discarded (with a warning) rather than honoured; and an unlisted origin now receives **no** `Access-Control-Allow-Origin` header at all — previously it was answered with the first allowed origin echoed back |
 | MFA | **Open** | No TOTP anywhere; no factor columns |
 | Session-revocation window | **Partial** | Role/membership changes: ~0 delay. **Identity revocation: up to 8h** — self-contained JWTs, no denylist/jti/token version; a password reset does not invalidate existing tokens. Nowhere documented |
 | Backup / PITR / RPO / RTO / restore drill | **Open** | No backup, PITR, RPO, RTO or DR content in any doc |
@@ -432,7 +432,9 @@ Being candid here is more useful than a clean scorecard.
 12. No rate limiting on the public sign-in endpoint; no lockout. Online password guessing is unbounded.
 13. No error tracking or structured logging — an incident is invisible.
 14. No backup/DR posture written or drilled.
-15. `CORS_ORIGIN=""` degrades to `Access-Control-Allow-Origin: *`.
+15. ~~`CORS_ORIGIN=""` degrades to `Access-Control-Allow-Origin: *`.~~ — **fixed in M0.3.** Empty or
+    wildcard-only in production is a fatal boot error; outside production it falls back to localhost
+    origins only. The API never emits a wildcard.
 16. The `credentials` table lives outside migrations (created at boot by raw DDL).
 17. Deploy docs still describe **JWKS/OIDC** auth the code no longer implements, and `render.yaml`
     pins stale hosts. **Partly mitigated in M0.2:** production now refuses to boot on any
@@ -480,7 +482,7 @@ Ordered by leverage, given everything above.
    the generic DELETE on those two routers, and claim the depreciation month lock *before* posting
    so a concurrent run cannot orphan an entry.
 5. **The Phase 1 gate** — ✅ the auth boot assertion landed in M0.2. Still open: rate limiting +
-   lockout on `/auth/password` (M0.4), a `CORS_ORIGIN` non-empty assertion (M0.3), error tracking
+   lockout on `/auth/password` (M0.4). ✅ CORS assertion landed in M0.3. Still open: error tracking
    and structured logs (Milestone 1).
 6. **Workflow history table** (append-only: who, when, from → to, remarks) — one table that Phase 3
    needs and Phase 5's audit log later extends. Build it once.
