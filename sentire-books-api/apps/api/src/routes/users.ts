@@ -5,6 +5,7 @@ import { zInviteUser, zUserUpdate } from "@sentire-books/domain";
 import { withOrgContext, appUsers } from "@sentire-books/db";
 import { requireAuth } from "../auth";
 import { setPassword } from "../password";
+import { reportError } from "../observability";
 
 export const userRoutes = new Hono();
 
@@ -85,7 +86,7 @@ userRoutes.post("/", async (c) => {
     if (isUniqueViolation(err)) {
       return c.json({ error: "duplicate_email", detail: "That email is already on a workspace" }, 409);
     }
-    console.error("[inviteUser]", err);
+    reportError(c, "inviteUser", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -131,7 +132,7 @@ userRoutes.put("/:id", async (c) => {
     return c.json({ user: row });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[updateUser]", err);
+    reportError(c, "updateUser", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -162,7 +163,7 @@ userRoutes.delete("/:id", async (c) => {
     if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "23503") {
       return c.json({ error: "in_use", detail: "This user is referenced by existing records." }, 409);
     }
-    console.error("[deleteUser]", err);
+    reportError(c, "deleteUser", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

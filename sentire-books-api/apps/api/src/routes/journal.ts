@@ -28,6 +28,7 @@ import {
   EntryNotFoundError,
   EntryNotPostedError,
 } from "../ledger/postJournalEntry";
+import { reportError } from "../observability";
 
 export const journalRoutes = new Hono();
 
@@ -190,7 +191,7 @@ journalRoutes.post("/", async (c) => {
     if (err instanceof UnbalancedEntryError) {
       return c.json({ error: "unbalanced", debit: err.debit, credit: err.credit }, 422);
     }
-    console.error("[postJournalEntry]", err);
+    reportError(c, "postJournalEntry", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -258,7 +259,7 @@ journalRoutes.put("/:id", async (c) => {
     if (err instanceof ZodError) {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
-    console.error("[updateJournalEntry]", err);
+    reportError(c, "updateJournalEntry", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -289,7 +290,7 @@ journalRoutes.delete("/:id", async (c) => {
     }
     return c.json({ ok: true });
   } catch (err) {
-    console.error("[deleteJournalEntry]", err);
+    reportError(c, "deleteJournalEntry", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -358,7 +359,7 @@ journalRoutes.post("/:id/status", async (c) => {
     if (isCheckViolation(err)) {
       return c.json({ error: "unbalanced", detail: "Entry must balance before posting" }, 422);
     }
-    console.error("[transitionJournalEntry]", err);
+    reportError(c, "transitionJournalEntry", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -381,7 +382,7 @@ journalRoutes.post("/:id/reverse", async (c) => {
     if (err instanceof EntryNotPostedError) {
       return c.json({ error: "invalid_status", detail: err.message }, 409);
     }
-    console.error("[reverseJournalEntry]", err);
+    reportError(c, "reverseJournalEntry", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

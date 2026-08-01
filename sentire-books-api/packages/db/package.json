@@ -18,6 +18,7 @@
     "whoami": "tsx src/whoami.ts"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
     "@sentire-books/domain": "workspace:*",
     "drizzle-orm": "^0.36.4",
     "postgres": "^3.4.5"

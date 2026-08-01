@@ -9,6 +9,7 @@ import {
 } from "@sentire-books/domain";
 import { withOrgContext, disbursementReports, vouchers, appUsers, type Tx } from "@sentire-books/db";
 import { requireAuth } from "../auth";
+import { reportError } from "../observability";
 
 export const disbursementRoutes = new Hono();
 disbursementRoutes.use("*", requireAuth);
@@ -168,7 +169,7 @@ disbursementRoutes.post("/", async (c) => {
     return c.json({ report: row }, 201);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[createDisbursement]", err);
+    reportError(c, "createDisbursement", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -213,7 +214,7 @@ disbursementRoutes.put("/:id", async (c) => {
     return c.json({ report: outcome });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[updateDisbursement]", err);
+    reportError(c, "updateDisbursement", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -260,7 +261,7 @@ disbursementRoutes.post("/:id/status", async (c) => {
     return c.json({ report: outcome });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[disbursementStatus]", err);
+    reportError(c, "disbursementStatus", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

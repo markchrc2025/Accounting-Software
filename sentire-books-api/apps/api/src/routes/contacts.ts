@@ -12,6 +12,7 @@ import {
 } from "@sentire-books/domain";
 import { withOrgContext, contacts, type Tx } from "@sentire-books/db";
 import { requireAuth } from "../auth";
+import { reportError } from "../observability";
 
 export const contactRoutes = new Hono();
 
@@ -136,7 +137,7 @@ contactRoutes.post("/", async (c) => {
     if (isFkViolation(err)) {
       return c.json({ error: "invalid_parent", detail: "Parent contact does not exist" }, 400);
     }
-    console.error("[createContact]", err);
+    reportError(c, "createContact", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -181,7 +182,7 @@ contactRoutes.put("/:id", async (c) => {
     if (isFkViolation(err)) {
       return c.json({ error: "invalid_parent", detail: "Parent contact does not exist" }, 400);
     }
-    console.error("[updateContact]", err);
+    reportError(c, "updateContact", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -212,7 +213,7 @@ contactRoutes.delete("/:id", async (c) => {
         409,
       );
     }
-    console.error("[deleteContact]", err);
+    reportError(c, "deleteContact", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

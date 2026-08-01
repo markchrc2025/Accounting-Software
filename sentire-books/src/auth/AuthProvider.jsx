@@ -8,6 +8,7 @@ import {
   signInWithPassword,
   ApiError,
 } from '../lib/api.js';
+import { setErrorContext } from '../lib/observability.js';
 
 /**
  * Auth + workspace state for the portal. Sign-in is email/password against the
@@ -159,6 +160,8 @@ export function AuthProvider({ children }) {
       const me = await getMe();
       setSession({ user: me.user });
       setOrg({ id: me.org.id, name: me.org.name, code: me.org.code, role: me.role });
+      // So a reported error names the tenant it happened in.
+      setErrorContext({ orgId: me.org.id, orgCode: me.org.code, userId: me.user?.id, role: me.role });
       setAuthError(null);
       setPhase('ready');
     } catch (err) {

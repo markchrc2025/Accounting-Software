@@ -1,6 +1,8 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { logger, serializeError } from "./logger";
+import { initErrorTracking, requestContext } from "./observability";
 import { detectLockoutColumns, hasCredential } from "@sentire-books/db";
 import { setPassword } from "./password";
 import { authRoutes } from "./routes/auth";
@@ -51,6 +53,10 @@ import {
 } from "./config";
 
 const app = new Hono();
+
+// Error tracking is a no-op unless SENTRY_DSN is set.
+initErrorTracking();
+app.use("*", requestContext);
 
 // The browser-facing web app is a different origin (the portal vs this API), so
 // cross-origin requests need CORS. Allowed origins come from CORS_ORIGIN
@@ -114,11 +120,15 @@ app.route("/credit-lines", creditLineRoutes);
  * must not serve a single request.
  */
 function assertSafeConfig(): void {
-  for (const w of [...authConfigWarnings(), ...corsConfigWarnings()]) console.warn(w);
+  for (const w of [...authConfigWarnings(), ...corsConfigWarnings()]) logger.warn(w);
   const errors = [...authConfigErrors(), ...corsConfigErrors()];
   if (errors.length === 0) return;
-  console.error("[config] FATAL — refusing to start in production with an unsafe configuration:");
-  for (const e of errors) console.error(`  • ${e}`);
+  logger.fatal("refusing to start in production with an unsafe configuration");
+  for (const e of errors) logger.fatal(e);
+  // Exit SYNCHRONOUSLY: an async flush here would let boot()/serve() run first
+  // and bind the port, breaking M0.2's "nothing listens on a fatal misconfig".
+  // The errors are already on stderr, so losing a buffered Sentry event for a
+  // config fault the process never served traffic under is the right trade.
   process.exit(1);
 }
 
@@ -131,16 +141,16 @@ function assertSafeConfig(): void {
  */
 async function boot(): Promise<void> {
   // Never let a destructive switch be silently on.
-  console.log(workspaceResetBootNotice());
-  console.log(`[config] CORS allow-list: ${allowedOrigins.join(", ")}`);
+  logger.info(workspaceResetBootNotice());
+  logger.info({ allowedOrigins }, "CORS allow-list");
 
   // Durable sign-in lockout needs the columns from migration 0022. If they are
   // absent the API stays up and throttles in memory only — a missed delta must
   // never cause a login outage — but it must be impossible to miss in the logs.
   if (await detectLockoutColumns()) {
-    console.log("[auth] sign-in lockout: durable (credentials.failed_attempts/locked_until present)");
+    logger.info("sign-in lockout: durable (credentials.failed_attempts/locked_until present)");
   } else {
-    console.error(
+    logger.error(
       "[auth] ⚠ sign-in lockout is IN-MEMORY ONLY — credentials.failed_attempts / locked_until are " +
         "missing. Lockouts will not survive a restart. Apply setup/livedbdelta0022.sql (as the " +
         "database owner) or run migration 0022_credentials.sql.",
@@ -150,7 +160,7 @@ async function boot(): Promise<void> {
   const adminPassword = process.env.BOOKS_ADMIN_INITIAL_PASSWORD;
   if (adminEmail && adminPassword && !(await hasCredential(adminEmail))) {
     await setPassword(adminEmail, adminPassword);
-    console.log(`[auth] seeded initial credential for ${adminEmail}`);
+    logger.info({ adminEmail }, "seeded initial credential");
   }
 }
 
@@ -158,12 +168,12 @@ async function boot(): Promise<void> {
 assertSafeConfig();
 
 boot()
-  .catch((e) => console.error("[boot] auth setup failed:", e))
+  .catch((e) => logger.error({ err: serializeError(e) }, "boot failed"))
   .finally(() => {
     // Render (and most PaaS) inject PORT; fall back to API_PORT for local dev.
     const port = Number(process.env.PORT ?? process.env.API_PORT ?? 8787);
     serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });
-    console.log(`sentire-books-api listening on :${port}`);
+    logger.info({ port }, "sentire-books-api listening");
   });
 
 export type AppType = typeof app;
