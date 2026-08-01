@@ -11,6 +11,7 @@ import { and, asc, desc, eq, sql, type AnyColumn } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { withOrgContext, type Tx } from "@sentire-books/db";
 import { requireAuth } from "../auth";
+import { reportError } from "../observability";
 
 type AnyTable = PgTable & {
   id: AnyColumn;
@@ -136,7 +137,7 @@ export function makeCrudRoutes(opts: CrudOptions): Hono {
     } catch (err) {
       if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
       if (isUniqueViolation(err)) return c.json({ error: "duplicate", detail: `That ${singular} already exists` }, 409);
-      console.error(`[create ${singular}]`, err);
+      reportError(c, `create:${singular}`, err);
       return c.json({ error: "internal_error" }, 500);
     }
   });
@@ -172,7 +173,7 @@ export function makeCrudRoutes(opts: CrudOptions): Hono {
     } catch (err) {
       if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
       if (isUniqueViolation(err)) return c.json({ error: "duplicate", detail: `That ${singular} already exists` }, 409);
-      console.error(`[update ${singular}]`, err);
+      reportError(c, `update:${singular}`, err);
       return c.json({ error: "internal_error" }, 500);
     }
   });
@@ -207,7 +208,7 @@ export function makeCrudRoutes(opts: CrudOptions): Hono {
       if (isFkViolation(err)) {
         return c.json({ error: "in_use", detail: `This ${singular} is referenced by other records.` }, 409);
       }
-      console.error(`[delete ${singular}]`, err);
+      reportError(c, `delete:${singular}`, err);
       return c.json({ error: "internal_error" }, 500);
     }
   });

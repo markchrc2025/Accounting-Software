@@ -12,6 +12,7 @@ import {
 } from "@sentire-books/domain";
 import { withOrgContext, checkbooks, checkRegistry, type Tx } from "@sentire-books/db";
 import { requireAuth } from "../auth";
+import { reportError } from "../observability";
 
 // ── Checkbook master ──────────────────────────────────────────────────────────
 export const checkbookRoutes = new Hono();
@@ -71,7 +72,7 @@ checkbookRoutes.post("/", async (c) => {
     return c.json({ checkbook: row }, 201);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[createCheckbook]", err);
+    reportError(c, "createCheckbook", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -125,7 +126,7 @@ checkbookRoutes.put("/:id", async (c) => {
     return c.json({ checkbook: outcome });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[updateCheckbook]", err);
+    reportError(c, "updateCheckbook", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -148,7 +149,7 @@ checkbookRoutes.delete("/:id", async (c) => {
     if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "23503") {
       return c.json({ error: "checkbook_in_use", detail: "Checks reference this checkbook." }, 409);
     }
-    console.error("[deleteCheckbook]", err);
+    reportError(c, "deleteCheckbook", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -270,7 +271,7 @@ checkRoutes.post("/", async (c) => {
     return c.json({ checks: rows }, 201);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[createChecks]", err);
+    reportError(c, "createChecks", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -301,7 +302,7 @@ checkRoutes.put("/:id", async (c) => {
     return c.json({ check: row });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[updateCheck]", err);
+    reportError(c, "updateCheck", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -345,7 +346,7 @@ checkRoutes.post("/:id/status", async (c) => {
     return c.json({ check: row });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[checkStatus]", err);
+    reportError(c, "checkStatus", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

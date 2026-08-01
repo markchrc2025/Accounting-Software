@@ -5,6 +5,7 @@ import { z } from "zod";
 import { zOrgSettingsUpdate } from "@sentire-books/domain";
 import { withOrgContext, orgSettings, documentCounters } from "@sentire-books/db";
 import { requireAuth } from "../auth";
+import { reportError } from "../observability";
 
 export const settingsRoutes = new Hono();
 
@@ -64,7 +65,7 @@ settingsRoutes.put("/", async (c) => {
     if (err instanceof ZodError) {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
-    console.error("[updateSettings]", err);
+    reportError(c, "updateSettings", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -119,7 +120,7 @@ settingsRoutes.put("/counters/:periodKey", async (c) => {
     return c.json({ counter: { periodKey: rows[0]!.period_key, seq: Number(rows[0]!.seq) } });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[counterOverride]", err);
+    reportError(c, "counterOverride", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

@@ -4,6 +4,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { zAccountInput, zAccountUpdate, zImportAccounts, normalBalanceFor } from "@sentire-books/domain";
 import { withOrgContext, accounts } from "@sentire-books/db";
 import { requireAuth } from "../auth";
+import { reportError } from "../observability";
 
 export const accountRoutes = new Hono();
 
@@ -69,7 +70,7 @@ accountRoutes.post("/", async (c) => {
     if (err instanceof ZodError) {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
-    console.error("[createAccount]", err);
+    reportError(c, "createAccount", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -133,7 +134,7 @@ accountRoutes.put("/:id", async (c) => {
     if (err instanceof ZodError) {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
-    console.error("[updateAccount]", err);
+    reportError(c, "updateAccount", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -166,7 +167,7 @@ accountRoutes.delete("/:id", async (c) => {
         409,
       );
     }
-    console.error("[deleteAccount]", err);
+    reportError(c, "deleteAccount", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -239,7 +240,7 @@ accountRoutes.post("/import", async (c) => {
     if (err instanceof ZodError) {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
-    console.error("[importAccounts]", err);
+    reportError(c, "importAccounts", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

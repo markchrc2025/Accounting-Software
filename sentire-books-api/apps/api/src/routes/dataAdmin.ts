@@ -56,6 +56,7 @@ import {
 } from "@sentire-books/db";
 import { DEFAULT_CHART_OF_ACCOUNTS } from "@sentire-books/domain";
 import { requireAuth } from "../auth";
+import { reportError } from "../observability";
 
 const EXPORT_FORMAT = "sentire-books-export";
 const EXPORT_VERSION = 1;
@@ -257,7 +258,7 @@ dataAdminRoutes.post("/reset", async (c) => {
     return c.json({ ok: true, wiped: result.counts, chartOfAccounts: result.reseeded });
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[workspaceReset]", err);
+    reportError(c, "workspaceReset", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -351,7 +352,7 @@ dataAdminRoutes.post("/import", async (c) => {
         409,
       );
     }
-    console.error("[workspaceImport]", err);
+    reportError(c, "workspaceImport", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

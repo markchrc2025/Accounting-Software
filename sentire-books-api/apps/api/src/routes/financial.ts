@@ -51,6 +51,7 @@ import { requireAuth, requireWorkflowPoster } from "../auth";
 import { postJournalEntryCore, reverseJournalEntryCore } from "../ledger/postJournalEntry";
 import { createVoucherDraftCore } from "../ledger/voucherWorkflow";
 import { nextCheckNo } from "./checks";
+import { reportError } from "../observability";
 
 export const loanRoutes = makeCrudRoutes({
   plural: "loans",
@@ -179,7 +180,7 @@ loanRoutes.post("/register", requireAuth, requireWorkflowPoster, async (c) => {
       const { body: b, status } = bookErrorResponse(err.code);
       return c.json(b, status);
     }
-    console.error("[registerLoan]", err);
+    reportError(c, "registerLoan", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -207,7 +208,7 @@ loanRoutes.post("/:id/book", requireAuth, requireWorkflowPoster, async (c) => {
     return c.json(b, status);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[bookLoan]", err);
+    reportError(c, "bookLoan", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -234,7 +235,7 @@ loanRoutes.post("/:id/unbook", requireAuth, requireWorkflowPoster, async (c) => 
     if (outcome.error === "not_booked") return c.json({ error: "not_booked", detail: "This loan isn't booked yet." }, 400);
     return c.json(outcome);
   } catch (err) {
-    console.error("[unbookLoan]", err);
+    reportError(c, "unbookLoan", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -269,7 +270,7 @@ loanRoutes.post("/:id/cancel", requireAuth, requireWorkflowPoster, async (c) => 
     if (outcome.error === "has_payments") return c.json({ error: "has_payments", detail: "This loan has recorded payments — void or remove them before cancelling." }, 409);
     return c.json(outcome);
   } catch (err) {
-    console.error("[cancelLoan]", err);
+    reportError(c, "cancelLoan", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -405,7 +406,7 @@ loanRoutes.post("/:id/pay", requireAuth, requireWorkflowPoster, async (c) => {
     return c.json(outcome, 201);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[payLoan]", err);
+    reportError(c, "payLoan", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -491,7 +492,7 @@ loanRoutes.get("/reconciliation", requireAuth, async (c) => {
     );
     return c.json(result);
   } catch (err) {
-    console.error("[loanReconciliation]", err);
+    reportError(c, "loanReconciliation", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -649,7 +650,7 @@ fixedAssetRoutes.post("/register", requireAuth, requireWorkflowPoster, async (c)
     if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "23505") {
       return c.json({ error: "duplicate", detail: "That asset number already exists." }, 409);
     }
-    console.error("[registerAsset]", err);
+    reportError(c, "registerAsset", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -677,7 +678,7 @@ fixedAssetRoutes.post("/:id/book", requireAuth, requireWorkflowPoster, async (c)
     return c.json(b, status);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
-    console.error("[bookAsset]", err);
+    reportError(c, "bookAsset", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -712,7 +713,7 @@ fixedAssetRoutes.post("/:id/cancel", requireAuth, requireWorkflowPoster, async (
     if (outcome.error === "has_payments") return c.json({ error: "has_payments", detail: "This asset has recorded installment payments — void those before cancelling." }, 409);
     return c.json(outcome);
   } catch (err) {
-    console.error("[cancelAsset]", err);
+    reportError(c, "cancelAsset", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });

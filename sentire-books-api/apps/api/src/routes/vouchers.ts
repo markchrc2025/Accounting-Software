@@ -24,6 +24,7 @@ import {
   VoucherNotFoundError,
   MissingCashAccountError,
 } from "../ledger/voucherWorkflow";
+import { reportError } from "../observability";
 
 export const voucherRoutes = new Hono();
 
@@ -159,7 +160,7 @@ voucherRoutes.post("/", async (c) => {
     if (err instanceof UnbalancedEntryError) {
       return c.json({ error: "unbalanced", debit: err.debit, credit: err.credit }, 422);
     }
-    console.error("[createVoucher]", err);
+    reportError(c, "createVoucher", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -228,7 +229,7 @@ voucherRoutes.put("/:id", async (c) => {
     if (err instanceof ZodError) {
       return c.json({ error: "validation_error", issues: err.issues }, 400);
     }
-    console.error("[updateVoucher]", err);
+    reportError(c, "updateVoucher", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -258,7 +259,7 @@ voucherRoutes.delete("/:id", async (c) => {
     }
     return c.json({ ok: true });
   } catch (err) {
-    console.error("[deleteVoucher]", err);
+    reportError(c, "deleteVoucher", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -327,7 +328,7 @@ voucherRoutes.post("/:id/status", async (c) => {
     if (err instanceof UnbalancedEntryError) {
       return c.json({ error: "unbalanced", debit: err.debit, credit: err.credit }, 422);
     }
-    console.error("[transitionVoucher]", err);
+    reportError(c, "transitionVoucher", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
@@ -343,7 +344,7 @@ voucherRoutes.post("/:id/void", async (c) => {
     return c.json(result);
   } catch (err) {
     if (err instanceof VoucherNotFoundError) return c.json({ error: "not_found" }, 404);
-    console.error("[voidVoucher]", err);
+    reportError(c, "voidVoucher", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
