@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger, serializeError } from "./logger";
 import { initErrorTracking, requestContext } from "./observability";
+import { healthRoutes } from "./health";
 import { detectLockoutColumns, hasCredential } from "@sentire-books/db";
 import { setPassword } from "./password";
 import { authRoutes } from "./routes/auth";
@@ -78,7 +79,10 @@ app.use(
 app.get("/", (c) =>
   c.json({ service: "sentire-books-api", ok: true, docs: "/health" }),
 );
-app.get("/health", (c) => c.json({ ok: true, service: "sentire-books-api" }));
+// Liveness (/live) and readiness (/health) — see health.ts for why they are
+// separate. The platform restart probe must use /live; the uptime monitor and
+// any load balancer must use /health.
+app.route("/", healthRoutes);
 
 app.route("/auth", authRoutes);
 app.route("/users", userRoutes);
