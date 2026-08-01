@@ -146,8 +146,10 @@ export const setUserPassword = (id, password) =>
 
 // ── data admin (export / reset / restore — admin only) ──────────────────────
 export const exportWorkspaceData = () => apiFetch('/settings/data/export');
-export const resetWorkspaceData = (opts) =>
-  apiFetch('/settings/data/reset', { method: 'POST', body: JSON.stringify({ confirm: 'RESET', ...opts }) });
+// Destructive. `confirm` must be the caller's own workspace code — the API
+// rejects anything else, so a reset can't be fired at the wrong tenant.
+export const resetWorkspaceData = (confirm) =>
+  apiFetch('/settings/data/reset', { method: 'POST', body: JSON.stringify({ confirm }) });
 export const importWorkspaceData = (snapshot) =>
   apiFetch('/settings/data/import', { method: 'POST', body: JSON.stringify(snapshot) });
 

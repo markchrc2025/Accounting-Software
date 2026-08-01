@@ -11,12 +11,13 @@
  * settings are never wiped.
  *
  * RESET IS A TEMPORARY GO-LIVE TOOL: it stays available while testing and is
- * switched off for production by setting ALLOW_WORKSPACE_RESET=false on the
+ * FAIL-CLOSED: reset is off unless ALLOW_WORKSPACE_RESET is exactly "true" on the
  * API service — no code change needed. Export/restore remain available.
  */
 import { Hono } from "hono";
 import { ZodError, z } from "zod";
 import { eq, sql } from "drizzle-orm";
+import { isWorkspaceResetEnabled } from "../config";
 import type { PgTable } from "drizzle-orm/pg-core";
 import {
   withOrgContext,
@@ -152,8 +153,14 @@ async function wipeEntry(tx: Tx, entry: Registry, orgId: string): Promise<number
   return rows.length;
 }
 
+/**
+ * Reset confirmation is the caller's own workspace CODE, not a constant — a
+ * static "RESET" reads identically in every tenant, so muscle memory could wipe
+ * the wrong workspace. The value is compared to the authenticated org's code in
+ * the handler (it cannot be a z.literal because it differs per workspace).
+ */
 const zResetBody = z.object({
-  confirm: z.literal("RESET"),
+  confirm: z.string().trim().min(1),
 });
 
 const zImportBody = z.object({
@@ -202,11 +209,15 @@ dataAdminRoutes.get("/export", async (c) => {
 });
 
 // ── Reset: factory-wipe EVERYTHING + default CoA + fresh numbering ───────────
-// Temporary go-live tool — disable in production with ALLOW_WORKSPACE_RESET=false.
+// FAIL-CLOSED: off unless ALLOW_WORKSPACE_RESET is exactly "true" (see config.ts),
+// and the caller must confirm with their own workspace code.
 dataAdminRoutes.post("/reset", async (c) => {
-  if (process.env.ALLOW_WORKSPACE_RESET === "false") {
+  if (!isWorkspaceResetEnabled()) {
     return c.json(
-      { error: "reset_disabled", detail: "Workspace reset is disabled on this environment (ALLOW_WORKSPACE_RESET=false)." },
+      {
+        error: "reset_disabled",
+        detail: 'Workspace reset is disabled on this environment. Set ALLOW_WORKSPACE_RESET="true" to enable it.',
+      },
       403,
     );
   }
@@ -218,7 +229,18 @@ dataAdminRoutes.post("/reset", async (c) => {
     return c.json({ error: "invalid_json" }, 400);
   }
   try {
-    zResetBody.parse(body);
+    const { confirm } = zResetBody.parse(body);
+    // Confirmation must match THIS workspace's code, so a reset cannot be
+    // fired against the wrong tenant by habit.
+    if (confirm.toUpperCase() !== (auth.orgCode ?? "").toUpperCase()) {
+      return c.json(
+        {
+          error: "confirmation_mismatch",
+          detail: `Type the workspace code (${auth.orgCode}) to confirm this reset.`,
+        },
+        400,
+      );
+    }
     const result = await withOrgContext(
       { userId: auth.userId, orgId: auth.orgId, role: auth.role },
       async (tx) => {

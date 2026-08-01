@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { usePermissions } from '../../../contexts/PermissionsContext.jsx';
+import { useAuth } from '../../../auth/AuthProvider.jsx';
 import {
   getMe, getSettings, updateSettings,
   listUsers, inviteUser, updateUser, deleteUser, setUserPassword,
@@ -176,6 +177,10 @@ function Toggle({ checked, onChange }) {
 }
 
 export default function SettingsPage() {
+  // Read at the page level, not inside DataSettings() — that is a plain render
+  // helper with an early return, so a hook there would be conditional.
+  const { org } = useAuth();
+  const orgCode = org?.code || '';
   const [activeSection, setActiveSection] = useState('org-profile');
   const [profileForm, setProfileForm] = useState(null);
   const [moduleForm,  setModuleForm]  = useState(null);
@@ -1368,7 +1373,7 @@ export default function SettingsPage() {
     const doReset = async () => {
       setWorking('reset');
       try {
-        const r = await resetWorkspaceData();
+        const r = await resetWorkspaceData(orgCode);
         setResetModal(null);
         showToast('Workspace reset: ' + Object.values(r.wiped||{}).reduce((a,b)=>a+b,0) + ' records wiped. Default chart of accounts reinstalled; document numbers restart at 0001.');
       } catch(e) { showToast('Reset failed: ' + errMsg(e)); }
@@ -1432,13 +1437,16 @@ export default function SettingsPage() {
                   <strong> This cannot be undone.</strong>
                 </p>
                 <div className="field">
-                  <label>Type <strong>RESET</strong> to confirm</label>
-                  <input value={resetModal.typed} onChange={e=>setResetModal(m=>({...m,typed:e.target.value}))} placeholder="RESET" />
+                  <label>Type this workspace's code <strong>{orgCode || '—'}</strong> to confirm</label>
+                  <input value={resetModal.typed} onChange={e=>setResetModal(m=>({...m,typed:e.target.value}))} placeholder={orgCode || 'workspace code'} />
+                  <span style={{fontSize:11,color:'#94a3b8',marginTop:3}}>
+                    The code is required so a reset can't be fired against the wrong workspace.
+                  </span>
                 </div>
               </div>
               <div className="modal-f">
                 <button className="btn btn-ghost" onClick={()=>setResetModal(null)}>Cancel</button>
-                <button className="btn" style={dangerBtn} disabled={resetModal.typed!=='RESET'||!!working} onClick={doReset}>
+                <button className="btn" style={dangerBtn} disabled={!orgCode||resetModal.typed.trim().toUpperCase()!==orgCode.toUpperCase()||!!working} onClick={doReset}>
                   {working==='reset' ? 'Resetting…' : 'Delete Everything & Reset'}
                 </button>
               </div>
