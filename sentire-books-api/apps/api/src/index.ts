@@ -40,7 +40,15 @@ import {
   weeklyProjectionRoutes,
   creditLineRoutes,
 } from "./routes/financial";
-import { workspaceResetBootNotice, authConfigErrors, authConfigWarnings } from "./config";
+import {
+  workspaceResetBootNotice,
+  authConfigErrors,
+  authConfigWarnings,
+  corsConfigErrors,
+  corsConfigWarnings,
+  parseCorsOrigins,
+  corsOriginResolver,
+} from "./config";
 
 const app = new Hono();
 
@@ -48,18 +56,12 @@ const app = new Hono();
 // cross-origin requests need CORS. Allowed origins come from CORS_ORIGIN
 // (comma-separated) and OVERRIDE these defaults when set; the defaults cover the
 // custom domain, the Sliplane portal host, and local Vite.
-const allowedOrigins = (
-  process.env.CORS_ORIGIN ??
-  "https://books.sentire.solutions,https://sentire-books.sliplane.app,http://localhost:5173"
-)
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const allowedOrigins = parseCorsOrigins();
 
 app.use(
   "*",
   cors({
-    origin: (origin) => (allowedOrigins.includes(origin) ? origin : (allowedOrigins[0] ?? "*")),
+    origin: corsOriginResolver(allowedOrigins),
     allowHeaders: ["content-type", "authorization", "x-user-id", "x-org-id"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   }),
@@ -106,29 +108,31 @@ app.route("/weekly-projections", weeklyProjectionRoutes);
 app.route("/credit-lines", creditLineRoutes);
 
 /**
+ * Fail fast on a misconfiguration that would weaken authentication or widen
+ * CORS. This runs BEFORE anything starts listening: a production API with no
+ * signing secret, with the dev bypass enabled, or without a browser allow-list
+ * must not serve a single request.
+ */
+function assertSafeConfig(): void {
+  for (const w of [...authConfigWarnings(), ...corsConfigWarnings()]) console.warn(w);
+  const errors = [...authConfigErrors(), ...corsConfigErrors()];
+  if (errors.length === 0) return;
+  console.error("[config] FATAL — refusing to start in production with an unsafe configuration:");
+  for (const e of errors) console.error(`  • ${e}`);
+  process.exit(1);
+}
+
+/**
  * Boot: make sure the credentials table exists, and — on first run — seed a
  * password for the configured admin so there's a way in (BOOKS_ADMIN_EMAIL +
  * BOOKS_ADMIN_INITIAL_PASSWORD; the admin must already be on a workspace's user
  * list). Existing users get their passwords set by an admin afterwards. The
  * server still starts even if this fails, so /health stays up.
  */
-/**
- * Fail fast on a misconfiguration that would weaken authentication. This runs
- * BEFORE anything starts listening: a production API with no signing secret, or
- * with the dev bypass enabled, must not serve a single request.
- */
-function assertSafeConfig(): void {
-  for (const w of authConfigWarnings()) console.warn(w);
-  const errors = authConfigErrors();
-  if (errors.length === 0) return;
-  console.error("[config] FATAL — refusing to start in production with a weakened auth path:");
-  for (const e of errors) console.error(`  • ${e}`);
-  process.exit(1);
-}
-
 async function boot(): Promise<void> {
   // Never let a destructive switch be silently on.
   console.log(workspaceResetBootNotice());
+  console.log(`[config] CORS allow-list: ${allowedOrigins.join(", ")}`);
   await ensureAuthTables();
   const adminEmail = process.env.BOOKS_ADMIN_EMAIL?.trim().toLowerCase();
   const adminPassword = process.env.BOOKS_ADMIN_INITIAL_PASSWORD;

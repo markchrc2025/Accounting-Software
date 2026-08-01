@@ -98,6 +98,76 @@ export function authConfigWarnings(env: EnvLike = process.env): string[] {
   return warnings;
 }
 
+/* ── CORS ──────────────────────────────────────────────────────────────────
+ * The portal is a different origin from this API, so cross-origin requests need
+ * an explicit allow-list. Two rules: the list is never empty in production, and
+ * the API never answers with a wildcard.
+ */
+
+/** Used when CORS_ORIGIN is not set at all: the portal hosts + local Vite. */
+export const DEFAULT_CORS_ORIGINS = [
+  "https://books.sentire.solutions",
+  "https://sentire-books.sliplane.app",
+  "http://localhost:5173",
+] as const;
+
+/** Used when CORS_ORIGIN is set but blank, OUTSIDE production only. */
+const DEV_FALLBACK_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"] as const;
+
+/**
+ * Resolve the allow-list. A wildcard is stripped rather than honoured — this
+ * API is credentialed by Bearer token and must always name its origins.
+ *
+ * Note `CORS_ORIGIN=""` is NOT nullish, so it does not fall back to the
+ * defaults; that used to collapse the list to empty and emit "*".
+ */
+export function parseCorsOrigins(env: EnvLike = process.env): string[] {
+  const raw = env.CORS_ORIGIN;
+  if (raw === undefined) return [...DEFAULT_CORS_ORIGINS];
+  const list = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s !== "*");
+  if (list.length > 0) return list;
+  // Set-but-empty (or wildcard-only): never widen to "*".
+  return isProduction(env) ? [] : [...DEV_FALLBACK_ORIGINS];
+}
+
+/** Fatal when production would be left without a usable allow-list. */
+export function corsConfigErrors(env: EnvLike = process.env): string[] {
+  if (!isProduction(env)) return [];
+  if (parseCorsOrigins(env).length > 0) return [];
+  return [
+    "CORS_ORIGIN is set but resolves to an empty allow-list. The API refuses to serve production " +
+      "traffic without naming its browser origins (it will never fall back to a wildcard). Set " +
+      'CORS_ORIGIN to a comma-separated list, e.g. "https://books.sentire.solutions".',
+  ];
+}
+
+/** Note when a wildcard was discarded, so the operator learns it did nothing. */
+export function corsConfigWarnings(env: EnvLike = process.env): string[] {
+  const raw = env.CORS_ORIGIN;
+  if (raw !== undefined && raw.split(",").some((s) => s.trim() === "*")) {
+    return [
+      '[config] ⚠ CORS_ORIGIN contains "*", which was discarded — this API always answers with an ' +
+        "explicit origin. List the browser origins instead.",
+    ];
+  }
+  return [];
+}
+
+/**
+ * Echo back ONLY a configured origin. Anything else returns null so hono emits
+ * no Access-Control-Allow-Origin header at all — previously an unknown origin
+ * got the first allowed origin echoed back, which is a header the caller can
+ * never match.
+ */
+export function corsOriginResolver(
+  allowed: readonly string[],
+): (origin: string) => string | null {
+  return (origin: string) => (allowed.includes(origin) ? origin : null);
+}
+
 /**
  * One-line boot notice so a destructive switch is never silently on. Returns
  * the message (rather than logging it) to stay testable; the caller logs it.
