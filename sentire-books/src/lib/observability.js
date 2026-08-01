@@ -9,6 +9,7 @@
  * data and bearer tokens. We send the error and the route, not the payload.
  */
 import * as Sentry from '@sentry/react';
+import { scrubEventPii, scrubBreadcrumb } from './pii.js';
 
 let enabled = false;
 
@@ -32,6 +33,10 @@ export function initErrorTracking() {
     // No session replay or performance tracing: both capture far more of a
     // bookkeeping screen than we want leaving the browser.
     tracesSampleRate: 0,
+    // Never let the SDK attach IPs, cookies or bodies of its own accord.
+    sendDefaultPii: false,
+    // Two passes: secrets, then personal data. Sentry is a DPA sub-processor,
+    // so tenant PII must not reach it.
     beforeSend(event) {
       if (event.message) event.message = scrubSecrets(event.message);
       for (const ex of event.exception?.values ?? []) {
@@ -43,7 +48,12 @@ export function initErrorTracking() {
         delete event.request.cookies;
         delete event.request.data;
       }
-      return event;
+      return scrubEventPii(event);
+    },
+    // Breadcrumbs are the easiest leak to miss: console output and every fetch
+    // URL are captured by default, and in this app both carry tenant data.
+    beforeBreadcrumb(breadcrumb) {
+      return scrubBreadcrumb(breadcrumb);
     },
   });
   enabled = true;
