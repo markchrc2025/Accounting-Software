@@ -31,8 +31,6 @@ const GROUPS = [
       { label: 'Bank',                 path: '/bank' },
       { label: 'Chart of Accounts',    path: '/coa' },
       { label: 'Tax',                  path: '/tax' },
-      { label: 'Financial Management', path: '/financial' },
-      { label: 'Fixed Assets',         path: '/assets' },
     ],
   },
   {

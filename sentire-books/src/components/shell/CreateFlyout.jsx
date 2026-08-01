@@ -24,7 +24,6 @@ const GROUPS = [
     items: [
       { icon: BookOpen,    label: 'Journal Entry',         shortcut: 'Ctrl+J', path: '/journal' },
       { icon: Building,    label: 'Bank Transaction',      shortcut: null,      path: '/bank' },
-      { icon: Package,     label: 'Fixed Asset',           shortcut: null,      path: '/assets' },
     ],
   },
   {
