@@ -124,7 +124,15 @@ describe.skipIf(!RUN)("M2.1 — invoice issuance posts to the ledger", () => {
   });
 
   afterAll(async () => {
+    // Cancel through the API FIRST, so any posted entry is reversed and the GL
+    // is left net-zero. Deleting the row alone would strand its journal entry —
+    // the API forbids exactly that (405 on DELETE), and the orphaned AR debit
+    // would show up as drift in the M2.3 reconciliation.
     for (const id of made) {
+      await withOrgContext(ctx, (tx) =>
+        tx.update(serviceInvoices).set({ appliedCents: 0 }).where(eq(serviceInvoices.id, id)),
+      );
+      await call("POST", `/invoices/${id}/cancel`, {});
       await withOrgContext(ctx, (tx) => tx.delete(serviceInvoices).where(eq(serviceInvoices.id, id)));
     }
     // Only after the invoices that reference them are gone.

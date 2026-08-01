@@ -54,6 +54,7 @@ import {
   POSTED_STATUS,
   type PostFailure,
 } from "../ledger/postCollection";
+import { arReconciliation } from "../ledger/arReconciliation";
 
 export const billingStatementRoutes = makeCrudRoutes({
   plural: "statements",
@@ -219,6 +220,25 @@ export const collectionRoutes = makeCrudRoutes({
   // Reverse-only: a posted collection is voided (which reverses its entries),
   // never hard-deleted out from under the receivable it relieved.
   disableDelete: true,
+});
+
+/**
+ * Reconcile the AR sub-ledger against the GL control account(s) — the same
+ * shape as `GET /loans/reconciliation`. The portal shows this tile only when
+ * there is an imbalance.
+ */
+collectionRoutes.get("/ar-reconciliation", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  try {
+    const result = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      (tx) => arReconciliation(tx, auth.orgId),
+    );
+    return c.json(result);
+  } catch (err) {
+    reportError(c, "arReconciliation", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
 });
 
 const postErrorResponse = (error: PostFailure, detail?: string) => {

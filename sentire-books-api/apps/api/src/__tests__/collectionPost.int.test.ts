@@ -156,7 +156,13 @@ describe.skipIf(!RUN)("M2.2 — collections post to the ledger", () => {
   });
 
   afterAll(async () => {
+    // Unwind through the API so every posted entry is reversed and the GL is
+    // left net-zero: void the collections (which reverses both entries and
+    // rolls the invoice balances back), then cancel the invoices. Deleting the
+    // rows alone would strand their journal entries and show up as drift in
+    // the M2.3 reconciliation.
     for (const id of madeCollections) {
+      await call("POST", `/collections/${id}/void`, {});
       await withOrgContext(ctx, (tx) =>
         tx.delete(collectionApplications).where(eq(collectionApplications.collectionId, id)),
       );
@@ -166,6 +172,10 @@ describe.skipIf(!RUN)("M2.2 — collections post to the ledger", () => {
       await withOrgContext(ctx, (tx) =>
         tx.delete(collectionApplications).where(eq(collectionApplications.invoiceId, id)),
       );
+      await withOrgContext(ctx, (tx) =>
+        tx.update(serviceInvoices).set({ appliedCents: 0 }).where(eq(serviceInvoices.id, id)),
+      );
+      await call("POST", `/invoices/${id}/cancel`, {});
       await withOrgContext(ctx, (tx) => tx.delete(serviceInvoices).where(eq(serviceInvoices.id, id)));
     }
     if (saved.secret === undefined) delete process.env.AUTH_JWT_SECRET;
