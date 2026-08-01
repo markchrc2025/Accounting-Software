@@ -98,6 +98,64 @@ export function authConfigWarnings(env: EnvLike = process.env): string[] {
   return warnings;
 }
 
+/* ── Sign-in throttling & lockout (M0.4) ───────────────────────────────────
+ * `POST /auth/password` is the only public write endpoint, so it is the one
+ * place online password guessing is possible. Two independent brakes:
+ *
+ *   • an in-memory failure counter per IP and per email (fast, no DB round
+ *     trip, and it covers emails that do NOT exist — so a locked response can
+ *     never be used to probe which accounts are real), and
+ *   • a durable per-credential lockout in Postgres, which survives a restart.
+ *
+ * Only FAILURES are counted, so a normal sign-in is never throttled.
+ */
+
+/** How the sign-in brakes are tuned. Overridable by env for ops and tests. */
+export interface AuthThrottleConfig {
+  /** Rolling window over which failures accumulate. */
+  windowMs: number;
+  /** Failures from one IP within the window before it is throttled. */
+  ipMaxFailures: number;
+  /** Failures against one email within the window before it is throttled. */
+  emailMaxFailures: number;
+  /** Consecutive failures against a real credential before it locks. */
+  lockoutThreshold: number;
+  /** First lockout duration; doubles for each further threshold breach. */
+  lockoutBaseMs: number;
+  /** Ceiling on the doubling. */
+  lockoutMaxMs: number;
+}
+
+const num = (raw: string | undefined, fallback: number): number => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+export function authThrottleConfig(env: EnvLike = process.env): AuthThrottleConfig {
+  return {
+    windowMs: num(env.AUTH_THROTTLE_WINDOW_MS, 15 * 60_000),
+    ipMaxFailures: num(env.AUTH_THROTTLE_IP_MAX, 20),
+    // Kept equal to the lockout threshold so a NON-existent email is throttled
+    // at the same count a real one locks — the responses stay indistinguishable.
+    emailMaxFailures: num(env.AUTH_THROTTLE_EMAIL_MAX, 5),
+    lockoutThreshold: num(env.AUTH_LOCKOUT_THRESHOLD, 5),
+    lockoutBaseMs: num(env.AUTH_LOCKOUT_BASE_MS, 15 * 60_000),
+    lockoutMaxMs: num(env.AUTH_LOCKOUT_MAX_MS, 60 * 60_000),
+  };
+}
+
+/**
+ * Lockout duration for a given failure count: base, doubling once per further
+ * threshold breach, capped. e.g. threshold 5 / base 15m → 5:15m, 10:30m,
+ * 15:60m, 20:60m.
+ */
+export function lockoutDurationMs(failures: number, cfg: AuthThrottleConfig): number {
+  const breaches = Math.floor(failures / cfg.lockoutThreshold);
+  if (breaches < 1) return 0;
+  const ms = cfg.lockoutBaseMs * 2 ** (breaches - 1);
+  return Math.min(ms, cfg.lockoutMaxMs);
+}
+
 /* ── CORS ──────────────────────────────────────────────────────────────────
  * The portal is a different origin from this API, so cross-origin requests need
  * an explicit allow-list. Two rules: the list is never empty in production, and

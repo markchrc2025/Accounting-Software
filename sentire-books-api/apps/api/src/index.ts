@@ -1,7 +1,7 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { ensureAuthTables, hasCredential } from "@sentire-books/db";
+import { detectLockoutColumns, hasCredential } from "@sentire-books/db";
 import { setPassword } from "./password";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
@@ -123,7 +123,7 @@ function assertSafeConfig(): void {
 }
 
 /**
- * Boot: make sure the credentials table exists, and — on first run — seed a
+ * Boot: report the sign-in lockout capability, and — on first run — seed a
  * password for the configured admin so there's a way in (BOOKS_ADMIN_EMAIL +
  * BOOKS_ADMIN_INITIAL_PASSWORD; the admin must already be on a workspace's user
  * list). Existing users get their passwords set by an admin afterwards. The
@@ -133,7 +133,19 @@ async function boot(): Promise<void> {
   // Never let a destructive switch be silently on.
   console.log(workspaceResetBootNotice());
   console.log(`[config] CORS allow-list: ${allowedOrigins.join(", ")}`);
-  await ensureAuthTables();
+
+  // Durable sign-in lockout needs the columns from migration 0022. If they are
+  // absent the API stays up and throttles in memory only — a missed delta must
+  // never cause a login outage — but it must be impossible to miss in the logs.
+  if (await detectLockoutColumns()) {
+    console.log("[auth] sign-in lockout: durable (credentials.failed_attempts/locked_until present)");
+  } else {
+    console.error(
+      "[auth] ⚠ sign-in lockout is IN-MEMORY ONLY — credentials.failed_attempts / locked_until are " +
+        "missing. Lockouts will not survive a restart. Apply setup/livedbdelta0022.sql (as the " +
+        "database owner) or run migration 0022_credentials.sql.",
+    );
+  }
   const adminEmail = process.env.BOOKS_ADMIN_EMAIL?.trim().toLowerCase();
   const adminPassword = process.env.BOOKS_ADMIN_INITIAL_PASSWORD;
   if (adminEmail && adminPassword && !(await hasCredential(adminEmail))) {

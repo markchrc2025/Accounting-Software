@@ -23,7 +23,7 @@ is designed to feed that one ledger.
 | | |
 |---|---|
 | **API** | Hono on Node 20, TypeScript run directly via `tsx` (no build step; `build` = `tsc --noEmit`) |
-| **Database** | PostgreSQL 15+, plain SQL migrations (22 files, `0000`–`0021`), Drizzle ORM |
+| **Database** | PostgreSQL 15+, plain SQL migrations (23 files, `0000`–`0022`), Drizzle ORM |
 | **Portal** | React 18 + Vite SPA, `react-router-dom` v6, served by nginx |
 | **Auth** | Locally-signed **HS256 JWT** (`jose`), scrypt password hashes, 8-hour tokens |
 | **Multi-tenancy** | PostgreSQL **Row-Level Security**, one policy per table, keyed on a per-transaction GUC |
@@ -31,7 +31,7 @@ is designed to feed that one ledger.
 | **Hosting** | Sliplane containers; portal at `books.sentire.solutions` |
 | **Monorepo** | `sentire-books-api/` = pnpm + Turborepo workspace (`apps/api`, `packages/db`, `packages/domain`). `sentire-books/` = **separate** npm project, not in the workspace. |
 
-**Scale of the thing:** 33 tables · 6 Postgres enums · 32 API routers · 22 portal routes ·
+**Scale of the thing:** 34 tables · 6 Postgres enums · 32 API routers · 22 portal routes ·
 19 portal modules · 5 reports · 158-account default chart of accounts.
 
 ---
@@ -300,11 +300,11 @@ The six roadmap phase documents were written earlier in the build and are **stal
 places**. All 53 claims below were independently and adversarially verified against the source —
 "Open" means absence was *proven by search*, not assumed.
 
-**Tally: 11 Built · 20 Partial · 22 Open.** (Updated as Milestone 0 lands.)
+**Tally: 13 Built · 20 Partial · 20 Open.** (Updated as Milestone 0 lands.)
 
 | Phase | Built | Partial | Open | Verdict |
 |---|---|---|---|---|
-| 1 · Pre-Launch Hardening | 2 | 2 | 5 | Mostly open — the real gate |
+| 1 · Pre-Launch Hardening | 4 | 2 | 3 | Mostly open — the real gate |
 | 2 · AI Layer | 0 | 0 | 7 | Greenfield |
 | 3 · Approvals & Controls | 0 | 7 | 2 | Machinery built, governance not |
 | 4 · Sellable MVP Modules | 7 | 4 | 2 | Mostly built |
@@ -316,8 +316,8 @@ places**. All 53 claims below were independently and adversarially verified agai
 | Item | Status | Evidence |
 |---|---|---|
 | Observability / error tracking / structured logs | **Open** | No Sentry/OTel/pino; ~30 raw `console.error` calls with no org/user/request id |
-| Rate limiting / abuse protection | **Open** | Zero matches for rate-limit/429/throttle. `POST /auth/password` has **no middleware at all** |
-| Login lockout / backoff | **Open** | `credentials` has no attempt/lock columns; no counter on failure |
+| Rate limiting / abuse protection | **Built** | ✅ **M0.4.** Per-IP and per-email failure budgets on `POST /auth/password`, returning `429` + `Retry-After`. Only failures count, so normal sign-in is unaffected. Per-process today — **TODO(M7)** shared store before running >1 instance |
+| Login lockout / backoff | **Built** | ✅ **M0.4.** `credentials.failed_attempts` / `locked_until` (migration 0022) with escalating capped backoff; the correct password is refused while locked, and state clears on success |
 | CORS tight | **Built** | ✅ **M0.3.** Production refuses to boot when the allow-list resolves empty; a configured `"*"` is discarded (with a warning) rather than honoured; and an unlisted origin now receives **no** `Access-Control-Allow-Origin` header at all — previously it was answered with the first allowed origin echoed back |
 | MFA | **Open** | No TOTP anywhere; no factor columns |
 | Session-revocation window | **Partial** | Role/membership changes: ~0 delay. **Identity revocation: up to 8h** — self-contained JWTs, no denylist/jti/token version; a password reset does not invalidate existing tokens. Nowhere documented |
@@ -429,13 +429,18 @@ Being candid here is more useful than a clean scorecard.
     the variable is exactly `"true"`; unset, blank, `"1"`, `"yes"` and `"TRUE"` all disable it.
     Confirmation is the caller's own workspace code (not a static `"RESET"`), and boot logs the
     state. Note the underlying risk it amplified — **no backup/DR posture** (item 14) — is still open.
-12. No rate limiting on the public sign-in endpoint; no lockout. Online password guessing is unbounded.
+12. ~~No rate limiting on the public sign-in endpoint; no lockout.~~ — **fixed in M0.4.** Note the
+    limiter is per-process; a multi-instance deploy multiplies an attacker's budget by the
+    instance count until **M7** moves it to a shared store.
 13. No error tracking or structured logging — an incident is invisible.
 14. No backup/DR posture written or drilled.
 15. ~~`CORS_ORIGIN=""` degrades to `Access-Control-Allow-Origin: *`.~~ — **fixed in M0.3.** Empty or
     wildcard-only in production is a fatal boot error; outside production it falls back to localhost
     origins only. The API never emits a wildcard.
-16. The `credentials` table lives outside migrations (created at boot by raw DDL).
+16. ~~The `credentials` table lives outside migrations (created at boot by raw DDL).~~ — **fixed in
+    M0.4.** Migration `0022_credentials.sql` now owns it. The old runtime DDL could never have
+    worked: the API connects as `sentire_books_app`, which lacks CREATE on schema public, so
+    `ensureAuthTables()` failed on every boot with the error swallowed by `boot()`.
 17. Deploy docs still describe **JWKS/OIDC** auth the code no longer implements, and `render.yaml`
     pins stale hosts. **Partly mitigated in M0.2:** production now refuses to boot on any
     bypass-enabling combination, and boot warns that `AUTH_JWKS_URL`/`AUTH_ISSUER` are ignored — so
@@ -481,9 +486,9 @@ Ordered by leverage, given everything above.
 4. **Close the remaining ledger-write gaps** — role-gate the loan/asset booking endpoints, disable
    the generic DELETE on those two routers, and claim the depreciation month lock *before* posting
    so a concurrent run cannot orphan an entry.
-5. **The Phase 1 gate** — ✅ the auth boot assertion landed in M0.2. Still open: rate limiting +
-   lockout on `/auth/password` (M0.4). ✅ CORS assertion landed in M0.3. Still open: error tracking
-   and structured logs (Milestone 1).
+5. **The Phase 1 gate** — ✅ M0.1 (fail-closed reset), M0.2 (auth boot assertion), M0.3 (CORS
+   assertion) and M0.4 (sign-in throttle + lockout) have landed. Still open: error tracking and
+   structured logs, and the backup/DR posture (Milestone 1).
 6. **Workflow history table** (append-only: who, when, from → to, remarks) — one table that Phase 3
    needs and Phase 5's audit log later extends. Build it once.
 7. **Attachments**, then **AR Aging** — both small, both expected; AR Aging is the only catalogued
