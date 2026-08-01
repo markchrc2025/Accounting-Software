@@ -119,8 +119,13 @@ inconsistency worth knowing about:
 `POST /loans/:id/pay` creates a Payment Voucher (Bank Transfer/Cash/Online/Auto-Debit) or a
 Check Voucher + Check Registry entry (PDC). The JE posts later — at voucher approval or check clearing.
 
-**⚠️ Does NOT post to the ledger:** Billing Statements, Service Invoices, Collections, Payment
-Schedules, Schedule Payments. These are CRUD-only today. See §8.
+**Billing / AR (Milestone 2):** `POST /service-invoices/:id/issue` posts the revenue entry
+(T1 VATable · T2 non-VAT · T3 exempt/zero-rated); `/cancel` reverses it.
+`POST /collections/:id/post` relieves the receivable and books cash + creditable withholding
+tax; `/void` reverses both entries. Both go through `postJournalEntryCore()`.
+
+**⚠️ Does NOT post to the ledger:** Billing Statements (presentation-only over invoices, by
+design — posting both would double-count revenue), Payment Schedules, Schedule Payments.
 
 ---
 
@@ -157,8 +162,24 @@ provides list / create / update / delete, server-assigned document numbers, and 
 ### Billing & AR
 
 `/billing-statements` · `/service-invoices` · `/collections` · `/payment-schedules` ·
-`/schedule-payments` — all factory CRUD with generated document numbers (`BS`, `IS`, `COL`, `PS`)
-and DB-generated `balanceCents` / `unappliedCents` columns.
+`/schedule-payments` — factory CRUD with generated document numbers (`BS`, `IS`, `COL`, `PS`)
+and DB-generated `balanceCents` / `unappliedCents` / `arReliefCents` / `reliefCents` columns.
+
+Invoices and collections additionally post to the ledger and are **reverse-only** (405 on
+`DELETE`, like loans and fixed assets):
+
+| Route | Key capability |
+|---|---|
+| `POST /service-invoices/:id/issue` | Posts T1/T2/T3 from the invoice's own `vatTreatment`; snapshots the AR / income / output-VAT codes used |
+| `POST /service-invoices/:id/cancel` | Reverses the issuance entry; 409 once a collection is applied |
+| `GET /service-invoices/aging?asOf=` | AR aging — Current / 1–30 / 31–60 / 61–90 / 90+ per customer |
+| `POST /collections/:id/post` | DR Cash + DR Creditable Withholding Tax / CR AR; accrues Sec. 116 percentage tax on non-VAT receipts |
+| `POST /collections/:id/void` | Reverses both entries, rolls invoice balances back |
+| `GET /collections/ar-reconciliation` | AR sub-ledger ⇄ GL control, with the residual |
+| `GET /reports/tax-registry?from=&to=` | Input **and** output tax, every period, one query |
+
+`collection_applications` links a collection to the invoices it settles (many-to-many), so a
+single receipt can clear several invoices and AR aging stays invoice-accurate.
 
 ### Financial management
 
@@ -197,7 +218,7 @@ Shell: `TopBar` (company selector, ⌘K search trigger, approvals badge) + 80px 
 | **Journal** | `/journal` | Full workflow UI, bulk actions (Submit / Clear / Post / **Reverse** / **Void**), confirmations |
 | **Bank** | `/bank` | Bank Balances · Credit Lines · Bank Transactions · Reconciliation |
 | **Chart of Accounts** | `/coa` | Hierarchical COA, Excel import |
-| **Tax** | `/tax` | Tax Entries · Tax Registry · Tax Summary |
+| **Tax** | `/tax` | Tax Entries · Tax Registry · Tax Summary — server-side, every period, output + input VAT |
 | **Financial Management** | `/financial` | **7 tabs** — Dashboard · Loan Registry · Amortization · Payment History · Calendar · Reports · Settings. Client-side amortization engine (`loanMonitoring.js`), customisable dashboard scorecards, sub-ledger⇄GL reconciliation tile |
 | **Fixed Assets** | `/assets` | **8 tabs** — Dashboard · Assets · Asset Types · Depreciation Schedule · Post Depreciation · Installments · Installment Calendar · Installment Payment |
 | **Billing Book** | `/billing` | Billing statements + `/billing/:clientId` client view |
@@ -356,8 +377,8 @@ layer above it turns out to be decorative.
 | Trial Balance · General Ledger · Balance Sheet · Income Statement · P&L | **Built** |
 | **AR Aging** | **Open** — no fetch branch, no API helper; renders empty. The balances and due dates it needs already exist, so it is unimplemented, not blocked |
 | **Attachments / supporting documents** | **Open** — zero code, zero table, zero policy |
-| Billing / Service Invoices | **Partial** — data model and screens are real; missing server-side tax computation, server-enforced lifecycle, and **any AR → GL posting** |
-| Collections | **Built** — payment methods and applied/unapplied tracking work as specified (but post nothing to the ledger) |
+| Billing / Service Invoices | **Built** — issuance posts T1/T2/T3 to the GL, VAT decomposition is DB-enforced (`amount = net + vat`), cancel reverses. Portal issue/cancel UI is still to come |
+| Collections | **Built** — payment methods, applied/unapplied tracking, and GL posting with EWT captured on the net-of-VAT base. Portal post/void UI is still to come |
 | Bank module + reconciliation | **Partial** — records a beginning/ending snapshot per period but performs **no actual reconciliation**; a leftover Firestore call makes the reconciled date always render `—` |
 | BIR tax registry | **Partial** — rates, groups and a 3-tab page, but the entries view **truncates at the 50 most recent vouchers** and covers only the purchases/EWT side, so **output VAT never appears** |
 | Disbursement / vouchers / checks | **Built** |
@@ -409,9 +430,12 @@ Being candid here is more useful than a clean scorecard.
 
 **Correctness risks**
 
-5. **Billing, Service Invoices and Collections never touch the general ledger.** Revenue and AR are
-   invisible to the Balance Sheet. This is the biggest accounting gap — and the exact pattern
-   already solved twice (loans, fixed assets). It also starves the tax registry of **output VAT**.
+5. ~~**Billing, Service Invoices and Collections never touch the general ledger.**~~
+   **RESOLVED in Milestone 2.** Issuing an invoice posts DR AR / CR Revenue (+ Output VAT);
+   posting a collection relieves the receivable and books cash + creditable withholding tax.
+   The tax registry now has its **output VAT** side, and AR reconciles to the GL control account.
+   Billing Statements remain deliberately unposted — they summarise invoices, and posting both
+   would double-count revenue.
 6. **Depreciation posting has an ordering bug.** The journal entry is posted *before* the
    one-per-month unique lock is claimed, so a duplicate or concurrent post creates a real
    depreciation entry, then catches the 409 and reports "Already posted" — **leaving an orphan

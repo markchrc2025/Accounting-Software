@@ -253,6 +253,36 @@ export const collectionsApi = crud('/collections', 'collections', 'collection');
 export const paymentSchedulesApi = crud('/payment-schedules', 'schedules', 'schedule');
 export const schedulePaymentsApi = crud('/schedule-payments', 'payments', 'payment');
 
+/** Issue a draft invoice — posts its revenue entry (T1/T2/T3). */
+export const issueInvoice = (id, opts) =>
+  apiFetch(`/service-invoices/${id}/issue`, { method: 'POST', body: JSON.stringify(opts || {}) });
+/** Cancel an invoice — reverses its issuance entry. Never deleted. */
+export const cancelInvoice = (id) =>
+  apiFetch(`/service-invoices/${id}/cancel`, { method: 'POST', body: '{}' });
+/** Post a collection against one or more invoices. */
+export const postCollection = (id, opts) =>
+  apiFetch(`/collections/${id}/post`, { method: 'POST', body: JSON.stringify(opts || {}) });
+/** Void a posted collection — reverses its entries and rolls the AR back. */
+export const voidCollection = (id) =>
+  apiFetch(`/collections/${id}/void`, { method: 'POST', body: '{}' });
+/** AR sub-ledger vs GL control — the reconciliation tile. */
+export const arReconciliation = () => apiFetch('/collections/ar-reconciliation');
+/** AR aging, bucketed Current / 1–30 / 31–60 / 61–90 / 90+. */
+export const arAging = (asOf) =>
+  apiFetch(`/service-invoices/aging${asOf ? `?asOf=${asOf}` : ''}`);
+
+/**
+ * Tax registry — every period, both sides, in ONE request.
+ *
+ * Replaces the old client-side derivation, which hydrated only the 50 most
+ * recent Payment/Check vouchers (one request each) and had no sales side at
+ * all. Omit the range to cover the whole ledger.
+ */
+export const getTaxRegistry = ({ from, to } = {}) => {
+  const qs = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&');
+  return apiFetch(`/reports/tax-registry${qs ? `?${qs}` : ''}`);
+};
+
 export const getGeneralLedger = (p) => apiFetch(`/reports/general-ledger${periodQuery(p)}`);
 export const getIncomeStatement = (p) => apiFetch(`/reports/income-statement${periodQuery(p)}`);
 export const getBalanceSheet = (asOf) =>
