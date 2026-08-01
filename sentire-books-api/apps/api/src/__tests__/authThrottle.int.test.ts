@@ -19,7 +19,7 @@ process.env.AUTH_LOCKOUT_BASE_MS = "60000";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { sql } from "drizzle-orm";
-import { db, ensureAuthTables, getCredential } from "@sentire-books/db";
+import { db, getCredential } from "@sentire-books/db";
 import { setPassword } from "../password";
 
 const RUN = !!process.env.DATABASE_URL;
@@ -47,7 +47,6 @@ const clearLockState = (email: string) =>
 
 describe.skipIf(!RUN)("POST /auth/password — throttle + lockout", () => {
   beforeAll(async () => {
-    await ensureAuthTables();
     await setPassword(EMAIL, GOOD);
   });
 

@@ -14,7 +14,8 @@
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate",
     "seed": "tsx src/seed.ts",
-    "studio": "drizzle-kit studio"
+    "studio": "drizzle-kit studio",
+    "whoami": "tsx src/whoami.ts"
   },
   "dependencies": {
     "@sentire-books/domain": "workspace:*",
