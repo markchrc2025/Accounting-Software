@@ -10,7 +10,7 @@ services:
     rootDir: scalebooks
     buildCommand: npm install -g pnpm@9 && pnpm install && pnpm --filter @scalebooks/api build
     startCommand: pnpm --filter @scalebooks/api start
-    healthCheckPath: /health
+    healthCheckPath: /live
     autoDeploy: true
     envVars:
       # DB URL as the RLS-bound sentire_books_app role — set in the dashboard,
