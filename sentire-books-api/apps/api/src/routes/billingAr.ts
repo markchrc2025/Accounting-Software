@@ -55,6 +55,7 @@ import {
   type PostFailure,
 } from "../ledger/postCollection";
 import { arReconciliation } from "../ledger/arReconciliation";
+import { arAging } from "../ledger/arAging";
 
 export const billingStatementRoutes = makeCrudRoutes({
   plural: "statements",
@@ -237,6 +238,33 @@ collectionRoutes.get("/ar-reconciliation", requireAuth, async (c) => {
     return c.json(result);
   } catch (err) {
     reportError(c, "arReconciliation", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+/**
+ * AR Aging as of a date (defaults to today), bucketed Current / 1–30 / 31–60 /
+ * 61–90 / 90+ per customer.
+ *
+ * Reads the same outstanding-invoice basis as the reconciliation, so the aging
+ * total always equals the AR sub-ledger outstanding — and the GL control when
+ * the two are reconciled.
+ */
+serviceInvoiceRoutes.get("/aging", requireAuth, async (c) => {
+  const auth = c.get("auth");
+  const asOfRaw = c.req.query("asOf");
+  if (asOfRaw && !/^\d{4}-\d{2}-\d{2}$/.test(asOfRaw)) {
+    return c.json({ error: "validation_error", detail: "asOf must be YYYY-MM-DD." }, 400);
+  }
+  const asOf = asOfRaw ?? new Date().toISOString().slice(0, 10);
+  try {
+    const result = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      (tx) => arAging(tx, auth.orgId, asOf),
+    );
+    return c.json(result);
+  } catch (err) {
+    reportError(c, "arAging", err);
     return c.json({ error: "internal_error" }, 500);
   }
 });
