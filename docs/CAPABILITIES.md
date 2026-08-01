@@ -32,7 +32,7 @@ is designed to feed that one ledger.
 | **Monorepo** | `sentire-books-api/` = pnpm + Turborepo workspace (`apps/api`, `packages/db`, `packages/domain`). `sentire-books/` = **separate** npm project, not in the workspace. |
 
 **Scale of the thing:** 34 tables · 6 Postgres enums · 32 API routers · 22 portal routes ·
-19 portal modules · 5 reports · 158-account default chart of accounts.
+19 portal modules · 5 reports · 160-account default chart of accounts.
 
 ---
 
@@ -378,7 +378,7 @@ Retention schedule: **Open**.
 | Item | Status |
 |---|---|
 | Automated tenant provisioning | **Open** — the bootstrap SQL hard-codes a single tenant UUID and its admin-mapping insert is commented out, so it provisions exactly one org. No provisioning endpoint |
-| Default chart seeding | **Partial** — 158 accounts, idempotent via the seed script; the reset path reinstalls them with a bare insert and no conflict handling |
+| Default chart seeding | **Partial** — 160 accounts, idempotent via the seed script; the reset path reinstalls them with a bare insert and no conflict handling |
 | One email → many workspaces | **Partial** — membership substrate, workspace resolution and sign-in picker are real; every admin surface is still per-workspace |
 | Connection pooling | **Built** — `prepare:false` makes a transaction pooler safe (the current deployment connects directly, with no pooler) |
 | Workspace data admin | **Built** — export / import / factory reset across 30 tables. ✅ **Fixed in M0.1:** the reset switch is now fail-closed (enabled only when `ALLOW_WORKSPACE_RESET` is exactly `"true"`), confirmation is the caller's own workspace code, and the boot log always states whether reset is enabled |
@@ -508,7 +508,7 @@ Ordered by leverage, given everything above.
 # API (pnpm workspace)
 cd sentire-books-api
 pnpm install
-pnpm --filter @sentire-books/db seed          # idempotent: demo org + 158-account chart
+pnpm --filter @sentire-books/db seed          # idempotent: demo org + 160-account chart
 pnpm --filter @sentire-books/api dev          # tsx watch, :8787
 
 # Portal (separate npm project)

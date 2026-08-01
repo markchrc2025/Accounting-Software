@@ -1,7 +1,7 @@
 -- ════════════════════════════════════════════════════════════════════════════
 -- ScaleBooks — default Chart of Accounts seed (GENERATED — do not edit by hand).
 -- Source: Zoho Books export. Regenerate with setup/generate_coa_sql.py.
--- 158 accounts for org a0000000-0000-0000-0000-000000000001.
+-- 160 accounts for org a0000000-0000-0000-0000-000000000001.
 -- Requires the accounts-table extension columns (see 0005_accounts_extend.sql).
 -- ════════════════════════════════════════════════════════════════════════════
 
@@ -146,9 +146,9 @@ INSERT INTO accounts (org_id, code, name, type, subtype, description, normal_bal
   ('a0000000-0000-0000-0000-000000000001','2003001','Deferred Tax Liability','liability','Tax Liability',NULL,'credit',true),
   ('a0000000-0000-0000-0000-000000000001','2003002','Income Tax Payable','liability','Tax Liability',NULL,'credit',true),
   ('a0000000-0000-0000-0000-000000000001','2003003','Output Tax','liability','Tax Liability','The amount of money charged as Tax on your sales.','credit',true),
-  ('a0000000-0000-0000-0000-000000000001','2004001','Salaries and Wages Payable','liability','Other Current Liability',NULL,'credit',true),
-  ('a0000000-0000-0000-0000-000000000001','2004002','Final Pay Payable Deployed','liability','Other Current Liability',NULL,'credit',true),
-  ('a0000000-0000-0000-0000-000000000001','2004003','Final Pay Payable','liability','Other Current Liability',NULL,'credit',true),
+  ('a0000000-0000-0000-0000-000000000001','2005001','Salaries and Wages Payable','liability','Other Current Liability',NULL,'credit',true),
+  ('a0000000-0000-0000-0000-000000000001','2005002','Final Pay Payable Deployed','liability','Other Current Liability',NULL,'credit',true),
+  ('a0000000-0000-0000-0000-000000000001','2005003','Final Pay Payable','liability','Other Current Liability',NULL,'credit',true),
   ('a0000000-0000-0000-0000-000000000001','2008001','SSS EmployER Contribution','liability','Other Current Liability',NULL,'credit',true),
   ('a0000000-0000-0000-0000-000000000001','2008002','HDMF EmployER Contribution','liability','Other Current Liability',NULL,'credit',true),
   ('a0000000-0000-0000-0000-000000000001','2008003','PHIC EmployER Contribution','liability','Other Current Liability',NULL,'credit',true),
@@ -163,7 +163,9 @@ INSERT INTO accounts (org_id, code, name, type, subtype, description, normal_bal
   ('a0000000-0000-0000-0000-000000000001','2101003','Final Withholding Tax Payable','liability','Tax Liability',NULL,'credit',true),
   ('a0000000-0000-0000-0000-000000000001','2600001','Unearned Revenue','liability','Other Current Liability','A liability account that reports amounts received in advance of providing goods or services. When the goods or services are provided, this account balance is decreased and a revenue account is increased.','credit',true),
   ('a0000000-0000-0000-0000-000000000001','2700001','Opening Balance Adjustments','liability','Other Current Liability','This account will hold the difference in the debits and credits entered during the opening balance.','credit',true),
-  ('a0000000-0000-0000-0000-000000000001','2800001','Post-Dated Checks Issued','liability','Other Current Liability',NULL,'credit',true)
+  ('a0000000-0000-0000-0000-000000000001','2800001','Post-Dated Checks Issued','liability','Other Current Liability',NULL,'credit',true),
+  ('a0000000-0000-0000-0000-000000000001','1009002','Creditable Withholding Tax','asset','Tax Asset','Expanded withholding tax withheld by clients on our income payments (BIR Form 2307), creditable against income tax due.','debit',true),
+  ('a0000000-0000-0000-0000-000000000001','2003004','Percentage Tax Payable','liability','Tax Liability','Percentage tax due under Sec. 116 for non-VAT registered taxpayers.','credit',true)
 ON CONFLICT (org_id, name) DO NOTHING;
 
 -- Resolve the parent hierarchy by name (parents are referenced by name in the export).

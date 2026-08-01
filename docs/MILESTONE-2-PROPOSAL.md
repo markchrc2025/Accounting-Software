@@ -1,6 +1,22 @@
 # Milestone 2 — Billing / AR → General Ledger
 
-**Status: PROPOSAL — no code written. Awaiting approval.**
+**Status: APPROVED 2026-08-01. M2.0 landed; M2.1 not started.**
+
+| Decision | Answer |
+|---|---|
+| VAT basis (§2.1) | **Accrual at issuance** (EOPT / RA 11976). Build T1/T2/T3 on that basis. |
+| New accounts (§4) | `1009002` Creditable Withholding Tax, `2003004` Percentage Tax Payable. **`2003005` Deferred Output VAT is NOT added** — only if the basis ever changes to collection. |
+| Duplicate-code renumbering (§0) | Payroll liabilities move; **equity keeps `2004001-3`**. |
+| Production check queries (§0) | Owner is running them. **Correcting reversals are on hold** until that output arrives. |
+| `collection_applications` (§5) | **Build it** — many-to-many collection ↔ invoice. |
+| Billing statements (§8) | **Presentation-only. Never posted.** |
+| Percentage tax (§2.3) | Accrued **on collection**. |
+| Template selection | Driven by the invoice's own `vat_treatment` / `vat_cents` — **no org-level VAT flag**. See the note below §2.3. |
+
+**M2.0 is complete** (fail-closed `resolveAccountCodes()`, three `financial.ts`
+call sites repointed, chart collisions renumbered, the two new accounts added,
+migration `0023_account_codes.sql`, 10 integration tests). Everything from §5
+onward is still proposal.
 
 Every account code, table column and behaviour described below was read out of the
 repo or verified against a real Postgres instance with the 158-account chart
@@ -206,6 +222,36 @@ analogy with VAT, so it is called out explicitly here.
 **CONFIRM:** whether EOPT also moved Sec. 116 to an accrual/"gross sales" basis.
 I propose accruing on collection (the conservative, long-standing reading) and
 would rather your advisor confirm than have me guess.
+
+### 2.4 Template selection comes from the invoice, not an org flag — confirmed sufficient
+
+Asked and answered: **yes, `vat_treatment` + `vat_cents` are sufficient to pick
+T1/T2/T3**, and per-invoice is the better choice.
+
+| `vat_treatment` | `vat_cents` | Template | Percentage tax on collection? |
+|---|---|---|---|
+| `vatable` | > 0 | **T1** | no |
+| `exempt` | 0 | **T3** | no |
+| `zero_rated` | 0 | **T3** | no |
+| `none` (non-VAT taxpayer) | 0 | **T2** | **yes → T2a** |
+
+The four-value enum carries strictly more information than a boolean org flag
+would. All three of `exempt`, `zero_rated` and `none` have `vat_cents = 0` and
+produce an identical journal entry, but they diverge downstream — only `none`
+triggers the percentage-tax accrual, and the VAT return splits the other two
+apart. A single org-level "is VAT-registered" flag could not express that, and a
+VAT-registered tenant can legitimately issue exempt or zero-rated sales.
+
+Per-invoice also survives the case an org-level flag handles worst: a tenant
+crossing the ₱3M VAT-registration threshold mid-year. Invoices issued before and
+after the switch keep their own treatment, and history does not get rewritten by
+a settings change.
+
+**One thing the invoice cannot supply: the percentage-tax RATE** (currently 3%).
+It is not a property of the invoice. Proposed for M2.2 — resolve it from the
+existing `tax_rates` table, falling back to a documented constant, rather than
+hardcoding. Flagging now because it is the one input this design does not
+already have a home for.
 
 ---
 
