@@ -7,7 +7,16 @@
  * exact "true".
  */
 import { describe, it, expect } from "vitest";
-import { isWorkspaceResetEnabled, isProduction, workspaceResetBootNotice } from "../config";
+import {
+  isWorkspaceResetEnabled,
+  isProduction,
+  workspaceResetBootNotice,
+  authConfigErrors,
+  authConfigWarnings,
+} from "../config";
+
+const PROD = { NODE_ENV: "production" } as const;
+const SECRET = "a-real-signing-secret";
 
 describe("isWorkspaceResetEnabled — fail-closed", () => {
   it("is enabled ONLY for an exact 'true'", () => {
@@ -62,5 +71,72 @@ describe("workspaceResetBootNotice", () => {
     });
     expect(msg).toContain("ENABLED");
     expect(msg).not.toContain("PRODUCTION");
+  });
+});
+
+/* ── M0.2: production must refuse to boot with a weakened auth path ───────── */
+
+describe("authConfigErrors — production boot assertion", () => {
+  it("passes a correctly configured production environment", () => {
+    expect(authConfigErrors({ ...PROD, AUTH_JWT_SECRET: SECRET })).toEqual([]);
+  });
+
+  it("passes when the bypass flag is explicitly off in production", () => {
+    expect(
+      authConfigErrors({ ...PROD, AUTH_JWT_SECRET: SECRET, AUTH_DEV_BYPASS: "false" }),
+    ).toEqual([]);
+  });
+
+  it("is fatal in production when AUTH_JWT_SECRET is missing", () => {
+    const errors = authConfigErrors(PROD);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("AUTH_JWT_SECRET");
+  });
+
+  it("is fatal in production when the dev bypass is enabled — even WITH a secret", () => {
+    const errors = authConfigErrors({ ...PROD, AUTH_JWT_SECRET: SECRET, AUTH_DEV_BYPASS: "true" });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("AUTH_DEV_BYPASS");
+  });
+
+  it("reports BOTH problems for the fully bypassable combination", () => {
+    // No secret + bypass on = any x-user-id header authenticates. The worst case.
+    const errors = authConfigErrors({ ...PROD, AUTH_DEV_BYPASS: "true" });
+    expect(errors).toHaveLength(2);
+    expect(errors.join(" ")).toContain("AUTH_JWT_SECRET");
+    expect(errors.join(" ")).toContain("AUTH_DEV_BYPASS");
+  });
+
+  it("never blocks a non-production boot", () => {
+    expect(authConfigErrors({ AUTH_DEV_BYPASS: "true" })).toEqual([]);
+    expect(authConfigErrors({ NODE_ENV: "development", AUTH_DEV_BYPASS: "true" })).toEqual([]);
+    expect(authConfigErrors({})).toEqual([]);
+  });
+});
+
+describe("authConfigWarnings", () => {
+  it("warns that AUTH_JWKS_URL is read nowhere", () => {
+    const w = authConfigWarnings({ ...PROD, AUTH_JWT_SECRET: SECRET, AUTH_JWKS_URL: "https://x/jwks" });
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain("IGNORED");
+  });
+
+  it("names both stale variables when both are set", () => {
+    const w = authConfigWarnings({ AUTH_JWKS_URL: "https://x/jwks", AUTH_ISSUER: "https://x" });
+    expect(w[0]).toContain("AUTH_JWKS_URL");
+    expect(w[0]).toContain("AUTH_ISSUER");
+  });
+
+  it("flags an active dev bypass outside production", () => {
+    const w = authConfigWarnings({ AUTH_DEV_BYPASS: "true" });
+    expect(w.join(" ")).toContain("DEV BYPASS");
+  });
+
+  it("stays quiet when the bypass flag is set but a secret makes it unreachable", () => {
+    expect(authConfigWarnings({ AUTH_DEV_BYPASS: "true", AUTH_JWT_SECRET: SECRET })).toEqual([]);
+  });
+
+  it("stays quiet on a clean environment", () => {
+    expect(authConfigWarnings({ AUTH_JWT_SECRET: SECRET })).toEqual([]);
   });
 });

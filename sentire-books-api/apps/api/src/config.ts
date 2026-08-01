@@ -36,6 +36,69 @@ export function isProduction(
 }
 
 /**
+ * Fatal auth misconfigurations. The API must refuse to start rather than serve
+ * production traffic with a weakened or absent authentication path.
+ *
+ * The dev bypass in `auth.ts` is reachable only when AUTH_JWT_SECRET is unset
+ * AND AUTH_DEV_BYPASS is exactly "true" — it trusts an unauthenticated
+ * `x-user-id` header. Both halves are treated as fatal in production
+ * independently, so the bypass cannot become reachable through a later edit or
+ * a half-applied environment.
+ *
+ * Returns messages instead of throwing so the assertion stays unit-testable;
+ * the caller decides to exit.
+ */
+export function authConfigErrors(env: EnvLike = process.env): string[] {
+  if (!isProduction(env)) return [];
+  const errors: string[] = [];
+  if (!env.AUTH_JWT_SECRET) {
+    errors.push(
+      "AUTH_JWT_SECRET is not set. In production the API must verify its own signed tokens; " +
+        "without it every request fails closed and, if AUTH_DEV_BYPASS were set, an unauthenticated " +
+        "x-user-id header would be trusted instead.",
+    );
+  }
+  if (env.AUTH_DEV_BYPASS === "true") {
+    errors.push(
+      'AUTH_DEV_BYPASS="true" is set. That is a local-development escape which trusts an ' +
+        "unauthenticated x-user-id header. It must never be set in production — remove it from the " +
+        "environment.",
+    );
+  }
+  return errors;
+}
+
+/**
+ * Non-fatal auth configuration notes.
+ *
+ * AUTH_JWKS_URL / AUTH_ISSUER are read NOWHERE in this codebase — the API signs
+ * and verifies its own HS256 tokens via AUTH_JWT_SECRET. They survive only in
+ * stale deploy docs and render.yaml, so an operator can set them and believe
+ * auth is configured when it is not. Warn loudly.
+ *
+ * TODO(M6.5): correct docs/DEPLOY-SLIPLANE.md, docs/SYSTEM-DESIGN.md and
+ * render.yaml, which still describe the removed JWKS/OIDC model.
+ */
+export function authConfigWarnings(env: EnvLike = process.env): string[] {
+  const warnings: string[] = [];
+  const stale = ["AUTH_JWKS_URL", "AUTH_ISSUER"].filter((k) => env[k]);
+  if (stale.length) {
+    warnings.push(
+      `[config] ⚠ ${stale.join(" and ")} ${stale.length > 1 ? "are" : "is"} set but IGNORED — ` +
+        "this API verifies its own HS256 tokens via AUTH_JWT_SECRET. The deploy docs that ask for " +
+        "these are stale (TODO M6.5). Setting them does not configure authentication.",
+    );
+  }
+  if (!isProduction(env) && !env.AUTH_JWT_SECRET && env.AUTH_DEV_BYPASS === "true") {
+    warnings.push(
+      "[config] ⚠ auth DEV BYPASS is active — an unauthenticated x-user-id header is trusted. " +
+        "Local development only.",
+    );
+  }
+  return warnings;
+}
+
+/**
  * One-line boot notice so a destructive switch is never silently on. Returns
  * the message (rather than logging it) to stay testable; the caller logs it.
  */

@@ -40,7 +40,7 @@ import {
   weeklyProjectionRoutes,
   creditLineRoutes,
 } from "./routes/financial";
-import { workspaceResetBootNotice } from "./config";
+import { workspaceResetBootNotice, authConfigErrors, authConfigWarnings } from "./config";
 
 const app = new Hono();
 
@@ -112,6 +112,20 @@ app.route("/credit-lines", creditLineRoutes);
  * list). Existing users get their passwords set by an admin afterwards. The
  * server still starts even if this fails, so /health stays up.
  */
+/**
+ * Fail fast on a misconfiguration that would weaken authentication. This runs
+ * BEFORE anything starts listening: a production API with no signing secret, or
+ * with the dev bypass enabled, must not serve a single request.
+ */
+function assertSafeConfig(): void {
+  for (const w of authConfigWarnings()) console.warn(w);
+  const errors = authConfigErrors();
+  if (errors.length === 0) return;
+  console.error("[config] FATAL — refusing to start in production with a weakened auth path:");
+  for (const e of errors) console.error(`  • ${e}`);
+  process.exit(1);
+}
+
 async function boot(): Promise<void> {
   // Never let a destructive switch be silently on.
   console.log(workspaceResetBootNotice());
@@ -123,6 +137,9 @@ async function boot(): Promise<void> {
     console.log(`[auth] seeded initial credential for ${adminEmail}`);
   }
 }
+
+// Config assertions run first — a fatal one exits non-zero without listening.
+assertSafeConfig();
 
 boot()
   .catch((e) => console.error("[boot] auth setup failed:", e))
