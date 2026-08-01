@@ -300,11 +300,11 @@ The six roadmap phase documents were written earlier in the build and are **stal
 places**. All 53 claims below were independently and adversarially verified against the source —
 "Open" means absence was *proven by search*, not assumed.
 
-**Tally: 9 Built · 22 Partial · 22 Open.**
+**Tally: 10 Built · 21 Partial · 22 Open.** (Updated as Milestone 0 lands.)
 
 | Phase | Built | Partial | Open | Verdict |
 |---|---|---|---|---|
-| 1 · Pre-Launch Hardening | 0 | 4 | 5 | Mostly open — the real gate |
+| 1 · Pre-Launch Hardening | 1 | 3 | 5 | Mostly open — the real gate |
 | 2 · AI Layer | 0 | 0 | 7 | Greenfield |
 | 3 · Approvals & Controls | 0 | 7 | 2 | Machinery built, governance not |
 | 4 · Sellable MVP Modules | 7 | 4 | 2 | Mostly built |
@@ -322,7 +322,7 @@ places**. All 53 claims below were independently and adversarially verified agai
 | MFA | **Open** | No TOTP anywhere; no factor columns |
 | Session-revocation window | **Partial** | Role/membership changes: ~0 delay. **Identity revocation: up to 8h** — self-contained JWTs, no denylist/jti/token version; a password reset does not invalidate existing tokens. Nowhere documented |
 | Backup / PITR / RPO / RTO / restore drill | **Open** | No backup, PITR, RPO, RTO or DR content in any doc |
-| Boot assertion on auth misconfig | **Partial** | Dev bypass is structurally unreachable when `AUTH_JWT_SECRET` is set (JWT branch returns first) and fails closed when neither is set — **but there is no startup assertion**, and the deploy docs still instruct setting `AUTH_JWKS_URL`, which the code no longer reads |
+| Boot assertion on auth misconfig | **Built** | ✅ **M0.2.** Production refuses to start (exit 1, nothing listening) when `AUTH_JWT_SECRET` is missing **or** `AUTH_DEV_BYPASS="true"` — treated as fatal independently, so the bypass cannot become reachable through a later edit. Boot also warns that `AUTH_JWKS_URL`/`AUTH_ISSUER` are read nowhere. The stale docs themselves remain TODO (M6.5) |
 | Secret rotation note | **Partial** | One sentence in `.env.example`; no cadence, owner, or procedure |
 
 ### Phase 2 — AI Layer → **entirely OPEN** (greenfield)
@@ -435,8 +435,10 @@ Being candid here is more useful than a clean scorecard.
 15. `CORS_ORIGIN=""` degrades to `Access-Control-Allow-Origin: *`.
 16. The `credentials` table lives outside migrations (created at boot by raw DDL).
 17. Deploy docs still describe **JWKS/OIDC** auth the code no longer implements, and `render.yaml`
-    pins stale hosts. An operator following them could set `AUTH_JWKS_URL` (ignored) and leave
-    `AUTH_DEV_BYPASS=true` (then honoured) — a bypassable API.
+    pins stale hosts. **Partly mitigated in M0.2:** production now refuses to boot on any
+    bypass-enabling combination, and boot warns that `AUTH_JWKS_URL`/`AUTH_ISSUER` are ignored — so
+    following the stale docs fails loudly instead of silently. **Correcting the docs themselves is
+    still open (M6.5).**
 18. A leftover Firestore call (`.toDate?.()`) in the Bank UI makes the reconciled date always `—`.
 
 **Product stubs (visible but not real)**
@@ -477,9 +479,9 @@ Ordered by leverage, given everything above.
 4. **Close the remaining ledger-write gaps** — role-gate the loan/asset booking endpoints, disable
    the generic DELETE on those two routers, and claim the depreciation month lock *before* posting
    so a concurrent run cannot orphan an entry.
-5. **The Phase 1 gate** — rate limiting + lockout on `/auth/password`, error tracking, structured
-   logs, a boot assertion that refuses to start when `AUTH_DEV_BYPASS=true` outside dev, and a
-   `CORS_ORIGIN` non-empty assertion.
+5. **The Phase 1 gate** — ✅ the auth boot assertion landed in M0.2. Still open: rate limiting +
+   lockout on `/auth/password` (M0.4), a `CORS_ORIGIN` non-empty assertion (M0.3), error tracking
+   and structured logs (Milestone 1).
 6. **Workflow history table** (append-only: who, when, from → to, remarks) — one table that Phase 3
    needs and Phase 5's audit log later extends. Build it once.
 7. **Attachments**, then **AR Aging** — both small, both expected; AR Aging is the only catalogued
