@@ -584,9 +584,19 @@ export const serviceInvoices = pgTable(
     siDate: date("si_date").notNull(),
     dueDate: date("due_date"),
     amountCents: bigint("amount_cents", { mode: "number" }).notNull().default(0),
+    /** VAT-exclusive tax base. DB CHECK: amountCents = netCents + vatCents. */
+    netCents: bigint("net_cents", { mode: "number" }).notNull().default(0),
+    /** Output VAT. Zero for exempt / zero-rated / non-VAT invoices. */
+    vatCents: bigint("vat_cents", { mode: "number" }).notNull().default(0),
+    /** 'vatable' | 'exempt' | 'zero_rated' | 'none' — drives the VAT return
+     *  split and the Sec. 116 accrual; not recoverable from the journal entry. */
+    vatTreatment: text("vat_treatment").notNull().default("none"),
     taxType: text("tax_type").notNull().default("N/A"),
     ewtRate: numeric("ewt_rate", { precision: 9, scale: 4 }).notNull().default("0"),
     incomeAccountCode: text("income_account_code"),
+    /** Snapshotted at issuance so later contact edits cannot move history. */
+    arAccountCode: text("ar_account_code"),
+    outputVatAccountCode: text("output_vat_account_code"),
     billingStatementId: text("billing_statement_id"),
     appliedCents: bigint("applied_cents", { mode: "number" }).notNull().default(0),
     balanceCents: bigint("balance_cents", { mode: "number" }),
@@ -595,6 +605,9 @@ export const serviceInvoices = pgTable(
     reviewedBy: text("reviewed_by"),
     approvedBy: text("approved_by"),
     rejectReason: text("reject_reason"),
+    bookingJournalEntryId: uuid("booking_journal_entry_id"),
+    bookedAt: timestamp("booked_at", { withTimezone: true }),
+    bookingMode: text("booking_mode"),
     createdBy: text("created_by").references(() => appUsers.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
