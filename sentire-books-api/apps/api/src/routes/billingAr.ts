@@ -18,6 +18,7 @@ import {
   zServiceInvoiceIssue,
   zCollectionInput,
   zCollectionUpdate,
+  zCollectionPost,
   zPaymentScheduleInput,
   zPaymentScheduleUpdate,
   zSchedulePaymentInput,
@@ -47,6 +48,12 @@ import {
   ISSUED_STATUS,
   type IssueFailure,
 } from "../ledger/postInvoice";
+import {
+  postCollectionTx,
+  voidCollectionTx,
+  POSTED_STATUS,
+  type PostFailure,
+} from "../ledger/postCollection";
 
 export const billingStatementRoutes = makeCrudRoutes({
   plural: "statements",
@@ -209,6 +216,126 @@ export const collectionRoutes = makeCrudRoutes({
   updateSchema: zCollectionUpdate,
   orderBy: [{ column: collections.createdAt, dir: "desc" }],
   docNo: { field: "collectionNo", prefix: "COL", dateField: "collectionDate" },
+  // Reverse-only: a posted collection is voided (which reverses its entries),
+  // never hard-deleted out from under the receivable it relieved.
+  disableDelete: true,
+});
+
+const postErrorResponse = (error: PostFailure, detail?: string) => {
+  switch (error) {
+    case "already_posted":
+      return { body: { error, detail: detail ?? "This collection is already posted." }, status: 409 as const };
+    case "not_postable":
+      return {
+        body: { error, detail: detail ?? "Only an unposted collection can be posted." },
+        status: 409 as const,
+      };
+    case "over_application":
+      return { body: { error, detail: detail ?? "Applications exceed what is outstanding." }, status: 409 as const };
+    case "ewt_exceeds_net":
+      return { body: { error, detail: detail ?? "EWT exceeds the invoice's amount net of VAT." }, status: 409 as const };
+    case "invoice_not_issued":
+      return {
+        body: { error, detail: detail ?? "Only an issued invoice has a receivable to settle." },
+        status: 409 as const,
+      };
+    case "no_applications":
+      return {
+        body: { error, detail: detail ?? "Apply the collection to at least one invoice." },
+        status: 400 as const,
+      };
+    case "nothing_to_post":
+      return { body: { error, detail: detail ?? "Collection amount must be greater than zero." }, status: 400 as const };
+    case "accounts_unset":
+      return {
+        body: {
+          error,
+          detail: detail ?? "Set the cash account (and the CWT account when tax was withheld) before posting.",
+        },
+        status: 400 as const,
+      };
+  }
+};
+
+/**
+ * Post a collection — relieves the receivables it settles, books the cash and
+ * any creditable withholding tax, and accrues percentage tax on the non-VAT
+ * share. Every write happens in one transaction.
+ */
+collectionRoutes.post("/:id/post", requireAuth, requireWorkflowPoster, async (c) => {
+  const auth = c.get("auth");
+  const id = c.req.param("id") ?? "";
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  try {
+    const input = zCollectionPost.parse(body ?? {});
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const [collection] = await tx
+          .select()
+          .from(collections)
+          .where(and(eq(collections.orgId, auth.orgId), eq(collections.id, id)));
+        if (!collection) return { error: "not_found" as const };
+        return postCollectionTx(tx, collection, input, auth.orgId, auth.userId);
+      },
+    );
+
+    if ("error" in outcome && outcome.error === "not_found") return c.json({ error: "not_found" }, 404);
+    if ("ok" in outcome && outcome.ok) {
+      return c.json({
+        collection: outcome.collection,
+        journalEntryNo: outcome.journalEntryNo,
+        ...(outcome.percentageTaxEntryNo ? { percentageTaxEntryNo: outcome.percentageTaxEntryNo } : {}),
+        applications: outcome.applications,
+      });
+    }
+    const failed = outcome as { error: PostFailure; detail?: string };
+    const { body: b, status } = postErrorResponse(failed.error, failed.detail);
+    return c.json(b, status);
+  } catch (err) {
+    if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof AmbiguousAccountCodeError) {
+      const { body: b, status } = ambiguousAccountResponse(err);
+      return c.json(b, status);
+    }
+    reportError(c, "postCollection", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
+});
+
+/** Void a posted collection — reverses both entries and rolls the AR back. */
+collectionRoutes.post("/:id/void", requireAuth, requireWorkflowPoster, async (c) => {
+  const auth = c.get("auth");
+  const id = c.req.param("id") ?? "";
+  try {
+    const outcome = await withOrgContext(
+      { userId: auth.userId, orgId: auth.orgId, role: auth.role },
+      async (tx) => {
+        const [collection] = await tx
+          .select()
+          .from(collections)
+          .where(and(eq(collections.orgId, auth.orgId), eq(collections.id, id)));
+        if (!collection) return { error: "not_found" as const };
+        return voidCollectionTx(tx, collection, auth.orgId, auth.userId);
+      },
+    );
+    if ("error" in outcome) {
+      if (outcome.error === "not_found") return c.json({ error: "not_found" }, 404);
+      if (outcome.error === "already_voided") {
+        return c.json({ error: "already_voided", detail: "This collection is already voided." }, 409);
+      }
+      return c.json({ error: "not_posted", detail: "This collection is not posted yet." }, 400);
+    }
+    return c.json(outcome);
+  } catch (err) {
+    reportError(c, "voidCollection", err);
+    return c.json({ error: "internal_error" }, 500);
+  }
 });
 
 export const paymentScheduleRoutes = makeCrudRoutes({
@@ -230,4 +357,4 @@ export const schedulePaymentRoutes = makeCrudRoutes({
   orderBy: [{ column: schedulePayments.createdAt, dir: "desc" }],
 });
 
-export { ISSUED_STATUS };
+export { ISSUED_STATUS, POSTED_STATUS };

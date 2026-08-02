@@ -631,6 +631,10 @@ export const collections = pgTable(
     amountReceivedCents: bigint("amount_received_cents", { mode: "number" })
       .notNull()
       .default(0),
+    /** EWT withheld by the payor, taken from their BIR 2307 — captured, never derived. */
+    ewtCents: bigint("ewt_cents", { mode: "number" }).notNull().default(0),
+    /** GENERATED: amountReceived + ewt. The exact credit to the receivable. */
+    arReliefCents: bigint("ar_relief_cents", { mode: "number" }),
     appliedCents: bigint("applied_cents", { mode: "number" }).notNull().default(0),
     unappliedCents: bigint("unapplied_cents", { mode: "number" }),
     method: text("method").notNull().default("Cash"),
@@ -639,6 +643,16 @@ export const collections = pgTable(
     siId: text("si_id"),
     notes: text("notes"),
     status: text("status").notNull().default("Unposted"),
+    cashAccountCode: text("cash_account_code"),
+    cwtAccountCode: text("cwt_account_code"),
+    arAccountCode: text("ar_account_code"),
+    bookingJournalEntryId: uuid("booking_journal_entry_id"),
+    bookedAt: timestamp("booked_at", { withTimezone: true }),
+    bookingMode: text("booking_mode"),
+    /** Sec. 116 accrual — a separate entry, so cash and tax reverse independently. */
+    percentageTaxCents: bigint("percentage_tax_cents", { mode: "number" }).notNull().default(0),
+    percentageTaxRate: numeric("percentage_tax_rate", { precision: 9, scale: 4 }).notNull().default("0"),
+    percentageTaxJournalEntryId: uuid("percentage_tax_journal_entry_id"),
     postedBy: text("posted_by"),
     postedAt: timestamp("posted_at", { withTimezone: true, mode: "string" }),
     createdBy: text("created_by").references(() => appUsers.id),
@@ -647,6 +661,38 @@ export const collections = pgTable(
   (t) => [
     unique("collections_org_collection_no_key").on(t.orgId, t.collectionNo),
     index("collections_org_date_idx").on(t.orgId, t.collectionDate),
+  ],
+);
+
+/**
+ * Which invoices a collection settles. Replaces `collections.si_id`, a soft
+ * link to a single invoice — real collections settle several at once, and AR
+ * aging needs invoice-level balances to be trustworthy.
+ */
+export const collectionApplications = pgTable(
+  "collection_applications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => collections.id, { onDelete: "cascade" }),
+    invoiceId: uuid("invoice_id")
+      .notNull()
+      .references(() => serviceInvoices.id),
+    appliedCents: bigint("applied_cents", { mode: "number" }).notNull().default(0),
+    ewtCents: bigint("ewt_cents", { mode: "number" }).notNull().default(0),
+    /** GENERATED: applied + ewt — what this application relieves from AR. */
+    reliefCents: bigint("relief_cents", { mode: "number" }),
+    createdBy: text("created_by").references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("collection_applications_collection_id_invoice_id_key").on(t.collectionId, t.invoiceId),
+    index("collection_applications_org_invoice_idx").on(t.orgId, t.invoiceId),
+    index("collection_applications_org_collection_idx").on(t.orgId, t.collectionId),
   ],
 );
 

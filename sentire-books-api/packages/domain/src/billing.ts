@@ -159,15 +159,42 @@ export const zServiceInvoiceIssue = z.object({
 });
 export type ServiceInvoiceIssue = z.infer<typeof zServiceInvoiceIssue>;
 
+/** One invoice a collection settles. */
+export const zCollectionApplication = z.object({
+  invoiceId: z.string().uuid(),
+  appliedCents: z.number().int().nonnegative(),
+  ewtCents: z.number().int().nonnegative().default(0),
+});
+export type CollectionApplication = z.infer<typeof zCollectionApplication>;
+
+/**
+ * Post a collection to the ledger. The applications must account for exactly
+ * what the collection relieves — cash to `appliedCents`, the 2307 amount to
+ * `ewtCents` — so the journal entry and the sub-ledger cannot disagree.
+ */
+export const zCollectionPost = z.object({
+  date: isoDate.optional(), // defaults to the collection date
+  cashAccountCode: nullableTrimmed(40),
+  cwtAccountCode: nullableTrimmed(40),
+  arAccountCode: nullableTrimmed(40),
+  applications: z.array(zCollectionApplication).min(1, "Apply the collection to at least one invoice"),
+});
+export type CollectionPost = z.infer<typeof zCollectionPost>;
+
 export const zCollectionInput = z.object({
   collectionNo: z.string().trim().max(40).optional(), // server-assigned when absent
   contactId: uuidOrNull,
   contactName: z.string().trim().min(1, "Client is required").max(200),
   collectionDate: isoDate,
-  amountReceivedCents: z.number().int().default(0),
+  amountReceivedCents: z.number().int().nonnegative().default(0),
+  /** From the payor's BIR 2307 — captured, never derived. Base is net of VAT. */
+  ewtCents: z.number().int().nonnegative().default(0),
   appliedCents: z.number().int().default(0),
   method: z.string().trim().max(40).default("Cash"),
   referenceNo: nullableTrimmed(120),
+  cashAccountCode: nullableTrimmed(40),
+  cwtAccountCode: nullableTrimmed(40),
+  arAccountCode: nullableTrimmed(40),
   billingStatementId: nullableTrimmed(80),
   siId: nullableTrimmed(80),
   notes: nullableTrimmed(2000),
