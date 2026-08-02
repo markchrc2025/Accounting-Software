@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { taxRatesApi, taxGroupsApi, listVouchers, getVoucher, listAccounts, ApiError } from '../../../lib/api.js';
+import { taxRatesApi, taxGroupsApi, getTaxRegistry, listAccounts, ApiError } from '../../../lib/api.js';
 import AccountCombobox from '../../../components/AccountCombobox.jsx';
 
 const VTYPE_LABEL = { payment:'PAYMENT', receipt:'RECEIPT', payroll:'PAYROLL', final_pay:'FINAL_PAY', loan:'LOAN', check:'CHECK' };
@@ -53,7 +53,7 @@ const CSS = `
 
 export default function TaxPage() {
   const [tab, setTab]             = useState('entries');
-  const [vouchers, setVouchers]   = useState([]);
+  const [registry, setRegistry]   = useState(null);
   const [rates, setRates]         = useState([]);
   const [groups, setGroups]       = useState([]);
   const [accounts, setAccounts]   = useState([]);
@@ -74,72 +74,37 @@ export default function TaxPage() {
   const loadGroups = useCallback(() => taxGroupsApi.list().then(setGroups).catch(()=>{}), []);
   useEffect(() => {
     loadRates(); loadGroups();
-    // Tax entries derive from PAYMENT/CHECK voucher lines; lines live
-    // server-side now, so hydrate the 50 most recent such vouchers.
+    // One request covers every period and both sides of the VAT position.
+    //
+    // This used to fetch 500 vouchers, keep only the 50 most recent
+    // Payment/Check ones, and then issue one getVoucher() per voucher to
+    // hydrate its lines — so the page silently omitted older periods from a
+    // TAX report and cost up to 50 sequential round trips to render.
     (async () => {
       try {
-        const rows = await listVouchers({ limit: 500 });
-        const mapped = rows.map(v => {
-          const m = v.meta || {};
-          return {
-            id: v.id, voucherId: v.voucherNo,
-            voucherType: VTYPE_LABEL[v.voucherType] || 'PAYMENT',
-            status: VSTAT_LABEL[v.status] || v.status,
-            preparationDate: v.voucherDate || '',
-            contactSummary: m.contactSummary || v.contactName || '',
-            purposeCategory: v.purposeCategory || '',
-            lines: [],
-          };
-        });
-        setVouchers(mapped);
-        const targets = mapped.filter(v => ['PAYMENT','CHECK'].includes(v.voucherType)).slice(0, 50);
-        for (const v of targets) {
-          try {
-            const d = await getVoucher(v.id);
-            const lines = (d.lines || []).map(l => {
-              const lm = l.meta || {};
-              return {
-                lineNo: l.lineNo, contact: lm.contact || '', description: l.description || '',
-                amount: (l.amountCents ?? 0) / 100,
-                taxRateId: lm.taxRateId || '', taxType: lm.taxType || '',
-                taxRate: lm.taxRate || 0, taxAmt: lm.taxAmt || 0, inclusive: !!lm.inclusive,
-              };
-            });
-            setVouchers(cur => cur.map(x => x.id === v.id ? { ...x, lines } : x));
-          } catch { /* skip */ }
-        }
-      } catch { /* offline */ }
+        setRegistry(await getTaxRegistry());
+      } catch { /* offline — the registry tabs still work */ }
     })();
     listAccounts().then(rows => setAccounts(rows.map(a => ({ ...a, subType: a.subtype || '' })))).catch(()=>{});
   }, []);
 
-  // Derive tax lines from all Payment/Check vouchers that have taxAmt > 0
-  const taxLines = useMemo(() => {
-    const rows = [];
-    vouchers.forEach(v => {
-      if (!['PAYMENT','CHECK'].includes(v.voucherType)) return;
-      (v.lines || []).forEach(l => {
-        if (!(l.taxAmt > 0)) return;
-        const dateStr = v.preparationDate || '';
-        rows.push({
-          key:         `${v.id}-${l.lineNo}`,
-          date:        dateStr,
-          period:      dateStr.slice(0, 7),
-          voucherId:   v.voucherId || '',
-          source:      v.voucherType === 'CHECK' ? 'Check Voucher' : 'Payment Voucher',
-          payee:       l.contact || v.contactSummary || '',
-          description: l.description || v.purposeCategory || '',
-          taxName:     l.taxType || '',
-          taxRate:     l.taxRate || 0,
-          grossAmount: l.amount  || 0,
-          taxAmount:   l.taxAmt  || 0,
-          inclusive:   !!l.inclusive,
-          status:      v.status  || '',
-        });
-      });
-    });
-    return rows.sort((a, b) => b.date.localeCompare(a.date));
-  }, [vouchers]);
+  // The server returns centavos; this screen renders pesos.
+  const taxLines = useMemo(() => (registry?.lines || []).map(l => ({
+    key:         l.key,
+    side:        l.side,
+    date:        l.date,
+    period:      l.period,
+    voucherId:   l.documentNo,
+    source:      l.source,
+    payee:       l.counterparty,
+    description: l.description,
+    taxName:     l.taxName,
+    taxRate:     l.taxRate,
+    grossAmount: (l.grossCents ?? 0) / 100,
+    taxAmount:   (l.taxCents ?? 0) / 100,
+    inclusive:   !!l.inclusive,
+    status:      VSTAT_LABEL[l.status] || l.status,
+  })), [registry]);
 
   async function saveRate() {
     if (!rForm.name?.trim()) return alert('Tax name is required.');
@@ -192,8 +157,10 @@ export default function TaxPage() {
     return mType && mPeriod;
   });
 
-  const totalTax   = filteredLines.reduce((s,l)=>s+(l.taxAmount||0), 0);
-  const totalGross = filteredLines.reduce((s,l)=>s+(l.grossAmount||0), 0);
+  // Both sides of the VAT position, over whatever the filter currently shows.
+  const outputTax  = filteredLines.filter(l=>l.side==='sale').reduce((s,l)=>s+(l.taxAmount||0), 0);
+  const inputTax   = filteredLines.filter(l=>l.side==='purchase').reduce((s,l)=>s+(l.taxAmount||0), 0);
+  const netVat     = outputTax - inputTax;
 
   return (
     <div className="tp-wrap">
@@ -214,11 +181,24 @@ export default function TaxPage() {
         </div>
 
         {tab === 'entries' && <>
-          <div className="summary-bar">
-            <div className="scard"><div className="scard-label">Total Tax Lines</div><div className="scard-value">{filteredLines.length}</div></div>
-            <div className="scard"><div className="scard-label">Total Gross Amount</div><div className="scard-value" style={{color:'#64748b',fontSize:16}}>{fmt(totalGross)}</div></div>
-            <div className="scard"><div className="scard-label">Total Tax Amount</div><div className="scard-value" style={{color:'#dc2626',fontSize:16}}>{fmt(totalTax)}</div></div>
+          {/* The VAT position, both sides. Output tax only exists now that
+              issuing an invoice posts it (M2.1) — before that this screen could
+              only ever show input tax from disbursements, which is half a
+              position. Figures follow the current filter. */}
+          <div className="summary-bar" style={{ gridTemplateColumns:'repeat(4,1fr)' }}>
+            <div className="scard"><div className="scard-label">Output VAT (sales)</div><div className="scard-value" style={{color:'#dc2626',fontSize:16}}>{fmt(outputTax)}</div></div>
+            <div className="scard"><div className="scard-label">Input VAT (purchases)</div><div className="scard-value" style={{color:'#059669',fontSize:16}}>{fmt(inputTax)}</div></div>
+            <div className="scard">
+              <div className="scard-label">{netVat >= 0 ? 'Net VAT Payable' : 'Input VAT Credit'}</div>
+              <div className="scard-value" style={{color:netVat>=0?'#dc2626':'#059669',fontSize:16}}>{fmt(Math.abs(netVat))}</div>
+            </div>
+            <div className="scard"><div className="scard-label">Tax Lines</div><div className="scard-value">{filteredLines.length}</div></div>
           </div>
+          {registry && !registry.complete && (
+            <p className="hint" style={{ marginBottom:12 }}>
+              Showing {registry.from || 'the beginning'} to {registry.to || 'today'}. Clear the date range to cover every period.
+            </p>
+          )}
           <div className="toolbar">
             <select className="input" value={filter} onChange={e=>setFilter(e.target.value)}>
               <option value="All">All Tax Types</option>
@@ -230,8 +210,8 @@ export default function TaxPage() {
           <div className="card">
             {filteredLines.length===0 ? (
               <div className="empty">
-                {vouchers.length===0
-                  ? 'No vouchers yet. Tax entries will appear here once Payment or Check Vouchers with a tax rate are created.'
+                {taxLines.length===0
+                  ? 'No tax entries yet. They appear here once a Payment or Check Voucher carries a tax rate, or a VATable invoice is issued.'
                   : 'No tax lines match the current filter.'}
               </div>
             ) : (
