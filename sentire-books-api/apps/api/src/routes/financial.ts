@@ -33,7 +33,6 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { ZodError } from "zod";
 import {
   withOrgContext,
-  accounts,
   loans,
   loanPayments,
   checkRegistry,
@@ -49,6 +48,11 @@ import {
 import { makeCrudRoutes, nextDocNo } from "./crudFactory";
 import { requireAuth, requireWorkflowPoster } from "../auth";
 import { postJournalEntryCore, reverseJournalEntryCore } from "../ledger/postJournalEntry";
+import {
+  resolveAccountCodes,
+  AmbiguousAccountCodeError,
+  ambiguousAccountResponse,
+} from "../ledger/resolveAccounts";
 import { createVoucherDraftCore } from "../ledger/voucherWorkflow";
 import { nextCheckNo } from "./checks";
 import { reportError } from "../observability";
@@ -85,17 +89,13 @@ type BookResult =
 async function bookLoanTx(tx: Tx, loan: typeof loans.$inferSelect, input: BookInput, orgId: string, userId: string): Promise<BookResult> {
   if (loan.bookingJournalEntryId) return { ok: false, error: "already_booked" };
 
-  const codes = [
+  // Fail-closed: a duplicated code throws rather than silently picking one.
+  const byCode = await resolveAccountCodes(tx, orgId, [
     loan.liabilityAccountCode,
     loan.financeCostAccountCode,
     loan.cashAccountCode,
     input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT,
-  ].filter((x): x is string => !!x);
-  const accs = codes.length
-    ? await tx.select({ id: accounts.id, code: accounts.code }).from(accounts)
-        .where(and(eq(accounts.orgId, orgId), inArray(accounts.code, codes)))
-    : [];
-  const byCode = new Map(accs.map((a) => [a.code, a.id]));
+  ]);
 
   const principal = loan.principalCents;
   const fee = loan.processingFeeCents ?? 0;
@@ -176,6 +176,10 @@ loanRoutes.post("/register", requireAuth, requireWorkflowPoster, async (c) => {
     return c.json(outcome, 201);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof AmbiguousAccountCodeError) {
+      const { body: b, status } = ambiguousAccountResponse(err);
+      return c.json(b, status);
+    }
     if (err instanceof LoanBookError && err.code !== "already_booked") {
       const { body: b, status } = bookErrorResponse(err.code);
       return c.json(b, status);
@@ -208,6 +212,10 @@ loanRoutes.post("/:id/book", requireAuth, requireWorkflowPoster, async (c) => {
     return c.json(b, status);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof AmbiguousAccountCodeError) {
+      const { body: b, status } = ambiguousAccountResponse(err);
+      return c.json(b, status);
+    }
     reportError(c, "bookLoan", err);
     return c.json({ error: "internal_error" }, 500);
   }
@@ -305,10 +313,7 @@ loanRoutes.post("/:id/pay", requireAuth, requireWorkflowPoster, async (c) => {
           return { error: "accounts_unset" as const };
         }
 
-        const codes = [liabilityCode, cashCode, ...(financeCode ? [financeCode] : [])];
-        const accs = await tx.select({ id: accounts.id, code: accounts.code }).from(accounts)
-          .where(and(eq(accounts.orgId, auth.orgId), inArray(accounts.code, codes)));
-        const byCode = new Map(accs.map((a) => [a.code, a.id]));
+        const byCode = await resolveAccountCodes(tx, auth.orgId, [liabilityCode, cashCode, financeCode]);
         const liabilityId = byCode.get(liabilityCode);
         const cashId = byCode.get(cashCode);
         const financeId = financeCode ? byCode.get(financeCode) : undefined;
@@ -406,6 +411,10 @@ loanRoutes.post("/:id/pay", requireAuth, requireWorkflowPoster, async (c) => {
     return c.json(outcome, 201);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof AmbiguousAccountCodeError) {
+      const { body: b, status } = ambiguousAccountResponse(err);
+      return c.json(b, status);
+    }
     reportError(c, "payLoan", err);
     return c.json({ error: "internal_error" }, 500);
   }
@@ -546,18 +555,14 @@ async function bookAssetTx(tx: Tx, asset: typeof fixedAssets.$inferSelect, input
   const cost = asset.costCents;
   if (cost <= 0) return { ok: false, error: "nothing_to_book" };
 
-  const codes = [
+  // Fail-closed: a duplicated code throws rather than silently picking one.
+  const byCode = await resolveAccountCodes(tx, orgId, [
     asset.fixedAssetAccount,
     asset.cashAccountCode,
     asset.accumDeprecAccount,
     asset.installmentPayableAccount,
     input.openingEquityAccountCode ?? OPENING_EQUITY_DEFAULT,
-  ].filter((x): x is string => !!x);
-  const accs = codes.length
-    ? await tx.select({ id: accounts.id, code: accounts.code }).from(accounts)
-        .where(and(eq(accounts.orgId, orgId), inArray(accounts.code, codes)))
-    : [];
-  const byCode = new Map(accs.map((a) => [a.code, a.id]));
+  ]);
   const assetId = asset.fixedAssetAccount ? byCode.get(asset.fixedAssetAccount) : undefined;
   if (!assetId) return { ok: false, error: "accounts_unset" };
   const cashId = asset.cashAccountCode ? byCode.get(asset.cashAccountCode) : undefined;
@@ -643,6 +648,10 @@ fixedAssetRoutes.post("/register", requireAuth, requireWorkflowPoster, async (c)
     return c.json(outcome, 201);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof AmbiguousAccountCodeError) {
+      const { body: b, status } = ambiguousAccountResponse(err);
+      return c.json(b, status);
+    }
     if (err instanceof AssetBookError && err.code !== "already_booked") {
       const { body: b, status } = assetBookErrorResponse(err.code);
       return c.json(b, status);
@@ -678,6 +687,10 @@ fixedAssetRoutes.post("/:id/book", requireAuth, requireWorkflowPoster, async (c)
     return c.json(b, status);
   } catch (err) {
     if (err instanceof ZodError) return c.json({ error: "validation_error", issues: err.issues }, 400);
+    if (err instanceof AmbiguousAccountCodeError) {
+      const { body: b, status } = ambiguousAccountResponse(err);
+      return c.json(b, status);
+    }
     reportError(c, "bookAsset", err);
     return c.json({ error: "internal_error" }, 500);
   }

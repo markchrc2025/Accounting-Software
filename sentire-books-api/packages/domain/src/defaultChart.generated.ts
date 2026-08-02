@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 // GENERATED — do not edit by hand. Regenerate with setup/generate_coa_sql.py.
 // The default Chart of Accounts the software provisions for every organization.
-// 158 accounts. `code` is a display label (it repeats across types);
+// 160 accounts. `code` is a display label (it repeats across types);
 // the unique key is `name`. Parents are referenced by `parentName`.
 // ════════════════════════════════════════════════════════════════════════════
 import type { ChartAccount } from "./accounts";
@@ -147,9 +147,9 @@ export const DEFAULT_CHART_OF_ACCOUNTS: readonly ChartAccount[] = [
   { code: "2003001", name: "Deferred Tax Liability", type: "liability", normalBalance: "credit", subtype: "Tax Liability" },
   { code: "2003002", name: "Income Tax Payable", type: "liability", normalBalance: "credit", subtype: "Tax Liability" },
   { code: "2003003", name: "Output Tax", type: "liability", normalBalance: "credit", subtype: "Tax Liability", description: "The amount of money charged as Tax on your sales." },
-  { code: "2004001", name: "Salaries and Wages Payable", type: "liability", normalBalance: "credit", subtype: "Other Current Liability" },
-  { code: "2004002", name: "Final Pay Payable Deployed", type: "liability", normalBalance: "credit", subtype: "Other Current Liability" },
-  { code: "2004003", name: "Final Pay Payable", type: "liability", normalBalance: "credit", subtype: "Other Current Liability" },
+  { code: "2005001", name: "Salaries and Wages Payable", type: "liability", normalBalance: "credit", subtype: "Other Current Liability" },
+  { code: "2005002", name: "Final Pay Payable Deployed", type: "liability", normalBalance: "credit", subtype: "Other Current Liability" },
+  { code: "2005003", name: "Final Pay Payable", type: "liability", normalBalance: "credit", subtype: "Other Current Liability" },
   { code: "2008001", name: "SSS EmployER Contribution", type: "liability", normalBalance: "credit", subtype: "Other Current Liability", parentName: "Social Agency Contribution Payable" },
   { code: "2008002", name: "HDMF EmployER Contribution", type: "liability", normalBalance: "credit", subtype: "Other Current Liability", parentName: "Social Agency Contribution Payable" },
   { code: "2008003", name: "PHIC EmployER Contribution", type: "liability", normalBalance: "credit", subtype: "Other Current Liability", parentName: "Social Agency Contribution Payable" },
@@ -165,4 +165,6 @@ export const DEFAULT_CHART_OF_ACCOUNTS: readonly ChartAccount[] = [
   { code: "2600001", name: "Unearned Revenue", type: "liability", normalBalance: "credit", subtype: "Other Current Liability", description: "A liability account that reports amounts received in advance of providing goods or services. When the goods or services are provided, this account balance is decreased and a revenue account is increased." },
   { code: "2700001", name: "Opening Balance Adjustments", type: "liability", normalBalance: "credit", subtype: "Other Current Liability", description: "This account will hold the difference in the debits and credits entered during the opening balance." },
   { code: "2800001", name: "Post-Dated Checks Issued", type: "liability", normalBalance: "credit", subtype: "Other Current Liability" },
+  { code: "1009002", name: "Creditable Withholding Tax", type: "asset", normalBalance: "debit", subtype: "Tax Asset", description: "Expanded withholding tax withheld by clients on our income payments (BIR Form 2307), creditable against income tax due." },
+  { code: "2003004", name: "Percentage Tax Payable", type: "liability", normalBalance: "credit", subtype: "Tax Liability", description: "Percentage tax due under Sec. 116 for non-VAT registered taxpayers." },
 ];

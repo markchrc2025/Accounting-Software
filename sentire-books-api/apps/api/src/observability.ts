@@ -13,6 +13,7 @@ import * as Sentry from "@sentry/node";
 import type { Context, Next } from "hono";
 import { randomUUID } from "node:crypto";
 import { requestLogger, serializeError, scrubSecrets, type LogContext } from "./logger";
+import { scrubEventPii, scrubBreadcrumb } from "./pii";
 
 let enabled = false;
 
@@ -25,17 +26,26 @@ export function initErrorTracking(): void {
     environment: process.env.NODE_ENV ?? "development",
     release: process.env.SENTRY_RELEASE,
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0),
-    // Last line of defence: scrub anything secret-shaped before it leaves.
+    // Never let the SDK attach IPs, cookies or request bodies of its own accord.
+    sendDefaultPii: false,
+    /**
+     * Two passes before anything leaves the process:
+     *   1. scrubSecrets — connection strings, JWTs, bearer tokens.
+     *   2. scrubEventPii — emails, TINs, phones, PII-keyed values, request
+     *      bodies, and identifying user fields.
+     * Sentry is a DPA sub-processor; tenant personal data must not reach it.
+     */
     beforeSend(event) {
       if (event.message) event.message = scrubSecrets(event.message);
       for (const ex of event.exception?.values ?? []) {
         if (ex.value) ex.value = scrubSecrets(ex.value);
       }
-      if (event.request?.headers) {
-        delete event.request.headers.authorization;
-        delete event.request.headers.cookie;
-      }
-      return event;
+      return scrubEventPii(event as never) as typeof event;
+    },
+    /** Breadcrumbs are the easiest PII leak to miss — console output and every
+     *  fetch URL are captured by default. */
+    beforeBreadcrumb(breadcrumb) {
+      return scrubBreadcrumb(breadcrumb as never) as typeof breadcrumb | null;
     },
   });
   enabled = true;

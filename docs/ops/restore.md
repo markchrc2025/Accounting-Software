@@ -11,17 +11,23 @@
 
 ## 1. Recovery objectives
 
-These are **targets tied to the current backup design** (daily dump at 02:00 UTC,
-M1.1). They are not aspirational — each is what the mechanism actually delivers.
+These are **targets tied to the current backup design** (hourly dump, on the
+hour — M1.1). They are not aspirational — each is what the mechanism actually
+delivers.
 
 | Objective | Target | What it means |
 |---|---|---|
-| **RPO** — max acceptable data loss | **24 hours** | Backups run daily. A total loss of the database at 01:59 UTC loses everything posted since 02:00 the previous day. |
+| **RPO** — max acceptable data loss | **1 hour** | Backups run hourly. A total loss of the database at 10:59 loses everything posted since 10:00. |
 | **RTO** — max acceptable downtime | **4 hours** | From "database is gone" to "API serving on a verified restore", including provisioning a new instance and a human noticing. |
 
-**Measured restore time** on the current dataset (158 accounts, single-digit
-entries): **under 1 second**. That is the RTO *floor* — the arithmetic below is
-what fills the rest of the 4 hours.
+**Measured baseline** (in-repo drill, 158 accounts + 200 posted entries / 400
+lines, 168 KB archive): **restore 1 s, whole drill 1.28 s wall-clock** including
+checksum verification and all nine invariant checks. That is the RTO *floor* —
+the arithmetic below is what fills the rest of the 4 hours.
+
+> This baseline is against a **synthetic** dataset. A timed drill against real
+> production data repeats closer to launch (see §3) — restore time scales with
+> data volume, and the figure above will move once real tenants are posting.
 
 ```
   detection + decision       ~30 min   ← the real variable; shrink it with M1.4 alerting
@@ -34,25 +40,22 @@ what fills the rest of the 4 hours.
   realistic total            ~1.5 h    (4 h target leaves genuine headroom)
 ```
 
-### Is a 24-hour RPO acceptable?
+### Is a 1-hour RPO acceptable?
 
-For a bookkeeping platform holding other businesses' records, **losing a day of
-posted entries is a serious event** — re-keying a day of vouchers is expensive
-and error-prone. 24 h is an honest description of what daily dumps give you, not
-an endorsement.
+Yes, for now. Losing up to an hour of posted entries is recoverable by re-keying
+from source documents; losing a day would not have been. This was a deliberate
+decision to move off the 24-hour figure daily dumps would have given.
 
-To do better, the options in ascending order of effort:
+The remaining step, when it is warranted:
 
 | Option | RPO | Cost |
 |---|---|---|
-| Dump **twice daily** (02:00 + 14:00) | 12 h | one cron line |
-| Dump **hourly** | 1 h | cheap at this data size (~144 KB/dump) |
-| **WAL archiving** / continuous archiving | **minutes** | real setup: archive command, storage, and a restore path that replays WAL |
+| Hourly dumps **(current)** | **1 h** | one cron line; ~144 KB per archive |
+| **WAL archiving** / continuous archiving | **minutes** | real setup: an archive command, storage for the WAL stream, and a restore path that replays it |
 
-**Recommendation:** move to **hourly dumps** now (it is one line and the archives
-are tiny), and treat WAL archiving as the Milestone 6 item it really is. Revisit
-the moment a real tenant is on the system — at that point 24 h stops being
-defensible.
+**WAL archiving is the Milestone 6 item.** Revisit it when transaction volume
+makes an hour of re-keying expensive — with a handful of tenants posting a few
+vouchers a day, hourly is proportionate.
 
 ---
 
@@ -91,10 +94,15 @@ aborts the drill.
 
 ---
 
-## 3. Perform the drill *(you — do this once, now)*
+## 3. Perform the drill *(you — against production data, closer to launch)*
 
-Run against a **real production backup**. Restore to a scratch database — the
-script refuses names that look live and will not touch `sentire_books`.
+The scripts are **already validated end to end** against a synthetic dataset (see
+the baseline above), so what remains is a timed run against **real production
+data** — that is what makes the RTO number trustworthy. Do it once the first real
+tenant's data is in, and re-run quarterly.
+
+Restore to a scratch database — the script refuses names that look live and will
+not touch `sentire_books`.
 
 ```bash
 # 1. Fetch the most recent backup and its checksum
@@ -129,10 +137,10 @@ usable until it passes.
 Add a line to the table below after each drill. A backup you have never restored
 is a rumour; a drill you never recorded is one too.
 
-| Date | Archive | Restore time | Invariants | By |
+| Date | Dataset | Restore time | Invariants | By |
 |---|---|---|---|---|
-| _(pending — first production drill)_ | | | | |
-| 2026-08-01 | synthetic test dataset | <1 s | ✅ 9/9 | automated, in-repo |
+| 2026-08-01 | synthetic — 158 accounts, 200 entries / 400 lines, 168 KB | 1 s (1.28 s incl. verification) | ✅ 9/9 | in-repo drill (M1 closeout) |
+| _(pending)_ | **production data — repeat closer to launch** | | | |
 
 **Re-run the drill quarterly, and after any Postgres major-version upgrade.**
 

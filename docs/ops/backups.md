@@ -43,6 +43,8 @@ for this volume (the whole database compresses to a few hundred KB today).
    backup overwriting a good one.
 3. Add a **lifecycle rule**: expire objects older than **30 days**. That is the
    remote half of retention (the script prunes only its local staging copies).
+   At hourly cadence that is ~720 objects / ~100 MB — small enough that tiering
+   (keep hourly for 7 days, then one per day) is an optimisation, not a need.
 
 ## Step 2 — Issue scoped credentials *(you)*
 
@@ -78,12 +80,14 @@ that path instead — the script handles both.
 
 ## Step 4 — Schedule it *(you)*
 
-**Daily at 02:00 UTC** is a reasonable default (see RPO below).
+**Hourly, on the hour** — the confirmed RPO target is **1 hour**. Each archive is
+~144 KB compressed, so 30 days of hourly dumps is roughly 100 MB: the cost of
+going from a 24-hour to a 1-hour RPO is negligible.
 
 **Option A — host cron** (simplest if you have shell access):
 
 ```cron
-0 2 * * * set -a; . /opt/sentire-books/sentire-books-api/setup/ops/backup.env; set +a; \
+0 * * * * set -a; . /opt/sentire-books/sentire-books-api/setup/ops/backup.env; set +a; \
           /opt/sentire-books/sentire-books-api/setup/ops/backup.sh \
           >> /var/log/sentire-books-backup.log 2>&1 || \
           echo "Sentire Books backup FAILED" | mail -s "backup failed" you@example.com
